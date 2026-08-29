@@ -1621,6 +1621,93 @@ async def cmd_forward(args: argparse.Namespace) -> None:
         await client.disconnect()
 
 
+async def cmd_copy(args: argparse.Namespace) -> None:
+    """Копия без подписи «переслано» — то, что Bot API зовёт copyMessage.
+
+    Тот же метод, что и пересылка, но с `drop_author`: получатель не видит,
+    откуда сообщение, и оно не тянет за собой ссылку на источник.
+    """
+    from telethon import helpers
+
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        source = await resolve_peer(client, args.peer)
+        target = await resolve_peer(client, args.to)
+        result = await client(functions.messages.ForwardMessagesRequest(
+            from_peer=source, to_peer=target, id=list(args.id),
+            random_id=[helpers.generate_random_long() for _ in args.id],
+            drop_author=True,
+            drop_media_captions=args.drop_captions or None,
+            top_msg_id=args.topic,
+            video_timestamp=int(args.start_at) if args.start_at is not None else None,
+            silent=args.silent or None))
+        sent = [getattr(u, "id", None) for u in getattr(result, "updates", None) or []
+                if getattr(u, "id", None)]
+        render.emit({"ok": True, "copied": len(args.id), "to": entity_title(target),
+                     "message_ids": sent[:len(args.id)]})
+    finally:
+        await client.disconnect()
+
+
+async def cmd_boosts(args: argparse.Namespace) -> None:
+    """Бусты канала: сколько их, кто дал и сколько своих осталось."""
+    client = await make_client()
+    try:
+        await ensure_login(client)
+
+        if args.boostcmd == "mine":
+            result = await client(functions.premium.GetMyBoostsRequest())
+            rows = []
+            for slot in getattr(result, "my_boosts", None) or []:
+                peer = getattr(slot, "peer", None)
+                where = "свободен"
+                if peer is not None:
+                    # Один недоступный канал не должен ронять весь список.
+                    try:
+                        where = entity_title(await client.get_entity(peer))
+                    except Exception:
+                        where = f"канал {getattr(peer, 'channel_id', '?')} (нет доступа)"
+                rows.append({"слот": slot.slot, "занят": where,
+                             "до": str(getattr(slot, "expires", "") or "")[:10]})
+            print_jsonl(rows) if args.jsonl else print_table(rows, ["слот", "занят", "до"],
+                                                             title="мои бусты")
+            return
+
+        peer = await resolve_peer(client, args.chat)
+
+        if args.boostcmd == "status":
+            status = await client(functions.premium.GetBoostsStatusRequest(peer=peer))
+            render.emit({
+                "level": getattr(status, "level", 0),
+                "boosts": getattr(status, "boosts", 0),
+                "до следующего уровня": getattr(status, "next_level_boosts", None),
+                "мои бусты": getattr(status, "my_boost", False),
+                "ссылка": getattr(status, "boost_url", None),
+            }, title=entity_title(peer))
+            return
+
+        if args.boostcmd == "who":
+            result = await client(functions.premium.GetBoostsListRequest(
+                peer=peer, offset="", limit=args.limit))
+            names = {u.id: (u.username or entity_title(u)) for u in result.users}
+            rows = [{"кто": names.get(getattr(b, "user_id", None), "—"),
+                     "бустов": getattr(b, "multiplier", 1) or 1,
+                     "до": str(getattr(b, "expires", "") or "")[:10]}
+                    for b in getattr(result, "boosts", None) or []]
+            print_jsonl(rows) if args.jsonl else print_table(rows, ["кто", "бустов", "до"],
+                                                             title="кто бустил")
+            return
+
+        if args.boostcmd == "give":
+            slots = [int(s) for s in (args.slot or [])] or None
+            await client(functions.premium.ApplyBoostRequest(peer=peer, slots=slots))
+            render.emit({"ok": True, "boosted": entity_title(peer), "slots": slots or "свободные"})
+            return
+    finally:
+        await client.disconnect()
+
+
 async def cmd_delete(args: argparse.Namespace) -> None:
     client = await make_client()
     try:
@@ -2079,7 +2166,7 @@ async def cmd_banner(args: argparse.Namespace) -> None:
 GROUPS = [
     ("интерфейс", ["ui", "banner"]),
     ("боты и статьи", ["bot", "article", "business"]),
-    ("форумы", ["forum", "guard", "poll"]),
+    ("форумы", ["forum", "guard", "poll", "boosts"]),
     ("голос", ["transcribe"]),
     ("аккаунт", ["auth", "me", "profile", "profile-get", "profile-edit", "profile-photo-set", "profile-photos", "profile-photo-delete"]),
     ("чаты и папки", ["dialogs", "folders", "folder-upsert"]),
@@ -2912,6 +2999,31 @@ def build_parser() -> argparse.ArgumentParser:
     snd.add_argument("--no-preview", action="store_true", help="без превью ссылок")
     snd.add_argument("--schedule", help="отложить: ISO-время, например 2026-08-29T10:00")
     snd.set_defaults(func=cmd_send)
+
+    cp = sub.add_parser("copy", help="скопировать сообщения без подписи «переслано»")
+    cp.add_argument("peer", help="откуда")
+    cp.add_argument("to", help="куда")
+    cp.add_argument("id", nargs="+", type=int)
+    cp.add_argument("--drop-captions", action="store_true", help="без подписей к вложениям")
+    cp.add_argument("--topic", type=int, help="id темы форума в получателе")
+    cp.add_argument("--start-at", type=float, metavar="СЕК", help="сдвинуть точку старта видео")
+    cp.add_argument("--silent", action="store_true")
+    cp.set_defaults(func=cmd_copy)
+
+    bs = sub.add_parser("boosts", help="бусты канала: уровень, кто дал, свои слоты")
+    bs_sub = bs.add_subparsers(dest="boostcmd", required=True)
+    bs.set_defaults(func=cmd_boosts)
+    b_st = bs_sub.add_parser("status", help="уровень канала и сколько до следующего")
+    b_st.add_argument("chat")
+    b_who = bs_sub.add_parser("who", help="кто бустил канал")
+    b_who.add_argument("chat")
+    b_who.add_argument("--limit", type=int, default=50)
+    b_who.add_argument("--jsonl", action="store_true")
+    b_my = bs_sub.add_parser("mine", help="мои слоты бустов")
+    b_my.add_argument("--jsonl", action="store_true")
+    b_gv = bs_sub.add_parser("give", help="забустить канал")
+    b_gv.add_argument("chat")
+    b_gv.add_argument("--slot", action="append", help="конкретные слоты; можно повторять")
 
     ex = sub.add_parser("export", help="export recent messages from a peer")
     ex.add_argument("peer")

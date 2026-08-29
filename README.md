@@ -126,6 +126,20 @@ tgx transcribe rate @чат 295429 3874… good
 супергруппе с бустом от `group_transcribe_level_min` они не тратятся. `status`
 показывает эти числа для вашего аккаунта, а остаток — `free_left` в ответе.
 
+## Копии и бусты
+
+```bash
+tgx copy @откуда @куда 123 124 --drop-captions --topic 2
+tgx boosts status @канал     # уровень и сколько до следующего
+tgx boosts who @канал        # кто бустил
+tgx boosts mine              # свои слоты
+tgx boosts give @канал
+```
+
+`copy` — это `copyMessage` из Bot API: тот же метод, что и пересылка, но с
+`drop_author`, поэтому получатель не видит источник и сообщение не тянет за
+собой ссылку на него.
+
 ## Обложка и точка старта видео
 
 ```bash

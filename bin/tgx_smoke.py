@@ -1090,6 +1090,34 @@ def date_entity_regression() -> None:
     check("дата подставляется в текст вместо заглушки", "29.08.2026" in rendered.plain)
 
 
+def command_surface_regression() -> None:
+    """Команды, дошедшие из журнала Bot API, должны быть на месте: разбор легко
+    сломать соседней правкой, и тогда пропадает целая ветка."""
+    import tgx
+    import tgx_autotools
+
+    leaves = {"_".join(path) for path, _, _, _ in tgx_autotools.leaves(tgx.build_parser())}
+    for wanted, why in (("poll_create", "создание опроса"), ("poll_vote", "голосование"),
+                        ("poll_results", "результаты"), ("poll_close", "закрытие"),
+                        ("copy", "копия без подписи «переслано»"),
+                        ("boosts_status", "уровень бустов"), ("boosts_mine", "свои слоты"),
+                        ("forum_topics", "темы форума"), ("guard_invite", "именные приглашения"),
+                        ("transcribe_get", "расшифровка"), ("profile_banner", "баннер в аватар")):
+        check(f"команда на месте: {why}", wanted in leaves)
+
+    parser = tgx.build_parser()
+    flags = {}
+    for path, leaf, _, _ in tgx_autotools.leaves(parser):
+        flags["_".join(path)] = {o for a in leaf._actions for o in a.option_strings}
+    check("у send есть обложка видео", "--cover" in flags.get("send", set()))
+    check("у send есть точка старта", "--start-at" in flags.get("send", set()))
+    check("у bot rich есть блоки", "--blocks" in flags.get("bot_rich", set()))
+    check("у react есть снятие чужих реакций",
+          "--remove-from" in flags.get("react", set()))
+    check("у poll create есть несколько правильных ответов",
+          "--quiz" in flags.get("poll_create", set()))
+
+
 def rich_render_regression() -> None:
     """A received rich message is an Instant-View block tree — it has to become
     readable terminal text, not a bare "unsupported media" chip."""
@@ -1359,6 +1387,7 @@ async def main() -> int:
     rich_blocks_regression()
     poll_regression()
     date_entity_regression()
+    command_surface_regression()
     await resolve_peer_regression()
     autotools_regression()
     rich_render_regression()
