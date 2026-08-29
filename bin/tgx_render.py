@@ -132,6 +132,14 @@ def fail(message: str) -> None:
               box=ROUNDED, title=_dim_title("не вышло"), title_align="left", padding=(0, 1)))
 
 
+def note(message: str) -> None:
+    """Предупреждение рядом с успехом: команда сработала, но кое-что стоит знать."""
+    if not pretty():
+        print(dumps({"note": message}), file=sys.stderr)
+        return
+    console(stderr=True).print(Text(f"  ⚠ {message}", style=PALETTE["warn"]))
+
+
 def _is_flat_result(obj: dict[str, Any]) -> bool:
     """Small dicts of scalars read better as a key/value card than as JSON."""
     if len(obj) > 8:

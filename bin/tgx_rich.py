@@ -212,6 +212,7 @@ def send_rich(
     elif html:
         rich["html"] = html
     else:
+        check_blocks(blocks or [])
         rich["blocks"] = list(blocks or [])
     if media:
         rich["media"] = list(media)
@@ -234,6 +235,12 @@ def send_rich(
         payload["reply_parameters"] = {"message_id": int(reply_to)}
     method = "sendRichMessageDraft" if draft else "sendRichMessage"
     uploads = {m["id"]: m.pop("_upload") for m in rich.get("media", []) if m.get("_upload")}
+    # Блок-документ ссылается на attach://имя — файл кладётся в ту же форму.
+    for block in rich.get("blocks", []) or []:
+        source = block.pop("_upload", None)
+        if source is not None:
+            reference = str(block.get("document", {}).get("media", ""))
+            uploads[reference.removeprefix("attach://")] = source
     if uploads:
         return call_with_files(token, method, payload, uploads)
     return call(token, method, payload)
@@ -359,6 +366,157 @@ def render_message(rich: Any, colors: dict[str, str] | None = None, width: int =
                 add(Text(indent).append_text(text))
     walk(getattr(rich, "blocks", None) or [])
     return out
+
+
+# ── блочная форма (Bot API 10.2–10.3) ───────────────────────────────────────
+# `InputRichMessage` принимает ровно одно из markdown, html или blocks. Блоки —
+# единственный способ положить кнопки и файлы ВНУТРЬ документа: markdown этого
+# не умеет, а тег <tg-button-row> живёт только в html-форме.
+BLOCK_TYPES = {
+    "paragraph", "heading", "list", "pre", "divider", "blockquote",
+    "expandable_blockquote", "table", "buttons", "document", "photo", "video",
+    "footer", "caption", "math", "details",
+}
+BUTTON_STYLES = ("danger", "success", "primary")
+MAX_BUTTONS_IN_ROW = 8
+MAX_HEADING = 6
+
+
+def as_text(value: Any) -> Any:
+    """RichText принимает и простую строку — оставляем её как есть.
+
+    Имя нарочно не `rich_text`: так называется отрисовщик полученных сообщений
+    ниже, и одноимённая функция молча его затирала.
+    """
+    return value
+
+
+def paragraph(text: Any) -> dict[str, Any]:
+    return {"type": "paragraph", "text": as_text(text)}
+
+
+def heading(text: Any, size: int = 2) -> dict[str, Any]:
+    if not 1 <= int(size) <= MAX_HEADING:
+        raise RichError(f"размер заголовка {size} вне 1–{MAX_HEADING}; 1 — самый крупный")
+    return {"type": "heading", "text": as_text(text), "size": int(size)}
+
+
+def bullet_list(items: Sequence[Any], ordered: bool = False) -> dict[str, Any]:
+    return {"type": "list", "is_ordered": bool(ordered) or None,
+            "items": [{"blocks": [paragraph(i)]} for i in items]}
+
+
+def preformatted(code: str, language: str = "") -> dict[str, Any]:
+    block = {"type": "pre", "text": code}
+    if language:
+        block["language"] = language
+    return block
+
+
+def divider() -> dict[str, Any]:
+    return {"type": "divider"}
+
+
+def quote(text: Any, *, credit: Any = None, expandable: bool = False) -> dict[str, Any]:
+    """Раскрывающаяся цитата появилась в 10.3 — для длинных врезок."""
+    block = {"type": "expandable_blockquote" if expandable else "blockquote",
+             "text": as_text(text)}
+    if credit:
+        block["credit"] = as_text(credit)
+    return block
+
+
+def table(rows: Sequence[Sequence[Any]], *, bordered: bool = False, striped: bool = False,
+          compact: bool = False, caption: Any = None) -> dict[str, Any]:
+    """`is_compact` — из 10.3: у ячеек меньше отступы."""
+    block: dict[str, Any] = {"type": "table",
+                             "cells": [[{"text": as_text(c)} for c in row] for row in rows]}
+    for flag, name in ((bordered, "is_bordered"), (striped, "is_striped"), (compact, "is_compact")):
+        if flag:
+            block[name] = True
+    if caption:
+        block["caption"] = as_text(caption)
+    return block
+
+
+def button_row(spec: str, align: str = "") -> dict[str, Any]:
+    """Кнопки ВНУТРИ документа — то, чего нет ни в markdown, ни у обычного аккаунта.
+
+    Синтаксис тот же, что у кнопок под сообщением, включая стиль в скобках;
+    в ряд помещается от одной до восьми.
+    """
+    keyboard = buttons_json(spec)
+    if not keyboard:
+        raise RichError("не указано ни одной кнопки")
+    flat = [b for row in keyboard["inline_keyboard"] for b in row]
+    if not 1 <= len(flat) <= MAX_BUTTONS_IN_ROW:
+        raise RichError(f"в ряду должно быть от 1 до {MAX_BUTTONS_IN_ROW} кнопок, а не {len(flat)}")
+    for source, target in zip(_specs(spec), flat):
+        _, style = split_style(source)
+        if style and style not in BUTTON_STYLES:
+            raise RichError(f"стиль «{style}» для кнопки в документе не подходит; "
+                            f"есть: {', '.join(BUTTON_STYLES)}")
+        if style:
+            target["style"] = style
+    block: dict[str, Any] = {"type": "buttons", "buttons": flat}
+    if align:
+        block["align"] = align
+    return block
+
+
+def _specs(spec: str) -> list[str]:
+    """Подписи кнопок в том же порядке, в каком их собрал buttons_json."""
+    out = []
+    for line in spec.split(";"):
+        for chunk in line.split(","):
+            chunk = chunk.strip()
+            if chunk:
+                out.append(chunk.partition("=")[0].strip())
+    return out
+
+
+def document_block(identifier: str, caption: Any = None, source: str | None = None) -> dict[str, Any]:
+    """Файл внутри документа (10.3): ссылка на него — tg://document?id=…"""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", identifier):
+        raise RichError(f"идентификатор «{identifier}»: только A-Z a-z 0-9 _ - и до 64 символов")
+    block: dict[str, Any] = {"type": "document",
+                             "document": {"type": "document", "media": f"attach://{identifier}"}}
+    if caption:
+        block["caption"] = {"text": as_text(caption)}
+    if source is not None:
+        from pathlib import Path
+
+        path = Path(source).expanduser()
+        if not path.is_file():
+            raise RichError(f"файла {path} нет")
+        block["_upload"] = path
+    return block
+
+
+# Отправка блоков работает, а чтение обратно — нет: конструкторы блочной формы
+# новее слоя 227, и Telethon отдаёт такое сообщение как MessageMediaUnsupported.
+# Получатель с обновлённым клиентом видит документ полностью; tgx — пока нет.
+BLOCKS_ARE_WRITE_ONLY = ("блочная форма новее слоя MTProto, который знает Telethon: "
+                         "отправить её можно, а показать в tgx — пока нет")
+
+
+def check_blocks(blocks: Sequence[dict[str, Any]]) -> None:
+    """Проверить дерево блоков до отправки — сервер объясняет отказ скупо."""
+    if not blocks:
+        raise RichError("список блоков пуст")
+    if len(blocks) > MAX_BLOCKS:
+        raise RichError(f"слишком много блоков: {len(blocks)} при лимите {MAX_BLOCKS}")
+    for index, block in enumerate(blocks, 1):
+        kind = block.get("type")
+        if kind not in BLOCK_TYPES:
+            raise RichError(f"блок {index}: тип «{kind}» неизвестен; "
+                            f"есть: {', '.join(sorted(BLOCK_TYPES))}")
+        if kind == "buttons":
+            count = len(block.get("buttons") or [])
+            if not 1 <= count <= MAX_BUTTONS_IN_ROW:
+                raise RichError(f"блок {index}: кнопок {count}, а можно от 1 до {MAX_BUTTONS_IN_ROW}")
+        if kind == "heading" and not 1 <= int(block.get("size", 1)) <= MAX_HEADING:
+            raise RichError(f"блок {index}: размер заголовка вне 1–{MAX_HEADING}")
 
 
 def photo_media(identifier: str, url_or_path: str) -> dict[str, Any]:

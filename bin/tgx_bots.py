@@ -334,6 +334,29 @@ def parse_buttons(spec: str) -> list[list[Any]]:
     return rows
 
 
+# Ошибки Telegram, которые чаще всего встречает бот, — на человеческом языке.
+BOT_HINTS = {
+    "USER_BOT_TO_BOT_DISABLED": (
+        "переписка между ботами выключена у одного из них. Она появилась в Bot API 10.0, "
+        "но включается не в меню BotFather, а в его мини-приложении — и должна быть "
+        "включена у обоих ботов"),
+    "USER_IS_BOT": "боту нельзя писать этому собеседнику",
+    "BOT_METHOD_INVALID": "этот метод боту недоступен",
+    "PEER_ID_INVALID": "бот не знает этого чата — добавьте его туда",
+    "CHAT_WRITE_FORBIDDEN": "боту здесь запрещено писать",
+    "CHAT_ADMIN_REQUIRED": "боту нужны права администратора в этом чате",
+}
+
+
+def explain_bot_error(exc: Exception) -> Exception:
+    """Ответ сервера → объяснение, что делать. Незнакомое отдаём как есть."""
+    text = str(exc)
+    for code, message in BOT_HINTS.items():
+        if code in text:
+            return BotError(message)
+    return exc
+
+
 class BotSession:
     """A second Telethon client, signed in with a bot token."""
 
@@ -436,6 +459,15 @@ class BotSession:
 
         body, entities = tgx_format.parse(text, parse_mode)
         markup = parse_buttons(buttons) if buttons else None
+        try:
+            return await self._deliver(peer, body, entities, markup, link_preview,
+                                       silent, files, schedule)
+        except Exception as exc:
+            raise explain_bot_error(exc) from exc
+
+    async def _deliver(self, peer: str, body: str, entities: Any, markup: Any,
+                       link_preview: bool, silent: bool, files: Sequence[str] | None,
+                       schedule: datetime | None) -> Any:
         target = await self.client.get_entity(peer)
         if files:
             import tgx_media

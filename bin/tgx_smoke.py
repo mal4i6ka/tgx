@@ -930,6 +930,127 @@ async def resolve_peer_regression() -> None:
     check("пустой чат отвергается сразу", "не указан чат" in refused)
 
 
+def rich_blocks_regression() -> None:
+    """Блочная форма Bot API 10.2–10.3: единственный способ положить кнопки и файл
+    ВНУТРЬ документа. Сборщики отдают готовый JSON, поэтому проверяются им же."""
+    import tgx_rich as R
+
+    check("отрисовщик и сборщик текста — разные функции",
+          R.rich_text is not R.as_text)
+    check("сборщик оставляет обычную строку строкой",
+          isinstance(R.heading("Заголовок", 2)["text"], str))
+
+    check("заголовок несёт размер", R.heading("x", 3) == {"type": "heading", "text": "x", "size": 3})
+    check("раскрывающаяся цитата — отдельный тип",
+          R.quote("x", expandable=True)["type"] == "expandable_blockquote")
+    check("обычная цитата осталась прежней", R.quote("x")["type"] == "blockquote")
+    check("плотная таблица помечается", R.table([["a"]], compact=True)["is_compact"] is True)
+    check("у обычной таблицы флага нет", "is_compact" not in R.table([["a"]]))
+    check("список раскладывается по пунктам",
+          len(R.bullet_list(["a", "b"])["items"]) == 2)
+
+    row = R.button_row("Скачать[primary]=https://a.b, Ещё=https://c.d", align="center")
+    check("кнопки собираются в блок", row["type"] == "buttons" and len(row["buttons"]) == 2)
+    check("стиль переезжает в кнопку", row["buttons"][0]["style"] == "primary")
+    check("метка стиля снята с подписи", row["buttons"][0]["text"] == "Скачать")
+    check("выравнивание сохраняется", row["align"] == "center")
+
+    for bad, why in (("", "пустой список кнопок"),
+                     (", ".join(f"К{i}=https://a.b" for i in range(9)), "девять кнопок в ряду")):
+        refused = False
+        try:
+            R.button_row(bad)
+        except R.RichError:
+            refused = True
+        check(f"отвергает {why}", refused)
+
+    refused = False
+    try:
+        R.button_row("Плохо[фиолетовый]=https://a.b")
+    except R.RichError as exc:
+        refused = "фиолетовый" in str(exc)
+    check("отвергает несуществующий стиль кнопки", refused)
+
+    with tempfile.TemporaryDirectory() as folder:
+        blob = Path(folder) / "build.zip"
+        blob.write_bytes(b"PK\x03\x04")
+        doc = R.document_block("build", caption="сборка", source=str(blob))
+        check("блок-документ ссылается на attach://",
+              doc["document"]["media"] == "attach://build")
+        check("и помнит файл для загрузки", doc["_upload"] == blob)
+
+    R.check_blocks([R.paragraph("a"), R.divider(), R.quote("b", expandable=True)])
+    for bad, why in (([], "пустой документ"),
+                     ([{"type": "паровоз"}], "неизвестный тип блока"),
+                     ([{"type": "buttons", "buttons": []}], "блок кнопок без кнопок")):
+        refused = False
+        try:
+            R.check_blocks(bad)
+        except R.RichError:
+            refused = True
+        check(f"проверка отвергает {why}", refused)
+
+    check("ограничение блочной формы записано в модуле",
+          "новее слоя" in R.BLOCKS_ARE_WRITE_ONLY)
+
+
+def poll_regression() -> None:
+    """Опросы: сервер объясняет отказ скупо, поэтому всё, что можно проверить
+    заранее, проверяется заранее."""
+    import tgx_poll as P
+
+    P.check("Вопрос?", ["А", "Б"])
+    P.check("Вопрос?", ["Один"])          # с Bot API 10.0 хватает одного варианта
+    for question, options, quiz, why in (
+            ("", ["А"], None, "пустой вопрос"),
+            ("Q", [], None, "ни одного варианта"),
+            ("Q", ["А"] * 13, None, "тринадцать вариантов"),
+            ("Q" * 301, ["А"], None, "слишком длинный вопрос"),
+            ("Q", ["x" * 101], None, "слишком длинный вариант"),
+            ("Q", ["А", "Б"], 5, "правильный ответ вне списка")):
+        refused = False
+        try:
+            P.check(question, options, quiz_answer=quiz)
+        except P.PollError:
+            refused = True
+        check(f"отвергает {why}", refused)
+
+    check("ключ варианта — его номер в байтах", P.option_key(2) == b"\x02")
+    check("страны разбираются", P.parse_countries("ru, de") == ["RU", "DE"])
+    check("без стран — без ограничения", P.parse_countries("") is None)
+    refused = False
+    try:
+        P.parse_countries("россия")
+    except P.PollError:
+        refused = True
+    check("отвергает страну не двумя буквами", refused)
+
+    class Thing:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    poll = Thing(question=Thing(text="Вопрос?"), quiz=False, multiple_choice=False,
+                 public_voters=False, closed=False, subscribers_only=True,
+                 countries_iso2=["RU"],
+                 answers=[Thing(text=Thing(text="А"), option=b"\x00"),
+                          Thing(text=Thing(text="Б"), option=b"\x01")])
+    results = Thing(total_voters=4, results=[Thing(option=b"\x00", voters=3),
+                                             Thing(option=b"\x01", voters=1)])
+    view = P.describe(poll, results)
+    check("вопрос разворачивается из обёртки", view["question"] == "Вопрос?")
+    check("доли считаются", [a["share"] for a in view["answers"]] == [75, 25])
+    check("голоса раскладываются по вариантам",
+          [a["voters"] for a in view["answers"]] == [3, 1])
+    check("ограничение подписчиками видно", view["members_only"] is True)
+    check("страны видны", view["countries"] == ["RU"])
+
+    empty = P.describe(poll, None)
+    check("без результатов доли нулевые", all(a["share"] == 0 for a in empty["answers"]))
+
+    check("викторина от своего имени отклоняется с объяснением",
+          "Telethon" in P.QUIZ_NEEDS_BOT and "--as" in P.QUIZ_NEEDS_BOT)
+
+
 def rich_render_regression() -> None:
     """A received rich message is an Instant-View block tree — it has to become
     readable terminal text, not a bare "unsupported media" chip."""
@@ -1196,6 +1317,8 @@ async def main() -> int:
     await transcribe_regression()
     await guard_regression()
     multipart_regression()
+    rich_blocks_regression()
+    poll_regression()
     await resolve_peer_regression()
     autotools_regression()
     rich_render_regression()

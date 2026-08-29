@@ -31,6 +31,7 @@ import tgx_format
 import tgx_forum
 import tgx_guard
 import tgx_net
+import tgx_poll
 import tgx_profile
 import tgx_rich
 import tgx_transcribe
@@ -488,6 +489,66 @@ async def input_user(client: TelegramClient, peer: str) -> Any:
 async def uploaded_chat_photo(client: TelegramClient, file_path: str) -> Any:
     uploaded = await client.upload_file(str(Path(file_path).expanduser()))
     return types.InputChatUploadedPhoto(file=uploaded)
+
+
+async def cmd_poll(args: argparse.Namespace) -> None:
+    """Опросы и викторины."""
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        polls = tgx_poll.Polls(client)
+        peer = await resolve_peer(client, args.chat)
+
+        if args.pollcmd == "create":
+            if args.quiz is not None:
+                if not args.bot:
+                    raise tgx_poll.PollError(tgx_poll.QUIZ_NEEDS_BOT)
+                bot = tgx_bots.Registry().get(args.bot)
+                if not bot.token:
+                    raise tgx_poll.PollError(f"у @{bot.username} нет токена — "
+                                             f"`tgx bot token @{bot.username}`")
+                username = getattr(peer, "username", None)
+                chat_id = f"@{username}" if username else (
+                    f"-100{peer.id}" if entity_kind(peer) in {"channel", "group"} else str(peer.id))
+                render.emit({"ok": True, "as": bot.username, **await asyncio.to_thread(
+                    tgx_poll.send_quiz, bot.token, chat_id, args.question, args.option,
+                    correct=args.quiz, explanation=args.explanation or "", topic=args.topic,
+                    multiple=args.multiple, anonymous=not args.public,
+                    close_in=args.close_in, silent=args.silent)})
+                return
+            render.emit({"ok": True, **await polls.create(
+                peer, args.question, args.option, quiz_answer=args.quiz,
+                multiple=args.multiple, public=args.public, shuffle=args.shuffle,
+                hide_until_close=args.hide_results, members_only=args.members_only,
+                countries=args.countries, close_in=args.close_in,
+                explanation=args.explanation or "", topic=args.topic, silent=args.silent)})
+            return
+
+        if args.pollcmd == "vote":
+            render.emit({"ok": True, **await polls.vote(peer, args.id, args.choice)})
+            return
+
+        if args.pollcmd == "results":
+            data = await polls.results(peer, args.id)
+            if args.jsonl:
+                print_jsonl([data])
+            else:
+                render.emit({k: v for k, v in data.items() if k != "answers"},
+                            title=data["question"])
+                print_table(data["answers"], ["n", "text", "voters", "share"])
+            return
+
+        if args.pollcmd == "close":
+            render.emit({"ok": True, **await polls.close(peer, args.id)})
+            return
+
+        if args.pollcmd == "voters":
+            rows = await polls.voters(peer, args.id, args.option, args.limit)
+            print_jsonl(rows) if args.jsonl else print_table(rows, ["user", "option"],
+                                                            title="кто как проголосовал")
+            return
+    finally:
+        await client.disconnect()
 
 
 async def cmd_guard(args: argparse.Namespace) -> None:
@@ -1633,7 +1694,23 @@ async def cmd_bot(args: argparse.Namespace) -> None:
         return
 
     if command == "rich":
-        markdown = Path(args.file).expanduser().read_text() if args.file else (args.text or "")
+        blocks = None
+        if getattr(args, "blocks", None):
+            source = Path(args.blocks).expanduser()
+            if not source.is_file():
+                raise SystemExit(f"файла с блоками {source} нет")
+            try:
+                blocks = json.loads(source.read_text())
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"{source}: не разбирается как JSON — {exc}")
+            # Файлы для блоков-документов подставляются по имени из --attach.
+            attached = dict(pair.partition("=")[::2] for pair in (args.attach or []))
+            for block in blocks:
+                if block.get("type") == "document":
+                    name = str(block.get("document", {}).get("media", "")).removeprefix("attach://")
+                    if name in attached:
+                        block["_upload"] = Path(attached[name]).expanduser()
+        markdown = Path(args.file).expanduser().read_text() if args.file and not blocks else (args.text or "")
         media = []
         for pair in args.media or []:
             name, _, source = pair.partition("=")
@@ -1661,12 +1738,16 @@ async def cmd_bot(args: argparse.Namespace) -> None:
                 f"-100{peer.id}" if entity_kind(peer) in {"channel", "group"} else str(peer.id))
         finally:
             await client.disconnect()
-        result = await asyncio.to_thread(
-            tgx_rich.send_rich, bot.token, chat_id, markdown,
-            buttons=args.button or "", silent=args.silent, protect=args.protect,
-            draft=args.draft, media=media, is_rtl=args.rtl, topic=args.topic,
-            skip_entity_detection=args.no_autolinks,
-        )
+        def publish() -> Any:
+            return tgx_rich.send_rich(
+                bot.token, chat_id, "" if blocks else markdown, blocks=blocks,
+                buttons=args.button or "", silent=args.silent, protect=args.protect,
+                draft=args.draft, media=media, is_rtl=args.rtl, topic=args.topic,
+                skip_entity_detection=args.no_autolinks)
+
+        result = await asyncio.to_thread(publish)
+        if blocks:
+            render.note(tgx_rich.BLOCKS_ARE_WRITE_ONLY)
         render.emit({"ok": True, "message_id": result.get("message_id"), "chat": chat_id,
                      "as": bot.username, "draft": args.draft})
         return
@@ -1944,7 +2025,7 @@ async def cmd_banner(args: argparse.Namespace) -> None:
 GROUPS = [
     ("интерфейс", ["ui", "banner"]),
     ("боты и статьи", ["bot", "article", "business"]),
-    ("форумы", ["forum", "guard"]),
+    ("форумы", ["forum", "guard", "poll"]),
     ("голос", ["transcribe"]),
     ("аккаунт", ["auth", "me", "profile", "profile-get", "profile-edit", "profile-photo-set", "profile-photos", "profile-photo-delete"]),
     ("чаты и папки", ["dialogs", "folders", "folder-upsert"]),
@@ -2100,6 +2181,10 @@ def build_parser() -> argparse.ArgumentParser:
     b_rich.add_argument("--media", action="append",
                         help="имя=ссылка для ![](tg://photo?id=имя); можно повторять")
     b_rich.add_argument("--topic", type=int, help="id темы форума")
+    b_rich.add_argument("--blocks", help="файл JSON с блоками (Bot API 10.2+); "
+                                        "кнопки и файлы внутри документа возможны только так")
+    b_rich.add_argument("--attach", action="append", metavar="ИМЯ=ПУТЬ",
+                        help="файл для блока-документа с attach://ИМЯ; можно повторять")
     b_rich.add_argument("--draft", action="store_true", help="отправить черновиком (стриминг)")
     b_rich.add_argument("--silent", action="store_true")
     b_rich.add_argument("--protect", action="store_true", help="запретить пересылку и копирование")
@@ -2253,6 +2338,49 @@ def build_parser() -> argparse.ArgumentParser:
     fu.add_argument("--match-regex", help="include dialogs whose title or username matches this regex")
     fu.add_argument("--exclude", action="append", help="id, username, or exact title to exclude from --match-regex; can be repeated")
     fu.set_defaults(func=cmd_folder_upsert)
+
+    pl = sub.add_parser("poll", help="опросы и викторины")
+    pl_sub = pl.add_subparsers(dest="pollcmd", required=True)
+    pl.set_defaults(func=cmd_poll)
+
+    p_new = pl_sub.add_parser("create", help="создать опрос или викторину")
+    p_new.add_argument("chat")
+    p_new.add_argument("question")
+    p_new.add_argument("option", nargs="+", help="варианты ответа; с 10.0 хватает одного")
+    p_new.add_argument("--quiz", type=int, metavar="N",
+                       help="викторина: номер правильного ответа с 0; требует --as")
+    p_new.add_argument("--as", dest="bot", help="бот, от имени которого уйдёт викторина")
+    p_new.add_argument("--explanation", help="пояснение к правильному ответу (только викторина)")
+    p_new.add_argument("--multiple", action="store_true", help="можно выбрать несколько")
+    p_new.add_argument("--public", action="store_true", help="видно, кто как проголосовал")
+    p_new.add_argument("--shuffle", action="store_true", help="перемешивать варианты")
+    p_new.add_argument("--hide-results", action="store_true", help="результаты только после закрытия")
+    p_new.add_argument("--members-only", action="store_true", help="только для подписчиков")
+    p_new.add_argument("--countries", help="ограничить странами: RU,DE")
+    p_new.add_argument("--close-in", type=int, metavar="СЕК", help="закрыть автоматически")
+    p_new.add_argument("--topic", type=int, help="id темы форума")
+    p_new.add_argument("--silent", action="store_true")
+
+    p_vote = pl_sub.add_parser("vote", help="проголосовать; без вариантов — снять голос")
+    p_vote.add_argument("chat")
+    p_vote.add_argument("id", type=int)
+    p_vote.add_argument("choice", nargs="*", type=int, help="номера вариантов с 0")
+
+    p_res = pl_sub.add_parser("results", help="результаты опроса")
+    p_res.add_argument("chat")
+    p_res.add_argument("id", type=int)
+    p_res.add_argument("--jsonl", action="store_true")
+
+    p_close = pl_sub.add_parser("close", help="закрыть опрос")
+    p_close.add_argument("chat")
+    p_close.add_argument("id", type=int)
+
+    p_who = pl_sub.add_parser("voters", help="кто как проголосовал (если опрос не анонимный)")
+    p_who.add_argument("chat")
+    p_who.add_argument("id", type=int)
+    p_who.add_argument("--option", type=int, help="только за этот вариант")
+    p_who.add_argument("--limit", type=int, default=50)
+    p_who.add_argument("--jsonl", action="store_true")
 
     gd = sub.add_parser("guard", help="именные одноразовые приглашения: вошёл не тот — удаляем")
     gd_sub = gd.add_subparsers(dest="guardcmd", required=True)
@@ -2744,7 +2872,7 @@ async def amain() -> None:
 # Errors these modules raise are already written for a person to read; a stack
 # trace on top of them only hides the sentence that explains what to do.
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError,
-                 tgx_banner.BannerError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError,
+                 tgx_banner.BannerError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
                  tgx_rich.RichError, tgx_transcribe.TranscribeError)
 
