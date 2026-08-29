@@ -350,11 +350,9 @@ BOT_HINTS = {
 
 def explain_bot_error(exc: Exception) -> Exception:
     """Ответ сервера → объяснение, что делать. Незнакомое отдаём как есть."""
-    text = str(exc)
-    for code, message in BOT_HINTS.items():
-        if code in text:
-            return BotError(message)
-    return exc
+    import tgx_net
+
+    return tgx_net.explain(exc, BOT_HINTS, BotError)
 
 
 class BotSession:

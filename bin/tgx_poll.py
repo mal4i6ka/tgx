@@ -296,7 +296,6 @@ class Polls:
 
     @staticmethod
     def _explain(exc: Exception) -> Exception:
-        text = str(exc)
         hints = {
             "POLL_OPTION_INVALID": "такого варианта в этом опросе нет",
             "POLL_ANSWERS_INVALID": "варианты ответа Telegram не принял",
@@ -307,7 +306,7 @@ class Polls:
             "CHAT_SEND_POLL_FORBIDDEN": "в этом чате запрещены опросы",
             "POLL_UNSUPPORTED": "этот чат не поддерживает опросы",
         }
-        for code, message in hints.items():
-            if code in text:
-                return PollError(message)
+        import tgx_net
+
+        return tgx_net.explain(exc, hints, PollError)
         return exc

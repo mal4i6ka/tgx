@@ -217,7 +217,6 @@ class Contacts:
 
     @staticmethod
     def _explain(exc: Exception) -> Exception:
-        text = str(exc)
         hints = {
             "CONTACT_ID_INVALID": "такого пользователя нет",
             "PHONE_NOT_OCCUPIED": "на этом номере нет аккаунта Telegram",
@@ -227,7 +226,7 @@ class Contacts:
             "IMPORT_TOKEN_INVALID": "ссылка-приглашение недействительна",
             "PEER_ID_INVALID": "этого человека не найти — возможно, он ограничил доступ",
         }
-        for code, message in hints.items():
-            if code in text:
-                return ContactError(message)
+        import tgx_net
+
+        return tgx_net.explain(exc, hints, ContactError)
         return exc

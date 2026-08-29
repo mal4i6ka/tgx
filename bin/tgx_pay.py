@@ -1043,7 +1043,6 @@ class Pay:
 
     @staticmethod
     def _explain(exc: Exception) -> Exception:
-        text = str(exc)
         hints = {
             "PAYMENT_PROVIDER_INVALID": "платёжный провайдер не принят: проверьте токен от @BotFather",
             "CURRENCY_TOTAL_AMOUNT_INVALID": "сумма не подходит под правила этой валюты "
@@ -1074,7 +1073,7 @@ class Pay:
             "BANK_CARD_NUMBER_INVALID": "номер карты не принят — нужен полный номер",
             "BANK_CARD_NOT_FOUND": "по этому номеру банк не определился",
         }
-        for code, message in hints.items():
-            if code in text:
-                return PayError(message)
+        import tgx_net
+
+        return tgx_net.explain(exc, hints, PayError)
         return exc

@@ -63,6 +63,29 @@ def post_json(url: str, payload: dict[str, Any], what: str = "сервис") -> 
     return json.loads(_open(request, what))
 
 
+def error_matches(exc: Exception, code: str) -> bool:
+    """Совпадает ли ошибка Telegram с кодом вроде `FILTER_NOT_SUPPORTED`.
+
+    Половину ошибок Telethon отдаёт типизированными классами, и текст у них
+    человеческий — самого кода в нём нет: `FILTER_NOT_SUPPORTED` приходит как
+    `FilterNotSupportedError("The specified filter cannot be used…")`. Поэтому
+    сверять надо и строку, и имя класса, иначе подсказка не срабатывает и
+    пользователь видит трассировку вместо объяснения.
+    """
+    if code in str(exc):
+        return True
+    camel = "".join(part.capitalize() for part in code.split("_"))
+    return type(exc).__name__ in {camel + "Error", camel}
+
+
+def explain(exc: Exception, hints: dict[str, str], wrap: type) -> Exception:
+    """Первое совпавшее объяснение — или исходная ошибка как есть."""
+    for code, message in hints.items():
+        if error_matches(exc, code):
+            return wrap(message)
+    return exc
+
+
 def post_multipart(url: str, fields: dict[str, Any], files: dict[str, tuple[str, bytes, str]],
                    what: str = "сервис") -> Any:
     """multipart/form-data вручную — так Bot API принимает файлы с диска.

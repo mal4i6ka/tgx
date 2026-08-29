@@ -29,6 +29,7 @@ import tgx_bots
 import tgx_business
 import tgx_confirm
 import tgx_contacts
+import tgx_folders
 import tgx_format
 import tgx_forum
 import tgx_guard
@@ -563,6 +564,47 @@ def read_secret(prompt: str, env: str = "") -> str:
             f"нужен ввод секрета, а терминала нет. Запустите команду в терминале "
             f"или передайте значение через переменную {env or 'окружения'}")
     return getpass.getpass(prompt)
+
+
+async def cmd_share_folder(args: argparse.Namespace) -> None:
+    """Общие папки: ссылка на набор чатов и её обновления."""
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        shared = tgx_folders.Folders(client)
+        cmd = args.sharecmd
+
+        if cmd == "invites":
+            rows = await shared.invites(args.id)
+            print_jsonl(rows) if args.jsonl else print_table(
+                rows, ["название", "чатов", "ссылка"], title=f"ссылки на папку {args.id}")
+            return
+
+        actions = {
+            "share": lambda: shared.share(args.id, args.title, args.chat or []),
+            "edit": lambda: shared.edit_invite(args.id, args.slug, title=args.title or "",
+                                               peers=args.chat or []),
+            "revoke": lambda: shared.revoke(args.id, args.slug),
+            "check": lambda: shared.check(args.slug),
+            "join": lambda: shared.join(args.slug, args.chat or []),
+            "updates": lambda: shared.updates(args.id),
+            "accept": lambda: shared.accept_updates(args.id, args.chat or []),
+            "hide-updates": lambda: shared.hide_updates(args.id),
+            "leave-suggestions": lambda: shared.leave_suggestions(args.id),
+        }
+        if cmd in actions:
+            render.emit(await actions[cmd]())
+            return
+
+        if cmd == "leave":
+            v = await gated_or_die(client, args, "Покинуть общую папку?",
+                                   f"Папка {args.id}, чатов: {len(args.chat or [])}",
+                                   "выход из чатов необратим без нового приглашения")
+            render.emit({"ok": True, **await shared.leave(args.id, args.chat or []),
+                         "подтвердил": v["by"]})
+            return
+    finally:
+        await client.disconnect()
 
 
 async def cmd_stories(args: argparse.Namespace) -> None:
@@ -3149,6 +3191,56 @@ def build_parser() -> argparse.ArgumentParser:
                     help="сколько ждать ответа, секунд")
     cf.set_defaults(func=cmd_confirm)
 
+    sh = sub.add_parser("share-folder", help="общие папки: ссылка на набор чатов")
+    sh_sub = sh.add_subparsers(dest="sharecmd", required=True)
+    sh.set_defaults(func=cmd_share_folder)
+
+    h_inv = sh_sub.add_parser("invites", help="какие ссылки выписаны на папку")
+    h_inv.add_argument("id", type=int, help="номер папки; список — tgx folders")
+    h_inv.add_argument("--jsonl", action="store_true")
+
+    h_sh = sh_sub.add_parser("share", help="выписать ссылку на папку")
+    h_sh.add_argument("id", type=int)
+    h_sh.add_argument("title")
+    h_sh.add_argument("--chat", action="append", help="только эти чаты; без него — все делимые")
+
+    h_ed = sh_sub.add_parser("edit", help="поменять название ссылки или набор чатов")
+    h_ed.add_argument("id", type=int)
+    h_ed.add_argument("slug")
+    h_ed.add_argument("--title")
+    h_ed.add_argument("--chat", action="append")
+
+    h_rv = sh_sub.add_parser("revoke", help="отозвать ссылку")
+    h_rv.add_argument("id", type=int)
+    h_rv.add_argument("slug")
+
+    h_ck = sh_sub.add_parser("check", help="что внутри чужой ссылки — до принятия")
+    h_ck.add_argument("slug")
+
+    h_jn = sh_sub.add_parser("join", help="принять папку по ссылке")
+    h_jn.add_argument("slug")
+    h_jn.add_argument("--chat", action="append", help="только эти чаты")
+
+    h_up = sh_sub.add_parser("updates", help="что автор добавил в папку")
+    h_up.add_argument("id", type=int)
+
+    h_ac = sh_sub.add_parser("accept", help="принять новые чаты папки")
+    h_ac.add_argument("id", type=int)
+    h_ac.add_argument("--chat", action="append")
+
+    h_hd = sh_sub.add_parser("hide-updates", help="больше не предлагать обновления папки")
+    h_hd.add_argument("id", type=int)
+
+    h_ls = sh_sub.add_parser("leave-suggestions", help="что советуют покинуть вместе с папкой")
+    h_ls.add_argument("id", type=int)
+
+    h_lv = sh_sub.add_parser("leave", help="покинуть папку и чаты (требует подтверждения)")
+    h_lv.add_argument("id", type=int)
+    h_lv.add_argument("--chat", action="append")
+    h_lv.add_argument("--confirm-to", help="кто подтверждает")
+    h_lv.add_argument("--as", dest="bot", help="бот, который спросит")
+    h_lv.add_argument("--timeout", type=float, default=300.0)
+
     stz = sub.add_parser("stories", help="истории: лента, публикация, просмотры, альбомы")
     stz_sub = stz.add_subparsers(dest="storycmd", required=True)
     stz.set_defaults(func=cmd_stories)
@@ -4155,7 +4247,7 @@ async def amain() -> None:
 # Errors these modules raise are already written for a person to read; a stack
 # trace on top of them only hides the sentence that explains what to do.
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
-                 tgx_banner.BannerError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_poll.PollError,
+                 tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
                  tgx_rich.RichError, tgx_stories.StoryError,
                  tgx_transcribe.TranscribeError)

@@ -300,7 +300,6 @@ class Stories:
 
     @staticmethod
     def _explain(exc: Exception) -> Exception:
-        text = str(exc)
         hints = {
             "PREMIUM_ACCOUNT_REQUIRED": "нужен Telegram Premium",
             "STORIES_TOO_MUCH": "лимит историй на сегодня исчерпан",
@@ -311,7 +310,7 @@ class Stories:
             "STORY_NOT_MODIFIED": "ничего не изменилось",
             "MEDIA_EMPTY": "к истории нужно вложение — фото или видео",
         }
-        for code, message in hints.items():
-            if code in text:
-                return StoryError(message)
+        import tgx_net
+
+        return tgx_net.explain(exc, hints, StoryError)
         return exc

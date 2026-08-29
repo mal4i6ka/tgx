@@ -165,7 +165,6 @@ class Transcriber:
 
     @staticmethod
     def _explain(exc: Exception) -> Exception:
-        text = str(exc)
         hints = {
             "TRANSCRIPTION_FAILED": "Telegram не смог разобрать эту запись",
             "PREMIUM_ACCOUNT_REQUIRED": "бесплатные расшифровки на этой неделе кончились; "
@@ -174,9 +173,9 @@ class Transcriber:
             "MSG_VOICE_MISSING": "в этом сообщении нет голосовой записи",
             "PEER_ID_INVALID": "чат не найден",
         }
-        for code, message in hints.items():
-            if code in text:
-                return TranscribeError(message)
+        import tgx_net
+
+        return tgx_net.explain(exc, hints, TranscribeError)
         if "FLOOD_WAIT" in text:
             seconds = "".join(c for c in text.split("FLOOD_WAIT")[-1] if c.isdigit())
             return TranscribeError(f"слишком часто; подождите {seconds or 'немного'} секунд")

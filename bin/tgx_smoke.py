@@ -21,6 +21,22 @@ from textual.widgets import Checkbox, Input, Select, TextArea  # noqa: E402
 from tgx_tui import READ_DWELL, ChatList, DemoBackend, MessageList, TgxApp, plain_task_factory  # noqa: E402
 
 OUT = Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/tgx-shots")
+
+
+async def wait_until(condition, pilot=None, timeout: float = 6.0, step: float = 0.05) -> bool:
+    """Ждать условия, а не времени.
+
+    Фиксированный `sleep` в тестах интерфейса — источник плавающих падений: под
+    нагрузкой загрузка не успевает, а демо-бэкенд успевает подсыпать сообщение.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if condition():
+            return True
+        await asyncio.sleep(step)
+        if pilot is not None:
+            await pilot.pause()
+    return condition()
 checks: list[tuple[str, bool]] = []
 
 
@@ -1487,6 +1503,43 @@ def stories_regression() -> None:
           len(S.story_row(Story(id=1, caption="я" * 200, views=None))["подпись"]) == 60)
 
 
+def error_explain_regression() -> None:
+    """Половину ошибок Telethon отдаёт типизированными классами, и кода Telegram
+    в их тексте нет. Пока сверка шла по строке, подсказки молча не срабатывали и
+    вместо объяснения человек видел трассировку."""
+    import tgx_net
+
+    class Plain(Exception):
+        pass
+
+    class FilterNotSupportedError(Exception):
+        pass
+
+    typed = FilterNotSupportedError("The specified filter cannot be used in this context")
+    raw = Plain("RPCError 400: FILTER_NOT_SUPPORTED")
+
+    check("код в тексте распознаётся", tgx_net.error_matches(raw, "FILTER_NOT_SUPPORTED"))
+    check("типизированная ошибка распознаётся по имени класса",
+          tgx_net.error_matches(typed, "FILTER_NOT_SUPPORTED"))
+    check("чужой код не совпадает", not tgx_net.error_matches(typed, "PEERS_LIST_EMPTY"))
+
+    class Wrapped(RuntimeError):
+        pass
+
+    hints = {"FILTER_NOT_SUPPORTED": "это обычная папка"}
+    check("объяснение подставляется",
+          str(tgx_net.explain(typed, hints, Wrapped)) == "это обычная папка")
+    check("незнакомая ошибка отдаётся как есть",
+          tgx_net.explain(Plain("что-то ещё"), hints, Wrapped) is not None
+          and not isinstance(tgx_net.explain(Plain("что-то ещё"), hints, Wrapped), Wrapped))
+
+    # Все модули должны пользоваться общим разбором, а не своей копией.
+    import pathlib
+    own = [p.name for p in pathlib.Path("bin").glob("tgx_*.py")
+           if "_explain" in p.read_text() and "tgx_net.explain(" not in p.read_text()]
+    check(f"никто не разбирает ошибки по-своему: {own or 'все через общий'}", not own)
+
+
 def rich_render_regression() -> None:
     """A received rich message is an Instant-View block tree — it has to become
     readable terminal text, not a bare "unsupported media" chip."""
@@ -1754,6 +1807,7 @@ async def main() -> int:
     await guard_regression()
     await contacts_regression()
     stories_regression()
+    error_explain_regression()
     multipart_regression()
     rich_blocks_regression()
     poll_regression()
@@ -2229,17 +2283,18 @@ async def main() -> int:
         chats_widget = app.query_one(ChatList)
         forum = next(c for c in chats_widget.chats if c.forum)
         await app.open_chat(forum)
-        await asyncio.sleep(0.8)
-        await pilot.pause()
         tabs = app.query_one("#topics")
+        await wait_until(lambda: tabs.display and app.current_topic is not None
+                         and bool(app.query_one(MessageList).msgs), pilot)
         check("topic bar appears for a forum", tabs.display and app.current_topic is not None)
         check("pinned topic comes first", app.current_topic.title == "Общее")
+        # Сверяем только историю темы: демо-бэкенд подсыпает болтовню в другие.
+        loaded = [m for m in app.query_one(MessageList).msgs if not m.service]
         check("history is filtered to the topic",
-              all(m.reply_to == 1 or m.id == 1 for m in app.query_one(MessageList).msgs))
+              bool(loaded) and all(m.reply_to == 1 or m.id == 1 for m in loaded))
 
         tabs.active = "t-2"
-        await asyncio.sleep(1.0)
-        await pilot.pause()
+        await wait_until(lambda: app.current_topic is not None and app.current_topic.id == 2, pilot)
         check("switching the tab switches the thread",
               app.current_topic is not None and app.current_topic.id == 2
               and any(m.text == "макеты на ревью" for m in app.query_one(MessageList).msgs))

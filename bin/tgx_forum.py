@@ -299,7 +299,6 @@ class Forum:
     # ── ошибки сервера, переведённые на человеческий ─────────────────────────
     @staticmethod
     def _explain(exc: Exception) -> Exception:
-        text = str(exc)
         hints = {
             "CHAT_ADMIN_REQUIRED": "нужны права администратора «управление темами» (manage_topics)",
             "CHAT_NOT_MODIFIED": "ничего не изменилось — такие значения уже стоят",
@@ -316,9 +315,9 @@ class Forum:
             "FORUM_ENABLED": "в этой группе форум уже включён",
             "BROADCAST_FORBIDDEN": "в канале тем не бывает — форум включается в супергруппе",
         }
-        for code, message in hints.items():
-            if code in text:
-                return ForumError(message)
+        import tgx_net
+
+        return tgx_net.explain(exc, hints, ForumError)
         if "ADMIN_RIGHTS" in text or "CREATOR" in text:
             return ForumError("это может сделать только владелец группы")
         return exc
