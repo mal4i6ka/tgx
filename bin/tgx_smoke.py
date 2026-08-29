@@ -1212,8 +1212,32 @@ def pay_regression() -> None:
                       ("paid_reaction", "платная реакция"), ("saved_info", "платёжные данные"),
                       ("clear_saved", "стирание данных")):
         check(f"ветка на месте: {why}", hasattr(Y.Pay, name))
-    for name, why in (("withdrawal_url", "вывод средств"), ("card_bank", "банк по карте")):
+    for name, why in (("withdrawal_url", "вывод средств"), ("card_bank", "банк по карте"),
+                      ("upgrade_gift", "улучшение подарка"), ("upgrade_preview", "предпросмотр"),
+                      ("set_price", "цена перепродажи"), ("resale", "вторичный рынок"),
+                      ("show_gift", "витрина"), ("pin_gift", "закрепление"),
+                      ("collections", "коллекции"), ("create_collection", "новая коллекция"),
+                      ("topup_options", "пакеты звёзд"), ("refund", "возврат"),
+                      ("referral_bots", "партнёрские программы"), ("auctions", "аукционы"),
+                      ("unique_gift", "уникальный подарок"), ("gift_details", "подробности"),
+                      ("can_send_gift", "можно ли дарить")):
         check(f"ветка на месте: {why}", hasattr(Y.Pay, name))
+
+    # Цена приходит списком: одна вещь стоит и звёзд, и TON.
+    class Stars:
+        def __init__(self, amount, nanos=0):
+            self.amount, self.nanos = amount, nanos
+
+    class StarsTonAmount:
+        def __init__(self, amount):
+            self.amount = amount
+
+    both = Y.prices_of([Stars(425), StarsTonAmount(4_680_000_000)])
+    check("звёзды читаются из списка", both["звёзды"] == 425.0)
+    # У TON нет nanos: вся сумма в amount, в нанотонах. Разделить обязан модуль.
+    check("TON переводится из нанотонов", both["TON"] == 4.68)
+    check("пустая цена — пустой словарь", Y.prices_of(None) == {})
+    check("одиночная сумма тоже принимается", Y.prices_of(Stars(10)) == {"звёзды": 10.0})
 
 
 def secret_input_regression() -> None:
