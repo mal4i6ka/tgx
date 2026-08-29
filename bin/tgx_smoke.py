@@ -1540,6 +1540,53 @@ def error_explain_regression() -> None:
     check(f"никто не разбирает ошибки по-своему: {own or 'все через общий'}", not own)
 
 
+def stickers_stats_regression() -> None:
+    """Стикер адресуется документом, а не номером: номер меняется при каждой
+    перестановке. И статистика приходит числами плюс токенами графиков."""
+    import tgx_stats as T
+    import tgx_stickers as K
+
+    check("png — статичный стикер", K.kind_of(Path("a.png")) == "static")
+    check("tgs — анимированный", K.kind_of(Path("a.tgs")) == "animated")
+    check("webm — видео", K.kind_of(Path("a.webm")) == "video")
+    refused = False
+    try:
+        K.kind_of(Path("a.gif"))
+    except K.StickerError:
+        refused = True
+    check("неподходящий формат отвергается", refused)
+
+    check("набор берётся из ссылки",
+          K.set_ref("https://t.me/addstickers/HotCherry").short_name == "HotCherry")
+    check("и из короткого имени", K.set_ref("HotCherry").short_name == "HotCherry")
+
+    refused = ""
+    try:
+        K.Stickers(None)._editor()
+    except K.StickerError as exc:
+        refused = str(exc)
+    check("правка без бота отвергается с объяснением", "правит бот" in refused)
+
+    class Item:
+        def __init__(self, current=None, previous=None):
+            self.current, self.previous = current, previous
+
+    grew = T.value(Item(120, 100))
+    check("рост считается в процентах", grew["процентов"] == 20.0)
+    check("и в абсолюте", grew["изменение"] == 20)
+    check("без прошлого значения процентов нет", T.value(Item(50))["процентов"] is None)
+    check("пустая метрика — пустая запись", T.value(Item()) == {})
+
+    class Summary:
+        views_graph = object()
+        growth_graph = object()
+        empty_graph = None
+        followers = None
+
+    check("графики перечисляются по именам",
+          sorted(T.graphs(Summary())) == ["growth_graph", "views_graph"])
+
+
 def rich_render_regression() -> None:
     """A received rich message is an Instant-View block tree — it has to become
     readable terminal text, not a bare "unsupported media" chip."""
@@ -1808,6 +1855,7 @@ async def main() -> int:
     await contacts_regression()
     stories_regression()
     error_explain_regression()
+    stickers_stats_regression()
     multipart_regression()
     rich_blocks_regression()
     poll_regression()

@@ -41,6 +41,8 @@ import tgx_rich
 import tgx_transcribe
 import tgx_render as render
 import tgx_splash
+import tgx_stats
+import tgx_stickers
 import tgx_stories
 
 BASE = Path(os.environ.get("TGX_HOME", Path.home() / "telegram-cli-tools"))
@@ -564,6 +566,88 @@ def read_secret(prompt: str, env: str = "") -> str:
             f"нужен ввод секрета, а терминала нет. Запустите команду в терминале "
             f"или передайте значение через переменную {env or 'окружения'}")
     return getpass.getpass(prompt)
+
+
+async def cmd_stats(args: argparse.Namespace) -> None:
+    """Статистика каналов, групп, постов и историй."""
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        stats = tgx_stats.Stats(client)
+        peer = await resolve_peer(client, args.chat)
+        cmd = args.statscmd
+
+        if cmd == "forwards":
+            rows = await stats.forwards(peer, args.id, args.limit)
+            print_jsonl(rows) if args.jsonl else print_table(
+                rows, ["куда", "id", "просмотров"], title="публичные пересылки")
+            return
+
+        if cmd == "graph":
+            render.emit(await stats.graph(peer, args.name, kind=args.kind, msg_id=args.id or 0))
+            return
+
+        data = await {
+            "channel": lambda: stats.channel(peer),
+            "group": lambda: stats.group(peer),
+            "message": lambda: stats.message(peer, args.id),
+            "story": lambda: stats.story(peer, args.id),
+        }[cmd]()
+        render.emit(data, title=cmd)
+    finally:
+        await client.disconnect()
+
+
+async def cmd_stickers(args: argparse.Namespace) -> None:
+    """Свои наборы стикеров. Правку делает бот, владельцем остаётесь вы."""
+    client = await make_client()
+    session = None
+    try:
+        await ensure_login(client)
+        if getattr(args, "bot", None):
+            bot = tgx_bots.Registry().get(args.bot)
+            if not bot.token:
+                raise tgx_stickers.StickerError(f"у @{bot.username} нет токена — "
+                                                f"`tgx bot token @{bot.username}`")
+            session = await tgx_bots.BotSession(bot, *get_credentials()).__aenter__()
+        packs = tgx_stickers.Stickers(client, session.client if session else None)
+        cmd = args.stickcmd
+
+        actions = {
+            "show": lambda: packs.show(args.name),
+            "check-name": lambda: packs.check_name(args.name),
+            "suggest": lambda: packs.suggest_name(args.title),
+            "add": lambda: packs.add(args.name, args.file, args.emoji),
+            "remove": lambda: packs.remove(args.name, args.position),
+            "move": lambda: packs.move(args.name, args.position, args.to),
+            "emoji": lambda: packs.set_emoji(args.name, args.position, args.emoji,
+                                             args.keywords or ""),
+            "rename": lambda: packs.rename(args.name, args.title),
+            "thumb": lambda: packs.set_thumb(args.name, args.position),
+        }
+        if cmd in actions:
+            render.emit(await actions[cmd]())
+            return
+
+        if cmd == "create":
+            pairs = []
+            for item in args.sticker:
+                path, _, emoji = item.partition("=")
+                pairs.append((path, emoji or "🙂"))
+            render.emit({"ok": True, **await packs.create(
+                args.owner, args.title, args.short_name, pairs,
+                masks=args.masks, emojis=args.emojis)})
+            return
+
+        if cmd == "delete":
+            v = await gated_or_die(client, args, "Удалить набор стикеров?",
+                                   args.name, "набор исчезнет у всех, кто его добавил")
+            render.emit({"ok": True, **await packs.delete(args.name), "подтвердил": v["by"]})
+            return
+    finally:
+        if session is not None:
+            await session.__aexit__()
+        await client.disconnect()
 
 
 async def cmd_share_folder(args: argparse.Namespace) -> None:
@@ -2872,6 +2956,7 @@ GROUPS = [
     ("аккаунт", ["auth", "me", "profile", "profile-get", "profile-edit", "profile-photo-set", "profile-photos", "profile-photo-delete"]),
     ("чаты и папки", ["dialogs", "folders", "folder-upsert"]),
     ("сообщения", ["history", "search", "send", "edit", "delete", "forward", "react", "pin", "pinned", "todo", "todo-check", "todo-add", "format", "export", "message-get", "message-click"]),
+    ("каналы и статистика", ["stats", "stickers"]),
     ("каналы", ["channel-create", "channel-info", "channel-edit", "channel-slowmode",
                 "channel-permissions", "channel-discussion", "chat-join", "chat-leave", "topics", "topic-create", "topic-edit", "topic-pin", "channel-photo-set", "channel-photo-delete", "channel-participants", "channel-admin-set", "channel-admin-remove", "channel-ban", "channel-unban", "channel-invite-add"]),
     ("админка", ["invite-export", "invite-list", "admin-log", "tl-schema"]),
@@ -3190,6 +3275,91 @@ def build_parser() -> argparse.ArgumentParser:
     cf.add_argument("--timeout", type=float, default=tgx_confirm.DEFAULT_TIMEOUT,
                     help="сколько ждать ответа, секунд")
     cf.set_defaults(func=cmd_confirm)
+
+    stt = sub.add_parser("stats", help="статистика каналов, групп, постов и историй")
+    stt_sub = stt.add_subparsers(dest="statscmd", required=True)
+    stt.set_defaults(func=cmd_stats)
+    for name, help_text in (("channel", "сводка по каналу"), ("group", "сводка по группе")):
+        parser = stt_sub.add_parser(name, help=help_text)
+        parser.add_argument("chat")
+    for name, help_text in (("message", "статистика поста"), ("story", "статистика истории")):
+        parser = stt_sub.add_parser(name, help=help_text)
+        parser.add_argument("chat")
+        parser.add_argument("id", type=int)
+    t_fw = stt_sub.add_parser("forwards", help="кто публично переслал пост")
+    t_fw.add_argument("chat")
+    t_fw.add_argument("id", type=int)
+    t_fw.add_argument("--limit", type=int, default=20)
+    t_fw.add_argument("--jsonl", action="store_true")
+    t_gr = stt_sub.add_parser("graph", help="догрузить один график по имени")
+    t_gr.add_argument("chat")
+    t_gr.add_argument("name", help="имя из списка «графики»")
+    t_gr.add_argument("--kind", default="channel", choices=["channel", "group", "message"])
+    t_gr.add_argument("--id", type=int, help="номер сообщения для kind=message")
+
+    sk = sub.add_parser("stickers", help="свои наборы стикеров")
+    sk_sub = sk.add_subparsers(dest="stickcmd", required=True)
+    sk.set_defaults(func=cmd_stickers)
+
+    k_show = sk_sub.add_parser("show", help="что внутри набора")
+    k_show.add_argument("name", help="короткое имя или ссылка t.me/addstickers/…")
+
+    k_chk = sk_sub.add_parser("check-name", help="свободно ли короткое имя")
+    k_chk.add_argument("name")
+    k_chk.add_argument("--as", dest="bot", required=True)
+
+    k_sug = sk_sub.add_parser("suggest", help="подобрать свободное короткое имя")
+    k_sug.add_argument("title")
+    k_sug.add_argument("--as", dest="bot", required=True)
+
+    k_new = sk_sub.add_parser("create", help="создать набор")
+    k_new.add_argument("owner", help="владелец набора — обычно вы")
+    k_new.add_argument("title")
+    k_new.add_argument("short_name")
+    k_new.add_argument("sticker", nargs="+", metavar="ФАЙЛ=ЭМОДЗИ")
+    k_new.add_argument("--as", dest="bot", required=True)
+    k_new.add_argument("--masks", action="store_true")
+    k_new.add_argument("--emojis", action="store_true", help="набор эмодзи, а не стикеров")
+
+    k_add = sk_sub.add_parser("add", help="добавить стикер в набор")
+    k_add.add_argument("name")
+    k_add.add_argument("file")
+    k_add.add_argument("emoji", nargs="?", default="🙂")
+    k_add.add_argument("--as", dest="bot", required=True)
+
+    k_rm = sk_sub.add_parser("remove", help="убрать стикер по номеру")
+    k_rm.add_argument("name")
+    k_rm.add_argument("position", type=int)
+    k_rm.add_argument("--as", dest="bot", required=True)
+
+    k_mv = sk_sub.add_parser("move", help="переставить стикер")
+    k_mv.add_argument("name")
+    k_mv.add_argument("position", type=int)
+    k_mv.add_argument("to", type=int)
+    k_mv.add_argument("--as", dest="bot", required=True)
+
+    k_em = sk_sub.add_parser("emoji", help="сменить эмодзи стикера")
+    k_em.add_argument("name")
+    k_em.add_argument("position", type=int)
+    k_em.add_argument("emoji")
+    k_em.add_argument("--keywords", help="ключевые слова для поиска")
+    k_em.add_argument("--as", dest="bot", required=True)
+
+    k_rn = sk_sub.add_parser("rename", help="переименовать набор")
+    k_rn.add_argument("name")
+    k_rn.add_argument("title")
+    k_rn.add_argument("--as", dest="bot", required=True)
+
+    k_th = sk_sub.add_parser("thumb", help="сделать стикер обложкой набора")
+    k_th.add_argument("name")
+    k_th.add_argument("position", type=int)
+    k_th.add_argument("--as", dest="bot", required=True)
+
+    k_del = sk_sub.add_parser("delete", help="удалить набор (требует подтверждения)")
+    k_del.add_argument("name")
+    k_del.add_argument("--as", dest="bot", required=True)
+    k_del.add_argument("--confirm-to", help="кто подтверждает")
+    k_del.add_argument("--timeout", type=float, default=300.0)
 
     sh = sub.add_parser("share-folder", help="общие папки: ссылка на набор чатов")
     sh_sub = sh.add_subparsers(dest="sharecmd", required=True)
@@ -4249,7 +4419,8 @@ async def amain() -> None:
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
-                 tgx_rich.RichError, tgx_stories.StoryError,
+                 tgx_rich.RichError, tgx_stats.StatsError, tgx_stickers.StickerError,
+                 tgx_stories.StoryError,
                  tgx_transcribe.TranscribeError)
 
 
