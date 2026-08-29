@@ -1516,6 +1516,26 @@ async def cmd_send(args: argparse.Namespace) -> None:
             if isinstance(sent, list):
                 sent = sent[-1]
         else:
+            if args.effect:
+                # Эффект пробрасывается только сырым запросом: send_message его не знает.
+                # И работает он лишь в личной переписке — в группе и канале сервер
+                # отвечает EFFECT_CHAT_INVALID.
+                if entity_kind(peer) in {"channel", "group"}:
+                    raise PeerError("эффекты работают только в личных чатах — "
+                                    "в группе и канале Telegram их не принимает")
+                result = await client(functions.messages.SendMessageRequest(
+                    peer=peer, message=body, entities=entities or None,
+                    random_id=helpers.generate_random_long(), effect=int(args.effect),
+                    no_webpage=args.no_preview or None, silent=args.silent or None,
+                    reply_to=types.InputReplyToMessage(reply_to_msg_id=args.reply_to)
+                    if args.reply_to else None))
+                sent_id = 0
+                for update in getattr(result, "updates", None) or []:
+                    sent_id = (getattr(update, "id", 0)
+                               or getattr(getattr(update, "message", None), "id", 0) or sent_id)
+                render.emit({"ok": True, "chat_id": getattr(peer, "id", None),
+                             "message_id": sent_id, "effect": args.effect})
+                return
             sent = await client.send_message(
                 peer, body, parse_mode=None, formatting_entities=entities or None,
                 link_preview=not args.no_preview, silent=args.silent or None, schedule=schedule,
@@ -1617,6 +1637,24 @@ async def cmd_forward(args: argparse.Namespace) -> None:
         target = await resolve_peer(client, args.to)
         await client.forward_messages(target, args.id, from_peer=source, silent=args.silent or None)
         render.emit({"ok": True, "count": len(args.id), "to": entity_title(target)})
+    finally:
+        await client.disconnect()
+
+
+async def cmd_effects(args: argparse.Namespace) -> None:
+    """Эффекты сообщений (Bot API 7.4): анимация, которая проигрывается при отправке."""
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        result = await client(functions.messages.GetAvailableEffectsRequest(hash=0))
+        rows = [{"эмодзи": getattr(e, "emoticon", "?"), "id": e.id,
+                 "premium": "да" if getattr(e, "premium_required", False) else ""}
+                for e in (getattr(result, "effects", None) or [])]
+        if args.search:
+            rows = [r for r in rows if args.search in r["эмодзи"]]
+        rows = rows[: args.limit]
+        print_jsonl(rows) if args.jsonl else print_table(rows, ["эмодзи", "id", "premium"],
+                                                        title="эффекты сообщений")
     finally:
         await client.disconnect()
 
@@ -2998,7 +3036,14 @@ def build_parser() -> argparse.ArgumentParser:
                      help="разметка текста: md (по умолчанию), html или none")
     snd.add_argument("--no-preview", action="store_true", help="без превью ссылок")
     snd.add_argument("--schedule", help="отложить: ISO-время, например 2026-08-29T10:00")
+    snd.add_argument("--effect", help="id эффекта при отправке; список — tgx effects")
     snd.set_defaults(func=cmd_send)
+
+    ef = sub.add_parser("effects", help="эффекты сообщений: анимация при отправке")
+    ef.add_argument("--search", help="фильтр по эмодзи")
+    ef.add_argument("--limit", type=int, default=40)
+    ef.add_argument("--jsonl", action="store_true")
+    ef.set_defaults(func=cmd_effects)
 
     cp = sub.add_parser("copy", help="скопировать сообщения без подписи «переслано»")
     cp.add_argument("peer", help="откуда")

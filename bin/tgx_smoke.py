@@ -1116,6 +1116,23 @@ def command_surface_regression() -> None:
           "--remove-from" in flags.get("react", set()))
     check("у poll create есть несколько правильных ответов",
           "--quiz" in flags.get("poll_create", set()))
+    check("у send есть эффект", "--effect" in flags.get("send", set()))
+    check("команда эффектов на месте", "effects" in leaves)
+    check("у copy есть сброс подписей", "--drop-captions" in flags.get("copy", set()))
+
+
+def collapsed_quote_regression() -> None:
+    """Свёрнутая цитата (Bot API 7.4) в терминале не сворачивается, но и молчать
+    о ней нельзя: иначе длинная врезка выглядит обычным текстом."""
+    from telethon.tl.types import MessageEntityBlockquote as Q
+
+    import tgx_format as F
+
+    plain = F.render("цитата\nвторая", [Q(offset=0, length=13)])
+    folded = F.render("цитата\nвторая", [Q(offset=0, length=13, collapsed=True)])
+    check("обычная цитата помечается полосой", plain.plain.startswith("▌ "))
+    check("свёрнутая помечается уголком", folded.plain.startswith("▾ "))
+    check("продолжение свёрнутой — обычной полосой", "\n▌ " in folded.plain)
 
 
 def rich_render_regression() -> None:
@@ -1388,6 +1405,7 @@ async def main() -> int:
     poll_regression()
     date_entity_regression()
     command_surface_regression()
+    collapsed_quote_regression()
     await resolve_peer_regression()
     autotools_regression()
     rich_render_regression()

@@ -188,6 +188,7 @@ def render(
     chars = list(text)
     spans: list[tuple[int, int, Any]] = []
     quotes: list[tuple[int, int]] = []
+    collapsed_marks: list[int] = []
 
     for entity in entities:
         name = type(entity).__name__
@@ -221,6 +222,11 @@ def render(
         elif name == "MessageEntityBlockquote":
             spans.append((start, end, Style(color=muted, italic=True)))
             quotes.append((start, end))
+            if getattr(entity, "collapsed", False):
+                # Раскрывающаяся цитата (Bot API 7.4): в терминале раскрывать
+                # нечего, но свернутость стоит показать — иначе длинная врезка
+                # выглядит как обычный текст, которым автор её не считал.
+                collapsed_marks.append(start)
         elif name == "MessageEntityFormattedDate":
             # Bot API зовёт это date_time: сервер хранит момент времени, а клиент
             # показывает его по-своему. В терминале подставляем сам момент —
@@ -235,28 +241,33 @@ def render(
     for start, end, style in spans:
         rendered.stylize(style, start, end)
     if quotes:
-        rendered = _bar_quotes(rendered, "".join(chars), quotes, muted)
+        rendered = _bar_quotes(rendered, "".join(chars), quotes, muted,
+                               collapsed=set(collapsed_marks))
     return rendered
 
 
-def _bar_quotes(rendered: Any, text: str, quotes: Iterable[tuple[int, int]], color: str) -> Any:
-    """Draw a ▌ bar in front of every quoted line."""
+def _bar_quotes(rendered: Any, text: str, quotes: Iterable[tuple[int, int]], color: str,
+                collapsed: set[int] | None = None) -> Any:
+    """Draw a ▌ bar in front of every quoted line; ▾ marks a collapsible one."""
     from rich.text import Text
 
     quoted_lines: set[int] = set()
+    collapsible_lines: set[int] = set()
     for start, end in quotes:
         if start > 0 and text[start - 1] != "\n":
             continue                     # an inline quote: style it, but don't bar the line
         first = text.count("\n", 0, start)
         last = text.count("\n", 0, max(start, end - 1))
         quoted_lines.update(range(first, last + 1))
+        if collapsed and start in collapsed:
+            collapsible_lines.add(first)
     if not quoted_lines:
         return rendered
     lines = rendered.split("\n")
     out = []
     for index, line in enumerate(lines):
         if index in quoted_lines:
-            bar = Text("▌ ", style=color)
+            bar = Text("▾ " if index in collapsible_lines else "▌ ", style=color)
             bar.append_text(line)
             out.append(bar)
         else:
