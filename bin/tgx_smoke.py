@@ -1096,7 +1096,11 @@ def command_surface_regression() -> None:
     import tgx
     import tgx_autotools
 
-    leaves = {"_".join(path) for path, _, _, _ in tgx_autotools.leaves(tgx.build_parser())}
+    # Ключи нормализуем так же, как генератор инструментов MCP: дефис → подчёркивание.
+    def key(path):
+        return "_".join(path).replace("-", "_")
+
+    leaves = {key(path) for path, _, _, _ in tgx_autotools.leaves(tgx.build_parser())}
     for wanted, why in (("poll_create", "создание опроса"), ("poll_vote", "голосование"),
                         ("poll_results", "результаты"), ("poll_close", "закрытие"),
                         ("copy", "копия без подписи «переслано»"),
@@ -1108,7 +1112,7 @@ def command_surface_regression() -> None:
     parser = tgx.build_parser()
     flags = {}
     for path, leaf, _, _ in tgx_autotools.leaves(parser):
-        flags["_".join(path)] = {o for a in leaf._actions for o in a.option_strings}
+        flags[key(path)] = {o for a in leaf._actions for o in a.option_strings}
     check("у send есть обложка видео", "--cover" in flags.get("send", set()))
     check("у send есть точка старта", "--start-at" in flags.get("send", set()))
     check("у bot rich есть блоки", "--blocks" in flags.get("bot_rich", set()))
@@ -1119,6 +1123,14 @@ def command_surface_regression() -> None:
     check("у send есть эффект", "--effect" in flags.get("send", set()))
     check("команда эффектов на месте", "effects" in leaves)
     check("у copy есть сброс подписей", "--drop-captions" in flags.get("copy", set()))
+
+    # Каждое тратящее действие обязано уметь спросить человека.
+    for command in ("pay_convert_gift", "pay_transfer_gift", "pay_react", "pay_apply_code",
+                    "pay_clear_saved", "pay_cancel_subscription", "pay_send"):
+        check(f"{command} умеет спросить человека",
+              "--confirm-to" in flags.get(command, set()))
+    check("у delete тоже есть ворота", "--confirm-to" in flags.get("delete", set()))
+    check("у guard check тоже", "--confirm-to" in flags.get("guard_check", set()))
 
 
 def collapsed_quote_regression() -> None:
@@ -1190,6 +1202,16 @@ def pay_regression() -> None:
     # Оплата есть, но только за воротами подтверждения — это и проверяем.
     check("оплата звёздами реализована", hasattr(Y.Pay, "pay_stars"))
     check("модуль требует согласия человека", "нажал «Разрешить»" in (Y.__doc__ or ""))
+
+    # Денежные ветки должны существовать все — их легко забыть подключить.
+    for name, why in (("gift_catalogue", "каталог подарков"), ("my_gifts", "свои подарки"),
+                      ("convert_gift", "обмен подарка"), ("transfer_gift", "передача подарка"),
+                      ("subscriptions", "подписки"), ("cancel_subscription", "отмена подписки"),
+                      ("revenue", "доходы"), ("check_code", "проверка кода"),
+                      ("apply_code", "применение кода"), ("giveaway", "розыгрыш"),
+                      ("paid_reaction", "платная реакция"), ("saved_info", "платёжные данные"),
+                      ("clear_saved", "стирание данных")):
+        check(f"ветка на месте: {why}", hasattr(Y.Pay, name))
 
 
 def confirm_regression() -> None:

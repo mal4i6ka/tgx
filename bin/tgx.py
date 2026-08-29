@@ -608,6 +608,90 @@ async def cmd_pay(args: argparse.Namespace) -> None:
             render.emit({"ok": True, **await pay.pay_stars(args.link), "подтвердил": verdict["by"]})
             return
 
+        # Читающие ветки — сразу; тратящие проходят через подтверждение.
+        reads = {
+            "gifts": lambda: pay.gift_catalogue(args.limit),
+            "my-gifts": lambda: pay.my_gifts(args.chat, args.limit),
+            "subscriptions": lambda: pay.subscriptions(args.chat),
+        }
+        if args.paycmd in reads:
+            rows = await reads[args.paycmd]()
+            fields = {"gifts": ["id", "звёзд", "осталось", "за продажу"],
+                      "my-gifts": ["id", "что", "звёзд", "можно продать за"],
+                      "subscriptions": ["id", "звёзд", "до", "отменена"]}[args.paycmd]
+            print_jsonl(rows) if args.jsonl else print_table(rows, fields, title=args.paycmd)
+            return
+
+        if args.paycmd == "revenue":
+            render.emit(await pay.revenue(await resolve_peer(client, args.chat), ton=args.ton))
+            return
+
+        if args.paycmd == "check-code":
+            render.emit(await pay.check_code(args.slug))
+            return
+
+        if args.paycmd == "giveaway":
+            render.emit(await pay.giveaway(await resolve_peer(client, args.chat), args.id))
+            return
+
+        if args.paycmd == "saved-info":
+            render.emit(await pay.saved_info())
+            return
+
+        # ── тратящее и необратимое: только через подтверждение человеком ────
+        async def gated(title: str, details: str, danger: str) -> dict[str, Any]:
+            if not args.confirm_to:
+                raise tgx_pay.PayError(
+                    "это действие тратит деньги или необратимо — нужно подтверждение: "
+                    "добавьте --confirm-to КОГО --as @бот")
+            verdict = await ask_human(client, args.bot, args.confirm_to, title, details,
+                                      danger=danger, timeout=args.timeout)
+            if verdict["decision"] != "approved":
+                render.emit({"ok": False, "действие": "отменено", **verdict})
+                raise SystemExit(2)
+            return verdict
+
+        if args.paycmd == "convert-gift":
+            v = await gated("Обменять подарок на звёзды?", f"Подарок {args.id}",
+                            "подарок исчезнет навсегда")
+            render.emit({"ok": True, **await pay.convert_gift(args.id), "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "transfer-gift":
+            v = await gated("Передать подарок?", f"Подарок {args.id} → {args.to}",
+                            "вернуть его нельзя")
+            render.emit({"ok": True, **await pay.transfer_gift(args.id, args.to),
+                         "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "react":
+            chat = await resolve_peer(client, args.chat)
+            v = await gated("Отправить платную реакцию?",
+                            f"{args.count} ⭐ автору сообщения {args.id}",
+                            "звёзды спишутся сразу")
+            render.emit({"ok": True, **await pay.paid_reaction(
+                chat, args.id, args.count, args.anonymous), "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "apply-code":
+            v = await gated("Применить подарочный код?", args.slug, "код одноразовый")
+            render.emit({"ok": True, **await pay.apply_code(args.slug), "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "clear-saved":
+            v = await gated("Стереть сохранённые платёжные данные?",
+                            "способ оплаты и контакты", "восстановить их нельзя")
+            render.emit({"ok": True, **await pay.clear_saved(), "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "cancel-subscription":
+            chat = await resolve_peer(client, args.chat)
+            v = await gated("Отменить подписку?" if not args.resume else "Возобновить подписку?",
+                            f"Подписка {args.id}", "возобновление — отдельным действием")
+            render.emit({"ok": True, **await pay.cancel_subscription(
+                chat, args.id, not args.resume), "подтвердил": v["by"]})
+            return
+
         if args.paycmd == "gift-options":
             rows = await pay.gift_options(args.user)
             print_jsonl(rows) if args.jsonl else print_table(rows, ["звёзд", "цена", "валюта"],
@@ -2716,6 +2800,64 @@ def build_parser() -> argparse.ArgumentParser:
     y_send.add_argument("--as", dest="bot", required=True, help="бот, который спросит разрешение")
     y_send.add_argument("--confirm-to", required=True, help="кто подтверждает списание")
     y_send.add_argument("--timeout", type=float, default=300.0, help="сколько ждать согласия")
+
+    # читающие
+    y_cat = pay_sub.add_parser("gifts", help="каталог подарков Telegram и цены")
+    y_cat.add_argument("--limit", type=int, default=40)
+    y_cat.add_argument("--jsonl", action="store_true")
+
+    y_mine = pay_sub.add_parser("my-gifts", help="полученные подарки")
+    y_mine.add_argument("chat", nargs="?", help="чей: по умолчанию свои")
+    y_mine.add_argument("--limit", type=int, default=30)
+    y_mine.add_argument("--jsonl", action="store_true")
+
+    y_subs = pay_sub.add_parser("subscriptions", help="подписки за звёзды")
+    y_subs.add_argument("chat", nargs="?")
+    y_subs.add_argument("--jsonl", action="store_true")
+
+    y_rev = pay_sub.add_parser("revenue", help="сколько заработал канал или бот")
+    y_rev.add_argument("chat")
+    y_rev.add_argument("--ton", action="store_true")
+
+    y_code = pay_sub.add_parser("check-code", help="что даёт подарочный код")
+    y_code.add_argument("slug")
+
+    y_give = pay_sub.add_parser("giveaway", help="сведения о розыгрыше")
+    y_give.add_argument("chat")
+    y_give.add_argument("id", type=int)
+
+    pay_sub.add_parser("saved-info", help="что Telegram хранит из платёжных данных")
+
+    # тратящие и необратимые — у всех общие ключи подтверждения
+    def gated_parser(name: str, help_text: str) -> Any:
+        parser = pay_sub.add_parser(name, help=help_text + " (требует подтверждения)")
+        parser.add_argument("--confirm-to", help="кто подтверждает")
+        parser.add_argument("--as", dest="bot", help="бот, который спросит")
+        parser.add_argument("--timeout", type=float, default=300.0)
+        return parser
+
+    y_conv = gated_parser("convert-gift", "обменять подарок на звёзды")
+    y_conv.add_argument("id", type=int, help="id сообщения с подарком")
+
+    y_tr = gated_parser("transfer-gift", "передать подарок другому")
+    y_tr.add_argument("id", type=int)
+    y_tr.add_argument("to")
+
+    y_react = gated_parser("react", "платная реакция звёздами")
+    y_react.add_argument("chat")
+    y_react.add_argument("id", type=int)
+    y_react.add_argument("count", type=int, help="сколько звёзд")
+    y_react.add_argument("--anonymous", action="store_true")
+
+    y_apply = gated_parser("apply-code", "применить подарочный код")
+    y_apply.add_argument("slug")
+
+    gated_parser("clear-saved", "стереть сохранённые платёжные данные")
+
+    y_cancel = gated_parser("cancel-subscription", "отменить или возобновить подписку")
+    y_cancel.add_argument("chat")
+    y_cancel.add_argument("id", help="id подписки")
+    y_cancel.add_argument("--resume", action="store_true", help="возобновить вместо отмены")
 
     y_gift = pay_sub.add_parser("gift-options", help="во что обойдётся подарить звёзды")
     y_gift.add_argument("user")

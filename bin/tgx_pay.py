@@ -272,6 +272,188 @@ class Pay:
                  "цена": getattr(o, "amount", None),
                  "валюта": getattr(o, "currency", None)} for o in (result or [])]
 
+    # ── подарки ──────────────────────────────────────────────────────────────
+    async def gift_catalogue(self, limit: int = 40) -> list[dict[str, Any]]:
+        """Какие подарки продаёт Telegram и почём."""
+        from telethon.tl import functions
+
+        result = await self.client(functions.payments.GetStarGiftsRequest(hash=0))
+        out = []
+        for gift in (getattr(result, "gifts", None) or [])[:limit]:
+            out.append({
+                "id": getattr(gift, "id", None),
+                "звёзд": getattr(gift, "stars", None),
+                "осталось": getattr(gift, "availability_remains", None),
+                "всего": getattr(gift, "availability_total", None),
+                "за продажу": getattr(gift, "convert_stars", None),
+                "улучшаемый": getattr(gift, "upgrade_stars", None) is not None,
+            })
+        return out
+
+    async def my_gifts(self, peer: Any = None, limit: int = 30) -> list[dict[str, Any]]:
+        """Подарки, полученные мной или каналом."""
+        from telethon.tl import functions, types
+
+        target = await self.client.get_input_entity(peer) if peer else types.InputPeerSelf()
+        result = await self.client(functions.payments.GetSavedStarGiftsRequest(
+            peer=target, offset="", limit=int(limit)))
+        out = []
+        for saved in getattr(result, "gifts", None) or []:
+            gift = getattr(saved, "gift", None)
+            unique = getattr(gift, "title", None)
+            out.append({
+                "id": getattr(saved, "msg_id", None) or getattr(saved, "saved_id", None),
+                "что": unique or f"подарок {getattr(gift, 'id', '?')}",
+                "звёзд": getattr(gift, "stars", None),
+                "уникальный": unique is not None,
+                "на виду": not bool(getattr(saved, "unsaved", False)),
+                "можно продать за": getattr(saved, "convert_stars", None),
+            })
+        return out
+
+    async def convert_gift(self, msg_id: int) -> dict[str, Any]:
+        """Обменять подарок на звёзды. Подарок исчезает — назад не вернуть."""
+        from telethon.tl import functions, types
+
+        try:
+            await self.client(functions.payments.ConvertStarGiftRequest(
+                stargift=types.InputSavedStarGiftUser(msg_id=int(msg_id))))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        return {"обменян": int(msg_id)}
+
+    async def transfer_gift(self, msg_id: int, to: Any) -> dict[str, Any]:
+        """Передать подарок другому. Необратимо."""
+        from telethon.tl import functions, types
+
+        target = await self.client.get_input_entity(to)
+        try:
+            await self.client(functions.payments.TransferStarGiftRequest(
+                stargift=types.InputSavedStarGiftUser(msg_id=int(msg_id)), to_id=target))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        return {"передан": int(msg_id)}
+
+    # ── подписки, доходы, коды ───────────────────────────────────────────────
+    async def subscriptions(self, peer: Any = None) -> list[dict[str, Any]]:
+        from telethon.tl import functions, types
+
+        target = await self.client.get_input_entity(peer) if peer else types.InputPeerSelf()
+        result = await self.client(functions.payments.GetStarsSubscriptionsRequest(
+            peer=target, offset="", missing_balance=None))
+        out = []
+        for sub in getattr(result, "subscriptions", None) or []:
+            out.append({
+                "id": getattr(sub, "id", None),
+                "звёзд": amount_of(getattr(sub, "pricing", None))
+                or getattr(getattr(sub, "pricing", None), "amount", None),
+                "до": str(getattr(sub, "until_date", "") or "")[:10],
+                "отменена": bool(getattr(sub, "canceled", False)),
+                "просрочена": bool(getattr(sub, "missing_balance", False)),
+            })
+        return out
+
+    async def cancel_subscription(self, peer: Any, subscription_id: str,
+                                  canceled: bool = True) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        target = await self.client.get_input_entity(peer)
+        await self.client(functions.payments.ChangeStarsSubscriptionRequest(
+            peer=target, subscription_id=str(subscription_id), canceled=canceled))
+        return {"подписка": subscription_id, "отменена": canceled}
+
+    async def revenue(self, peer: Any, *, ton: bool = False) -> dict[str, Any]:
+        """Сколько заработал канал или бот."""
+        from telethon.tl import functions
+
+        target = await self.client.get_input_entity(peer)
+        result = await self.client(functions.payments.GetStarsRevenueStatsRequest(
+            peer=target, dark=None, ton=ton or None))
+        status = getattr(result, "status", None)
+        return {
+            "валюта": "TON" if ton else "звёзды",
+            "доступно": amount_of(getattr(status, "available_balance", None)),
+            "всего": amount_of(getattr(status, "overall_revenue", None)),
+            "на выводе": amount_of(getattr(status, "current_balance", None)),
+            "вывод доступен": bool(getattr(status, "withdrawal_enabled", False)),
+        }
+
+    async def check_code(self, slug: str) -> dict[str, Any]:
+        """Что даёт подарочный код — до того, как его применить."""
+        from telethon.tl import functions
+
+        clean = slug.rstrip("/").split("/")[-1]
+        try:
+            result = await self.client(functions.payments.CheckGiftCodeRequest(slug=clean))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        used = getattr(result, "used_date", None)
+        return {
+            "месяцев Premium": getattr(result, "months", None),
+            "уже использован": used.isoformat(timespec="seconds") if used else None,
+            "от кого": getattr(getattr(result, "from_id", None), "user_id", None),
+        }
+
+    async def apply_code(self, slug: str) -> dict[str, Any]:
+        """Применить подарочный код к своему аккаунту. Одноразово."""
+        from telethon.tl import functions
+
+        clean = slug.rstrip("/").split("/")[-1]
+        try:
+            await self.client(functions.payments.ApplyGiftCodeRequest(slug=clean))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        return {"код применён": clean}
+
+    async def giveaway(self, chat: Any, msg_id: int) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        peer = await self.client.get_input_entity(chat)
+        result = await self.client(functions.payments.GetGiveawayInfoRequest(
+            peer=peer, msg_id=int(msg_id)))
+        return {"вид": type(result).__name__.replace("GiveawayInfo", "") or "идёт",
+                "участвую": bool(getattr(result, "participating", False)),
+                "закончится": str(getattr(result, "finish_date", "") or "")[:19],
+                "почему нельзя": getattr(result, "disallowed_country", None)
+                or ("подписан слишком недавно" if getattr(result, "joined_too_early_date", None) else None)}
+
+    async def paid_reaction(self, chat: Any, msg_id: int, count: int,
+                            anonymous: bool = False) -> dict[str, Any]:
+        """Платная реакция: звёзды уходят автору поста. Списывает деньги."""
+        from telethon import helpers
+        from telethon.tl import functions
+
+        peer = await self.client.get_input_entity(chat)
+        try:
+            await self.client(functions.messages.SendPaidReactionRequest(
+                peer=peer, msg_id=int(msg_id), count=int(count),
+                random_id=helpers.generate_random_long(), private=anonymous or None))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        return {"сообщение": int(msg_id), "звёзд": int(count), "анонимно": anonymous}
+
+    async def saved_info(self) -> dict[str, Any]:
+        """Что Telegram хранит из платёжных данных."""
+        from telethon.tl import functions
+
+        result = await self.client(functions.payments.GetSavedInfoRequest())
+        info = getattr(result, "saved_info", None)
+        return {
+            "сохранён способ оплаты": bool(getattr(result, "has_saved_credentials", False)),
+            "имя": getattr(info, "name", None),
+            "телефон": getattr(info, "phone", None),
+            "почта": getattr(info, "email", None),
+            "адрес": bool(getattr(info, "shipping_address", None)),
+        }
+
+    async def clear_saved(self, *, credentials: bool = True, info: bool = True) -> dict[str, Any]:
+        """Стереть сохранённые платёжные данные."""
+        from telethon.tl import functions
+
+        await self.client(functions.payments.ClearSavedInfoRequest(
+            credentials=credentials or None, info=info or None))
+        return {"стёрто": {"способ оплаты": credentials, "адрес и контакты": info}}
+
     @staticmethod
     def _explain(exc: Exception) -> Exception:
         text = str(exc)
@@ -284,6 +466,11 @@ class Pay:
             "SLUG_INVALID": "такой ссылки-счёта не существует",
             "BOT_INVALID": "счета выписывает бот — нужен его токен",
             "STARGIFT_INVALID": "этот подарок недоступен",
+            "GIFT_SLUG_INVALID": "такого подарочного кода нет",
+            "GIFT_SLUG_EXPIRED": "подарочный код уже использован или просрочен",
+            "PREMIUM_ACCOUNT_REQUIRED": "нужен Telegram Premium",
+            "BALANCE_TOO_LOW": "не хватает звёзд на балансе",
+            "STARGIFT_TRANSFER_TOO_EARLY": "подарок ещё нельзя передавать — не вышел срок",
         }
         for code, message in hints.items():
             if code in text:
