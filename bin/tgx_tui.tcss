@@ -1,0 +1,608 @@
+/* tgx TUI — Telegram-flavoured dark/light styling.
+   Colours come from the registered themes (tgx-night / tgx-day) so a theme
+   switch repaints everything without touching this file. */
+
+Screen {
+    background: $background;
+    layers: base overlay;
+}
+
+/* ── top bar ───────────────────────────────────────────────────────────── */
+#topbar {
+    height: 1;
+    padding: 0 1;
+    background: $panel;
+    color: $foreground;
+}
+
+/* ── layout ────────────────────────────────────────────────────────────── */
+#body {
+    height: 1fr;
+}
+
+#sidebar {
+    width: 34;
+    min-width: 0;
+    background: $surface;
+    border-right: vkey $panel;
+    transition: width 180ms in_out_cubic, opacity 180ms linear;
+}
+
+#sidebar.collapsed {
+    width: 0;
+    opacity: 0.0;
+    border-right: none;
+}
+
+#filter {
+    border: none;
+    height: 1;
+    margin: 0 1;
+    padding: 0;
+    background: $surface;
+    color: $foreground;
+}
+
+#filter:focus {
+    background: $panel;
+}
+
+#folders {
+    height: auto;
+    max-height: 2;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+#chats {
+    background: $surface;
+    border: none;
+    padding: 0;
+    scrollbar-size: 1 1;
+    scrollbar-color: $panel;
+    scrollbar-color-hover: $primary;
+}
+
+#chats > .option-list--option {
+    padding: 0 1;
+}
+
+#chats > .option-list--option-highlighted {
+    background: $primary 25%;
+    color: $foreground;
+}
+
+#chats:focus > .option-list--option-highlighted {
+    background: $primary 40%;
+    text-style: none;
+}
+
+/* ── conversation ──────────────────────────────────────────────────────── */
+#chat {
+    width: 1fr;
+    background: $background;
+}
+
+#chat-header {
+    height: 2;
+    padding: 0 2;
+    background: $panel;
+    color: $foreground;
+}
+
+#messages {
+    height: 1fr;
+    padding: 1 2 0 2;
+    background: $background;
+    scrollbar-size: 1 1;
+    scrollbar-color: $panel;
+    scrollbar-color-hover: $primary;
+}
+
+MessageRow {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+MessageRow.own {
+    align-horizontal: right;
+}
+
+MessageRow.other {
+    align-horizontal: left;
+}
+
+MessageRow.service {
+    align-horizontal: center;
+}
+
+Bubble {
+    width: auto;
+    max-width: 76%;
+    height: auto;
+    padding: 0 1;
+    background: $boost;
+    color: $foreground;
+    border: round $panel;
+    transition: background 400ms linear, opacity 200ms linear;
+}
+
+Bubble > Static {
+    width: auto;
+    height: auto;
+}
+
+Bubble .media {
+    margin-top: 1;
+}
+
+Bubble.document {
+    max-width: 100%;
+}
+
+Bubble.own {
+    background: $primary 22%;
+    border: round $primary 45%;
+}
+
+Bubble.selected {
+    border: round $primary;
+}
+
+Bubble.flash {
+    background: $primary 45%;
+}
+
+Bubble.service {
+    border: none;
+    background: transparent;
+    color: $text-muted;
+    text-style: italic;
+    max-width: 100%;
+}
+
+DaySeparator {
+    width: 100%;
+    height: 1;
+    content-align: center middle;
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+#empty-state {
+    width: 100%;
+    height: 1fr;
+    content-align: center middle;
+    color: $text-muted;
+}
+
+/* ── composer ──────────────────────────────────────────────────────────── */
+#reply-chip {
+    height: 0;
+    display: none;
+    padding: 0 2;
+    background: $panel;
+    color: $text-muted;
+}
+
+#reply-chip.visible {
+    display: block;
+    height: 1;
+}
+
+#typing {
+    height: 0;
+    display: none;
+    padding: 0 2;
+    color: $primary;
+}
+
+#typing.visible {
+    display: block;
+    height: 1;
+}
+
+#composer-row {
+    height: 3;
+    background: $surface;
+    border-top: hkey $panel;
+}
+
+#composer {
+    border: none;
+    height: 3;
+    padding: 1 2;
+    background: $surface;
+    color: $foreground;
+}
+
+#composer:focus {
+    background: $panel;
+}
+
+#composer.sending {
+    color: $text-muted;
+}
+
+/* ── modals ────────────────────────────────────────────────────────────── */
+ModalScreen {
+    align: center middle;
+    background: $background 60%;
+}
+
+#dialog {
+    width: 62;
+    max-width: 90%;
+    height: auto;
+    padding: 1 2;
+    background: $surface;
+    border: round $primary;
+}
+
+#dialog-wide {
+    width: 88;
+    max-width: 96%;
+    height: auto;
+    max-height: 80%;
+    padding: 1 2;
+    background: $surface;
+    border: round $primary;
+}
+
+#dialog Input, #dialog-wide Input, #login-box Input {
+    border: none;
+    height: 3;
+    padding: 1 1;
+    background: $panel;
+    margin: 1 0;
+}
+
+#dialog TextArea {
+    height: 10;
+    border: none;
+    background: $panel;
+    margin: 1 0;
+}
+
+.dialog-title {
+    text-style: bold;
+    color: $primary;
+}
+
+.dialog-hint {
+    color: $text-muted;
+}
+
+#comments-head {
+    height: auto;
+    max-height: 3;
+    margin-bottom: 1;
+}
+
+#comments-list {
+    height: 18;
+    max-height: 60%;
+    background: $background;
+    padding: 0 1;
+}
+
+#comment-input {
+    border: none;
+    height: 3;
+    padding: 1 1;
+    background: $panel;
+    margin-top: 1;
+}
+
+#search-results {
+    height: auto;
+    max-height: 20;
+    background: $panel;
+    border: none;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+#search-results > .option-list--option-highlighted {
+    background: $primary 40%;
+}
+
+#help-grid {
+    height: auto;
+}
+
+#media-box {
+    width: 100%;
+    height: 100%;
+    padding: 1 2;
+    background: $surface;
+    border: round $primary;
+    align: center middle;
+}
+
+#media-caption {
+    width: 100%;
+    height: 1;
+    margin-bottom: 1;
+}
+
+#media-holder {
+    width: auto;
+    height: auto;
+    align: center middle;
+}
+
+/* ── splash / login ────────────────────────────────────────────────────── */
+#splash {
+    width: 100%;
+    height: 1fr;
+    content-align: center middle;
+    color: $primary;
+}
+
+#login-status {
+    height: 1;
+    color: $text-muted;
+}
+
+#login-box {
+    width: 56;
+    height: auto;
+    padding: 1 2;
+    background: $surface;
+    border: round $primary;
+}
+
+Footer {
+    background: $panel;
+}
+
+Toast {
+    background: $surface;
+    border-left: outer $primary;
+}
+
+/* ── attach dialog ─────────────────────────────────────────────────────── */
+#attach-body {
+    height: 14;
+    margin-top: 1;
+}
+
+#attach-tree {
+    width: 1fr;
+    height: 100%;
+    background: $panel;
+    padding: 0 1;
+}
+
+#attach-preview {
+    width: 40;
+    height: 100%;
+    padding: 0 1;
+    background: $panel;
+    color: $text-muted;
+}
+
+#attach-options {
+    height: 3;
+    margin-top: 1;
+}
+
+#attach-options Checkbox {
+    width: auto;
+    margin-right: 2;
+    background: transparent;
+    border: none;
+}
+
+#attach-options Checkbox.-on {
+    color: $primary;
+    text-style: bold;
+}
+
+/* ── post editor ───────────────────────────────────────────────────────── */
+#post-options {
+    height: 3;
+    margin-bottom: 1;
+}
+
+#post-options Select {
+    width: 24;
+    margin-right: 2;
+}
+
+#post-options Checkbox {
+    width: auto;
+    margin-right: 2;
+    background: transparent;
+    border: none;
+}
+
+#post-options Checkbox.-on {
+    color: $primary;
+    text-style: bold;
+}
+
+#post-body {
+    height: 14;
+}
+
+#post-text {
+    width: 1fr;
+    height: 100%;
+    border: none;
+    background: $panel;
+}
+
+#post-render {
+    width: 1fr;
+    height: 100%;
+    padding: 0 1;
+    background: $boost;
+    border-left: vkey $panel;
+}
+
+#post-extras {
+    height: 3;
+    margin-top: 1;
+}
+
+#post-extras Input {
+    width: 1fr;
+    border: none;
+    height: 3;
+    padding: 1 1;
+    background: $panel;
+    margin-right: 1;
+}
+
+#post-syntax {
+    height: auto;
+    margin-top: 1;
+    color: $text-muted;
+}
+
+/* ── channel management ────────────────────────────────────────────────── */
+#manage-summary {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#dialog-wide #manage-title, #dialog-wide #manage-about, #dialog-wide #manage-username {
+    height: 3;
+    padding: 1 1;
+    margin: 0 0 1 0;
+    border: none;
+    background: $panel;
+}
+
+#manage-rights-label {
+    height: 1;
+    margin-bottom: 1;
+}
+
+#manage-rights {
+    height: auto;
+    margin-bottom: 1;
+    grid-gutter: 0 1;
+}
+
+#manage-rights Checkbox {
+    width: auto;
+    margin-right: 1;
+    background: transparent;
+    border: none;
+}
+
+#manage-rights Checkbox.-on {
+    color: $primary;
+    text-style: bold;
+}
+
+#manage-extras {
+    height: 3;
+}
+
+#manage-slow-label {
+    width: auto;
+    height: 3;
+    padding: 1 1 0 0;
+}
+
+#manage-extras Input {
+    width: 12;
+    height: 3;
+    padding: 1 1;
+    border: none;
+    background: $panel;
+}
+
+#dialog #new-title, #dialog #new-about, #dialog #new-username {
+    height: 3;
+    padding: 1 1;
+    margin: 1 0 0 0;
+    border: none;
+    background: $panel;
+}
+
+/* ── forum topics ──────────────────────────────────────────────────────── */
+#topics {
+    height: 2;
+    background: $surface;
+    border-bottom: hkey $panel;
+}
+
+#topic-list {
+    height: 14;
+    background: $panel;
+    border: none;
+    margin-bottom: 1;
+}
+
+#dialog-wide #topic-title {
+    height: 3;
+    padding: 1 1;
+    border: none;
+    background: $panel;
+}
+
+/* ── search filters ────────────────────────────────────────────────────── */
+#search-filters {
+    height: 3;
+    margin-bottom: 1;
+}
+
+#search-filters Select {
+    width: 22;
+    margin-right: 1;
+}
+
+#search-filters Input {
+    width: 1fr;
+    height: 3;
+    padding: 1 1;
+    border: none;
+    background: $panel;
+    margin-right: 1;
+}
+
+/* ── checklists ────────────────────────────────────────────────────────── */
+#dialog #todo-title, #dialog #todo-new {
+    height: 3;
+    padding: 1 1;
+    margin: 1 0 0 0;
+    border: none;
+    background: $panel;
+}
+
+#todo-items {
+    height: 8;
+    margin-top: 1;
+    border: none;
+    background: $panel;
+}
+
+#todo-options {
+    height: 3;
+    margin-top: 1;
+}
+
+#todo-options Checkbox {
+    width: auto;
+    margin-right: 2;
+    background: transparent;
+    border: none;
+}
+
+#todo-options Checkbox.-on {
+    color: $primary;
+    text-style: bold;
+}
+
+#todo-list {
+    height: 12;
+    background: $panel;
+    border: none;
+    margin-top: 1;
+}

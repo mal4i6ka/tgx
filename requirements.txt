@@ -1,0 +1,11 @@
+# tgx — Telegram CLI + TUI
+Telethon>=1.43            # Telegram MTProto client
+textual>=8.0              # full-screen TUI (tgx ui)
+rich>=14.0                # coloured CLI output
+terminaltexteffects>=0.15 # animated splash (tgx banner / tgx ui)
+textual-image>=0.13       # inline photo previews (kitty/sixel/half-block)
+pillow>=10.3              # image decoding for those previews
+mcp>=2.1                  # MCP-коннектор для агентов (bin/tgx-mcp)
+hachoir>=3.3               # длительность и размер видео — иначе Telegram шлёт его файлом
+certifi>=2024.0            # корневые сертификаты для HTTPS (Bot API, telegra.ph)
+pyte>=0.8                  # эмулятор терминала: запись баннера в видео
