@@ -1381,6 +1381,67 @@ def confirm_regression() -> None:
         C.call = original
 
 
+async def contacts_regression() -> None:
+    """Контакт, блокировка и близкие друзья — три разные вещи, и путать их
+    дорого: «удалил контакт» не значит «запретил писать»."""
+    import tgx_contacts as C
+
+    class User:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    row = C.person(User(id=7, first_name="Роман", last_name="Махлин", username="makros23",
+                        phone="79872332235", bot=False, mutual_contact=True,
+                        close_friend=False, premium=True, status=None))
+    check("имя склеивается из двух частей", row["имя"] == "Роман Махлин")
+    check("взаимность видна", row["взаимный"] is True)
+    check("premium виден", row["premium"] is True)
+    check("бот отличается от человека", row["бот"] is False)
+    bare = C.person(User(id=8, first_name=None, last_name=None, username=None))
+    check("без имени поле пустое, а не строка «None»", bare["имя"] is None)
+
+    class Server:
+        def __init__(self, reply):
+            self.reply, self.calls = reply, []
+
+        async def get_input_entity(self, who):
+            return who
+
+        async def get_entity(self, who):
+            return User(id=1, first_name="Кто", last_name="То", username="kto")
+
+        async def __call__(self, request):
+            self.calls.append(type(request).__name__)
+            return self.reply
+
+    class Disabled:
+        pass
+    Disabled.__name__ = "TopPeersDisabled"
+
+    book = C.Contacts(Server(Disabled()))
+    refused = ""
+    try:
+        await book.top_peers()
+    except C.ContactError as exc:
+        refused = str(exc)
+    check("выключенный учёт объясняется, а не молчит",
+          "выключен в настройках" in refused)
+
+    # Удаление контакта не равно блокировке — и ответ обязан это говорить.
+    server = Server(None)
+    book2 = C.Contacts(server)
+    answer = await book2.remove(["@кто"])
+    check("удаление контакта поясняет, что писать он всё равно сможет",
+          "не запрещает писать" in answer["примечание"])
+    check("вызван именно DeleteContacts", "DeleteContactsRequest" in server.calls)
+
+    # Номер по умолчанию не раскрывается.
+    server2 = Server(None)
+    book3 = C.Contacts(server2)
+    added = await book3.add("@кто")
+    check("свой номер по умолчанию не показывается", added["номер показан"] is False)
+
+
 def rich_render_regression() -> None:
     """A received rich message is an Instant-View block tree — it has to become
     readable terminal text, not a bare "unsupported media" chip."""
@@ -1646,6 +1707,7 @@ async def main() -> int:
     await forum_regression()
     await transcribe_regression()
     await guard_regression()
+    await contacts_regression()
     multipart_regression()
     rich_blocks_regression()
     poll_regression()

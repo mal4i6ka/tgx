@@ -28,6 +28,7 @@ import tgx_banner
 import tgx_bots
 import tgx_business
 import tgx_confirm
+import tgx_contacts
 import tgx_format
 import tgx_forum
 import tgx_guard
@@ -561,6 +562,68 @@ def read_secret(prompt: str, env: str = "") -> str:
             f"нужен ввод секрета, а терминала нет. Запустите команду в терминале "
             f"или передайте значение через переменную {env or 'окружения'}")
     return getpass.getpass(prompt)
+
+
+async def cmd_contacts(args: argparse.Namespace) -> None:
+    """Адресная книга, чёрный список и поиск людей."""
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        book = tgx_contacts.Contacts(client)
+        cmd = args.contactcmd
+
+        listings = {
+            "list": (lambda: book.all(), ["id", "имя", "username", "взаимный", "был"]),
+            "blocked": (lambda: book.blocked(stories=args.stories, limit=args.limit),
+                        ["id", "имя", "username"]),
+            "search": (lambda: book.search(args.query, args.limit),
+                       ["id", "имя", "username", "был"]),
+            "birthdays": (lambda: book.birthdays(), ["кто", "когда"]),
+            "top": (lambda: book.top_peers(args.limit), ["кто", "вес"]),
+        }
+        if cmd in listings:
+            getter, fields = listings[cmd]
+            rows = await getter()
+            print_jsonl(rows) if getattr(args, "jsonl", False) else print_table(
+                rows, fields, title=cmd)
+            return
+
+        if cmd == "add":
+            render.emit({"ok": True, **await book.add(
+                args.user, first=args.first or "", last=args.last or "",
+                phone=args.phone or "", note=args.note or "", share_phone=args.share_phone)})
+            return
+
+        if cmd == "remove":
+            render.emit({"ok": True, **await book.remove(args.user)})
+            return
+
+        if cmd == "note":
+            render.emit({"ok": True, **await book.note(args.user, args.text or "")})
+            return
+
+        if cmd == "close-friends":
+            render.emit({"ok": True, **await book.close_friends(args.user)})
+            return
+
+        if cmd in {"block", "unblock"}:
+            action = book.block if cmd == "block" else book.unblock
+            render.emit({"ok": True, **await action(args.user, stories_only=args.stories)})
+            return
+
+        if cmd == "top-toggle":
+            render.emit({"ok": True, **await book.toggle_top_peers(not args.off)})
+            return
+
+        if cmd == "by-phone":
+            render.emit(await book.by_phone(args.phone))
+            return
+
+        if cmd == "import":
+            render.emit(await book.import_token(args.token))
+            return
+    finally:
+        await client.disconnect()
 
 
 async def cmd_pay(args: argparse.Namespace) -> None:
@@ -2692,6 +2755,7 @@ GROUPS = [
     ("форумы", ["forum", "guard", "poll", "boosts"]),
     ("платежи", ["pay", "confirm"]),
     ("голос", ["transcribe"]),
+    ("люди", ["contacts"]),
     ("аккаунт", ["auth", "me", "profile", "profile-get", "profile-edit", "profile-photo-set", "profile-photos", "profile-photo-delete"]),
     ("чаты и папки", ["dialogs", "folders", "folder-upsert"]),
     ("сообщения", ["history", "search", "send", "edit", "delete", "forward", "react", "pin", "pinned", "todo", "todo-check", "todo-add", "format", "export", "message-get", "message-click"]),
@@ -3013,6 +3077,63 @@ def build_parser() -> argparse.ArgumentParser:
     cf.add_argument("--timeout", type=float, default=tgx_confirm.DEFAULT_TIMEOUT,
                     help="сколько ждать ответа, секунд")
     cf.set_defaults(func=cmd_confirm)
+
+    ct = sub.add_parser("contacts", help="адресная книга, чёрный список, поиск людей")
+    ct_sub = ct.add_subparsers(dest="contactcmd", required=True)
+    ct.set_defaults(func=cmd_contacts)
+
+    c_list = ct_sub.add_parser("list", help="все контакты")
+    c_list.add_argument("--jsonl", action="store_true")
+
+    c_add = ct_sub.add_parser("add", help="добавить в адресную книгу")
+    c_add.add_argument("user")
+    c_add.add_argument("--first", help="имя; по умолчанию — как в профиле")
+    c_add.add_argument("--last")
+    c_add.add_argument("--phone")
+    c_add.add_argument("--note", help="личная заметка, видна только вам")
+    c_add.add_argument("--share-phone", action="store_true",
+                       help="разрешить ему увидеть ваш номер")
+
+    c_rm = ct_sub.add_parser("remove", help="убрать из книги (писать он всё равно сможет)")
+    c_rm.add_argument("user", nargs="+")
+
+    c_note = ct_sub.add_parser("note", help="заметка о человеке")
+    c_note.add_argument("user")
+    c_note.add_argument("text", nargs="?", help="пусто — снять заметку")
+
+    c_cf = ct_sub.add_parser("close-friends", help="задать список близких друзей целиком")
+    c_cf.add_argument("user", nargs="+")
+
+    c_bl = ct_sub.add_parser("blocked", help="чёрный список")
+    c_bl.add_argument("--stories", action="store_true", help="кому запрещены истории")
+    c_bl.add_argument("--limit", type=int, default=100)
+    c_bl.add_argument("--jsonl", action="store_true")
+
+    for name, help_text in (("block", "запретить писать"), ("unblock", "снять запрет")):
+        parser = ct_sub.add_parser(name, help=help_text)
+        parser.add_argument("user")
+        parser.add_argument("--stories", action="store_true", help="только истории")
+
+    c_s = ct_sub.add_parser("search", help="поиск людей и каналов по всему Telegram")
+    c_s.add_argument("query")
+    c_s.add_argument("--limit", type=int, default=20)
+    c_s.add_argument("--jsonl", action="store_true")
+
+    c_ph = ct_sub.add_parser("by-phone", help="кто за номером, если он это разрешил")
+    c_ph.add_argument("phone")
+
+    c_bd = ct_sub.add_parser("birthdays", help="у кого скоро день рождения")
+    c_bd.add_argument("--jsonl", action="store_true")
+
+    c_top = ct_sub.add_parser("top", help="с кем общаетесь чаще всего")
+    c_top.add_argument("--limit", type=int, default=20)
+    c_top.add_argument("--jsonl", action="store_true")
+
+    c_tt = ct_sub.add_parser("top-toggle", help="включить или выключить учёт частых собеседников")
+    c_tt.add_argument("--off", action="store_true")
+
+    c_im = ct_sub.add_parser("import", help="добавить по ссылке-приглашению")
+    c_im.add_argument("token")
 
     pay = sub.add_parser("pay", help="звёзды, TON и счета; оплата — только с подтверждением")
     pay_sub = pay.add_subparsers(dest="paycmd", required=True)
@@ -3867,7 +3988,7 @@ async def amain() -> None:
 
 # Errors these modules raise are already written for a person to read; a stack
 # trace on top of them only hides the sentence that explains what to do.
-SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_confirm.ConfirmError,
+SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
                  tgx_rich.RichError, tgx_transcribe.TranscribeError)
