@@ -1758,6 +1758,61 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+def media_label_regression() -> None:
+    """Сообщение без подписи не должно быть пустой строкой. Стикер, голосовое,
+    фотография без текста — в ленте они выглядели одинаково никак, и читать её
+    было невозможно."""
+    import tgx as T
+    from telethon.tl import types
+
+    class Msg:
+        def __init__(self, media=None, message=""):
+            self.media, self.message = media, message
+            self.id, self.date, self.sender = 1, None, None
+
+    def doc(*attrs, size=0, mime=""):
+        return types.MessageMediaDocument(document=types.Document(
+            id=1, access_hash=1, file_reference=b"", date=None, mime_type=mime,
+            size=size, dc_id=1, attributes=list(attrs)))
+
+    check("без вложения ничего не выдумываем", T.media_label(Msg()) == "")
+
+    sticker = doc(types.DocumentAttributeSticker(
+        alt="🔥", stickerset=types.InputStickerSetEmpty()))
+    check("стикер виден со своим эмодзи", T.media_label(Msg(sticker)) == "[стикер 🔥]")
+
+    voice = doc(types.DocumentAttributeAudio(duration=63, voice=True))
+    check("голосовое показывает длину", T.media_label(Msg(voice)) == "[голосовое 1:03]")
+
+    song = doc(types.DocumentAttributeAudio(duration=200, voice=False,
+                                            performer="Кто-то", title="Что-то"))
+    check("у музыки видно исполнителя", "Кто-то — Что-то" in T.media_label(Msg(song)))
+
+    circle = doc(types.DocumentAttributeVideo(duration=10, w=240, h=240,
+                                              round_message=True))
+    check("кружок отличается от видео", T.media_label(Msg(circle)) == "[кружок 0:10]")
+
+    plain = doc(types.DocumentAttributeFilename(file_name="отчёт.pdf"), size=2202009)
+    check("у файла видно имя и вес", T.media_label(Msg(plain)) == "[файл отчёт.pdf 2.1 МБ]")
+
+    nameless = doc(size=0)
+    check("без имени и веса скобки не пустуют", T.media_label(Msg(nameless)) == "[файл]")
+
+    poll = types.MessageMediaPoll(
+        poll=types.Poll(id=1, hash=0,
+                        question=types.TextWithEntities(text="Идём?", entities=[]),
+                        answers=[]),
+        results=types.PollResults())
+    check("у опроса виден вопрос", T.media_label(Msg(poll)) == "[опрос: Идём?]")
+
+    # текст всегда важнее подписи вложения
+    captioned = T.msg_to_obj(Msg(sticker, message="подпись"))
+    check("подпись не затирается описанием", captioned["text"] == "подпись")
+    check("но вложение всё равно названо", captioned["media"] == "[стикер 🔥]")
+    bare = T.msg_to_obj(Msg(sticker))
+    check("без подписи в тексте оказывается вложение", bare["text"] == "[стикер 🔥]")
+
+
 async def inline_regression() -> None:
     """Инлайн-бот отдаёт разнородные результаты: у одних заголовок, у других
     только вложение. Печатать надо всё, но без пустых полей — иначе список
@@ -2306,6 +2361,7 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    media_label_regression()
     await inline_regression()
     await safety_regression()
     notify_regression()

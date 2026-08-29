@@ -36,10 +36,18 @@ def kind_of(path: Path) -> str:
 
 
 def set_ref(name: str) -> Any:
-    """Набор по короткому имени или ссылке t.me/addstickers/…"""
+    """Набор по короткому имени, ссылке t.me/addstickers/… или паре «id:hash».
+
+    Пара нужна потому, что часть наборов приходит без короткого имени — у них
+    его попросту нет, и сослаться на такой набор можно только числами.
+    """
     from telethon.tl import types
 
-    short = name.rstrip("/").split("/")[-1]
+    text = name.strip()
+    if ":" in text and all(p.lstrip("-").isdigit() for p in text.split(":", 1)):
+        ident, access = text.split(":", 1)
+        return types.InputStickerSetID(id=int(ident), access_hash=int(access))
+    short = text.rstrip("/").split("/")[-1]
     return types.InputStickerSetShortName(short_name=short)
 
 
@@ -230,3 +238,168 @@ class Stickers:
             "PEER_ID_INVALID": "владельца набора не найти",
         }
         return tgx_net.explain(exc, hints, StickerError)
+
+
+# --- пользоваться стикерами, а не только собирать их ---
+
+BOX_HINTS = {
+    "STICKERSET_INVALID": "такого набора нет",
+    "STICKERS_EMPTY": "в наборе пусто",
+    "STICKER_ID_INVALID": "такого стикера нет",
+    "EMOTICON_EMPTY": "нужен эмодзи, по которому искать",
+    "EMOTICON_INVALID": "это не эмодзи",
+    "STICKERSET_NOT_MODIFIED": "и так уже установлен",
+    "PREMIUM_ACCOUNT_REQUIRED": "нужен Telegram Premium",
+    "SEARCH_QUERY_EMPTY": "нечего искать",
+}
+
+
+def sticker_row(document: Any) -> dict[str, Any]:
+    """Один стикер в строку. Ссылку на него собираем сами.
+
+    Отправить существующий стикер можно только по паре «идентификатор плюс
+    ключ доступа» — без ключа сервер отвечает, что документа не существует.
+    Поэтому печатаем пару целиком: это то, что понадобится команде send.
+    """
+    from telethon.tl import types
+
+    emoji = ""
+    packs = ""
+    for attribute in getattr(document, "attributes", None) or []:
+        # эмодзи несут два разных признака: обычные стикеры и эмодзи-стикеры
+        if isinstance(attribute, (types.DocumentAttributeSticker,
+                                  types.DocumentAttributeCustomEmoji)):
+            emoji = getattr(attribute, "alt", "") or emoji
+            ref = getattr(attribute, "stickerset", None)
+            if getattr(ref, "short_name", None):
+                packs = ref.short_name
+            elif getattr(ref, "id", None) and getattr(ref, "access_hash", None):
+                # без короткого имени сослаться на набор можно только числами
+                packs = f"{ref.id}:{ref.access_hash}"
+    # «своё», а не «найденное»: сервер подбирает стикеры по связям, и эмодзи
+    # самого стикера обычно не совпадает с тем, что вы искали
+    row: dict[str, Any] = {"своё эмодзи": emoji or "?",
+                           "ключ": f"{document.id}:{document.access_hash}"}
+    if packs:
+        row["набор"] = packs
+    if getattr(document, "mime_type", None):
+        row["вид"] = {"image/webp": "картинка", "video/webm": "видео",
+                      "application/x-tgsticker": "анимация"}.get(
+                          document.mime_type, document.mime_type)
+    return row
+
+
+def sticker_ref(key: str) -> Any:
+    """«id:hash» обратно в ссылку на документ."""
+    from telethon.tl import types
+
+    if ":" not in key:
+        raise StickerError("ключ стикера выглядит как «число:число» — его печатает find")
+    ident, access = key.split(":", 1)
+    try:
+        return types.InputDocument(id=int(ident), access_hash=int(access), file_reference=b"")
+    except ValueError as exc:
+        raise StickerError(f"негодный ключ стикера «{key}»") from exc
+
+
+class Box:
+    """Ваши стикеры: найти, поставить, отправить, убрать."""
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    async def _call(self, request: Any) -> Any:
+        import tgx_net
+
+        try:
+            return await self.client(request)
+        except Exception as exc:
+            raise tgx_net.explain(exc, BOX_HINTS, StickerError) from exc
+
+    @staticmethod
+    def _set_row(item: Any) -> dict[str, Any]:
+        pack = getattr(item, "set", item)
+        return {"набор": getattr(pack, "short_name", None), "название": getattr(pack, "title", None),
+                "стикеров": getattr(pack, "count", None),
+                "вид": "эмодзи" if getattr(pack, "emojis", False) else
+                       "маски" if getattr(pack, "masks", False) else "стикеры",
+                "установлен": not getattr(pack, "archived", False)}
+
+    async def mine(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Наборы, которые вы сделали сами."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetMyStickersRequest(
+            offset_id=0, limit=limit))
+        return [self._set_row(s) for s in getattr(result, "sets", None) or []]
+
+    async def installed(self) -> list[dict[str, Any]]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetAllStickersRequest(hash=0))
+        return [self._set_row(s) for s in getattr(result, "sets", None) or []]
+
+    async def find_sets(self, query: str, *, featured: bool = True) -> list[dict[str, Any]]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.SearchStickerSetsRequest(
+            q=query, hash=0, exclude_featured=None if featured else True))
+        return [self._set_row(s) for s in getattr(result, "sets", None) or []]
+
+    async def find(self, *, emoji: str = "", query: str = "",
+                   limit: int = 20, custom_emoji: bool = False) -> list[dict[str, Any]]:
+        """Найти отдельные стикеры: по эмодзи, по словам или по обоим."""
+        from telethon.tl import functions
+
+        if emoji and not query:
+            request = (functions.messages.SearchCustomEmojiRequest(emoticon=emoji, hash=0)
+                       if custom_emoji
+                       else functions.messages.GetStickersRequest(emoticon=emoji, hash=0))
+        else:
+            request = functions.messages.SearchStickersRequest(
+                q=query, emoticon=emoji or "", lang_code=["ru", "en"], offset=0,
+                limit=limit, hash=0, emojis=custom_emoji or None)
+        result = await self._call(request)
+        found = getattr(result, "stickers", None) or getattr(result, "documents", None) or []
+        return [sticker_row(d) for d in found][:limit]
+
+    async def faved(self) -> list[dict[str, Any]]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetFavedStickersRequest(hash=0))
+        return [sticker_row(d) for d in getattr(result, "stickers", None) or []]
+
+    async def recent(self) -> list[dict[str, Any]]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetRecentStickersRequest(hash=0))
+        return [sticker_row(d) for d in getattr(result, "stickers", None) or []]
+
+    async def fave(self, key: str, *, remove: bool = False) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.messages.FaveStickerRequest(
+            id=sticker_ref(key), unfave=remove))
+        return {"стикер": key, "в избранном": not remove}
+
+    async def install(self, name: str, *, remove: bool = False) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        reference = set_ref(name)
+        if remove:
+            await self._call(functions.messages.UninstallStickerSetRequest(
+                stickerset=reference))
+        else:
+            await self._call(functions.messages.InstallStickerSetRequest(
+                stickerset=reference, archived=False))
+        return {"набор": name, "установлен": not remove}
+
+    async def send(self, peer: Any, key: str, *, reply_to: int = 0) -> dict[str, Any]:
+        """Отправить существующий стикер, а не загрузить новый файл.
+
+        Загруженный заново webp станет обычной картинкой: стикером его делает
+        принадлежность набору, а её несёт только исходный документ.
+        """
+        message = await self.client.send_file(
+            peer, sticker_ref(key), reply_to=reply_to or None)
+        return {"отправлен": key, "id": getattr(message, "id", None)}

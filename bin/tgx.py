@@ -121,6 +121,100 @@ def entity_kind(entity: Any) -> str:
     return type(entity).__name__.lower()
 
 
+def _duration(seconds: Any) -> str:
+    total = int(seconds or 0)
+    return f"{total // 60}:{total % 60:02d}" if total else ""
+
+
+def _size(bytes_count: Any) -> str:
+    """Вес файла словами. Нулевой вес не печатаем: это «неизвестно», а не «0 Б»."""
+    if not bytes_count:
+        return ""
+    value = float(bytes_count)
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if value < 1024 or unit == "ГБ":
+            return f"{value:.0f} {unit}" if unit == "Б" else f"{value:.1f} {unit}"
+        value /= 1024
+    return ""
+
+
+def _chip(what: str, detail: str = "") -> str:
+    """[что] или [что подробность] — без болтающихся пробелов."""
+    detail = (detail or "").strip()
+    return f"[{what} {detail}]" if detail else f"[{what}]"
+
+
+def media_label(msg: Any) -> str:
+    """Что во вложении — одной строкой.
+
+    Без этого сообщение без подписи выглядит в ленте пустой строкой: стикер,
+    голосовое, фотография без текста — всё одинаково никак. Читать такую ленту
+    невозможно, поэтому вложение всегда описывается словами, даже когда его
+    нельзя показать.
+    """
+    from telethon.tl import types
+
+    media = getattr(msg, "media", None)
+    if media is None:
+        return ""
+
+    if isinstance(media, types.MessageMediaPhoto):
+        return "[фото]"
+    if isinstance(media, types.MessageMediaGeo):
+        return "[геометка]"
+    if isinstance(media, types.MessageMediaGeoLive):
+        return "[живая геометка]"
+    if isinstance(media, types.MessageMediaContact):
+        return f"[контакт: {media.first_name} {media.last_name}".strip() + "]"
+    if isinstance(media, types.MessageMediaPoll):
+        question = getattr(getattr(media.poll, "question", None), "text", None) or ""
+        return f"[опрос: {question}]" if question else "[опрос]"
+    if isinstance(media, types.MessageMediaDice):
+        return f"[{media.emoticon} выпало {media.value}]"
+    if isinstance(media, types.MessageMediaVenue):
+        return f"[место: {media.title}]"
+    if isinstance(media, types.MessageMediaGame):
+        return f"[игра: {getattr(media.game, 'title', '')}]"
+    if isinstance(media, types.MessageMediaInvoice):
+        return f"[счёт: {getattr(media, 'title', '')}]"
+    if isinstance(media, types.MessageMediaStory):
+        return "[история]"
+    if isinstance(media, types.MessageMediaWebPage):
+        return ""  # ссылка и так видна в тексте
+    if isinstance(media, types.MessageMediaUnsupported):
+        return "[вложение, которого этот клиент не знает]"
+
+    document = getattr(media, "document", None)
+    if document is None:
+        return "[вложение]"
+
+    attributes = {type(a).__name__.replace("DocumentAttribute", ""): a
+                  for a in getattr(document, "attributes", None) or []}
+    if "Sticker" in attributes or "CustomEmoji" in attributes:
+        holder = attributes.get("Sticker") or attributes["CustomEmoji"]
+        return _chip("стикер", getattr(holder, "alt", "") or "")
+    if "Audio" in attributes:
+        audio = attributes["Audio"]
+        span = _duration(getattr(audio, "duration", 0))
+        if getattr(audio, "voice", False):
+            return _chip("голосовое", span)
+        title = " — ".join(x for x in (getattr(audio, "performer", None),
+                                       getattr(audio, "title", None)) if x)
+        return _chip("музыка", f"{title} {span}".strip() if title else span)
+    if "Video" in attributes:
+        video = attributes["Video"]
+        span = _duration(getattr(video, "duration", 0))
+        if getattr(video, "round_message", False):
+            return _chip("кружок", span)
+        return _chip("видео", span)
+    if "Animated" in attributes:
+        return "[гифка]"
+
+    name = getattr(attributes.get("Filename"), "file_name", None)
+    weight = _size(getattr(document, "size", 0))
+    return _chip("файл", f"{name} {weight}".strip() if name else weight)
+
+
 def msg_to_obj(msg: Any) -> dict[str, Any]:
     sender = getattr(msg, "sender", None)
     dt = msg.date
@@ -131,7 +225,8 @@ def msg_to_obj(msg: Any) -> dict[str, Any]:
         "date": dt.isoformat() if dt else None,
         "sender_id": getattr(msg, "sender_id", None),
         "sender": entity_title(sender) if sender else None,
-        "text": msg.message or "",
+        "text": msg.message or media_label(msg),
+        "media": media_label(msg) or None,
         "views": getattr(msg, "views", None),
         "forwards": getattr(msg, "forwards", None),
         "reply_to": getattr(getattr(msg, "reply_to", None), "reply_to_msg_id", None),
@@ -836,7 +931,40 @@ async def cmd_stickers(args: argparse.Namespace) -> None:
                                                 f"`tgx bot token @{bot.username}`")
             session = await tgx_bots.BotSession(bot, *get_credentials()).__aenter__()
         packs = tgx_stickers.Stickers(client, session.client if session else None)
+        box = tgx_stickers.Box(client)
         cmd = args.stickcmd
+
+        # пользоваться стикерами — своей сессией, без бота
+        if cmd == "mine":
+            render.emit({"мои наборы": await box.mine(args.limit)})
+            return
+        if cmd == "installed":
+            render.emit({"установлены": await box.installed()})
+            return
+        if cmd == "find-sets":
+            render.emit({"наборы": await box.find_sets(args.query, featured=not args.installed_only)})
+            return
+        if cmd == "find":
+            render.emit({"стикеры": await box.find(
+                emoji=args.emoji or "", query=args.query or "", limit=args.limit,
+                custom_emoji=args.custom_emoji)})
+            return
+        if cmd == "faved":
+            render.emit({"избранные": await box.faved()})
+            return
+        if cmd == "recent":
+            render.emit({"недавние": await box.recent()})
+            return
+        if cmd == "fave":
+            render.emit(await box.fave(args.key, remove=args.remove))
+            return
+        if cmd == "install":
+            render.emit(await box.install(args.name, remove=args.remove))
+            return
+        if cmd == "send":
+            peer = await resolve_peer(client, args.peer)
+            render.emit(await box.send(peer, args.key, reply_to=args.reply_to or 0))
+            return
 
         actions = {
             "show": lambda: packs.show(args.name),
@@ -4345,6 +4473,37 @@ def build_parser() -> argparse.ArgumentParser:
     sk = sub.add_parser("stickers", help="свои наборы стикеров")
     sk_sub = sk.add_subparsers(dest="stickcmd", required=True)
     sk.set_defaults(func=cmd_stickers)
+
+    k_mine = sk_sub.add_parser("mine", help="наборы, которые вы сделали")
+    k_mine.add_argument("--limit", type=int, default=50)
+
+    sk_sub.add_parser("installed", help="какие наборы у вас установлены")
+
+    k_fs = sk_sub.add_parser("find-sets", help="найти набор по названию")
+    k_fs.add_argument("query")
+    k_fs.add_argument("--installed-only", action="store_true", help="без рекомендованных")
+
+    k_find = sk_sub.add_parser("find", help="найти отдельные стикеры")
+    k_find.add_argument("query", nargs="?", default="", help="слова")
+    k_find.add_argument("--emoji", help="по эмодзи")
+    k_find.add_argument("--custom-emoji", action="store_true", help="искать эмодзи, а не стикеры")
+    k_find.add_argument("--limit", type=int, default=20)
+
+    sk_sub.add_parser("faved", help="избранные стикеры")
+    sk_sub.add_parser("recent", help="недавние стикеры")
+
+    k_fav = sk_sub.add_parser("fave", help="в избранное или обратно")
+    k_fav.add_argument("key", help="ключ вида «число:число» из find")
+    k_fav.add_argument("--remove", action="store_true")
+
+    k_ins = sk_sub.add_parser("install", help="поставить набор себе или убрать")
+    k_ins.add_argument("name", help="короткое имя или ссылка t.me/addstickers/…")
+    k_ins.add_argument("--remove", action="store_true")
+
+    k_snd = sk_sub.add_parser("send", help="отправить существующий стикер")
+    k_snd.add_argument("peer")
+    k_snd.add_argument("key", help="ключ вида «число:число» из find")
+    k_snd.add_argument("--reply-to", type=int)
 
     k_show = sk_sub.add_parser("show", help="что внутри набора")
     k_show.add_argument("name", help="короткое имя или ссылка t.me/addstickers/…")
