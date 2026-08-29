@@ -1530,10 +1530,37 @@ async def cmd_export(args: argparse.Namespace) -> None:
 
 
 async def cmd_react(args: argparse.Namespace) -> None:
+    """Своя реакция, список чужих и снятие чужих — последнее требует прав админа."""
     client = await make_client()
     try:
         await ensure_login(client)
         peer = await resolve_peer(client, args.peer)
+
+        if args.who:
+            result = await client(functions.messages.GetMessageReactionsListRequest(
+                peer=peer, id=args.id, limit=args.limit, reaction=None, offset=None))
+            names = {u.id: (u.username or entity_title(u)) for u in result.users}
+            rows = [{"кто": names.get(getattr(r.peer_id, "user_id", None),
+                                      getattr(r.peer_id, "user_id", "?")),
+                     "реакция": getattr(getattr(r, "reaction", None), "emoticon", "?")}
+                    for r in result.reactions]
+            print_jsonl(rows) if args.jsonl else print_table(rows, ["кто", "реакция"],
+                                                             title=f"реакции на {args.id}")
+            return
+
+        if args.remove_from:
+            # Снять реакции конкретного участника — модерация, а не своя реакция.
+            target = await client.get_input_entity(args.remove_from)
+            if args.all_messages:
+                await client(functions.messages.DeleteParticipantReactionsRequest(
+                    peer=peer, participant=target))
+                render.emit({"ok": True, "cleared": args.remove_from, "scope": "во всём чате"})
+            else:
+                await client(functions.messages.DeleteParticipantReactionRequest(
+                    peer=peer, msg_id=args.id, participant=target))
+                render.emit({"ok": True, "cleared": args.remove_from, "message_id": args.id})
+            return
+
         reaction = [] if args.clear else [types.ReactionEmoji(emoticon=args.emoji)]
         await client(functions.messages.SendReactionRequest(
             peer=peer, msg_id=args.id, reaction=reaction, add_to_recent=not args.clear))
@@ -2782,6 +2809,13 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("id", type=int)
     rc.add_argument("emoji", nargs="?", default="👍")
     rc.add_argument("--clear", action="store_true", help="убрать свою реакцию")
+    rc.add_argument("--who", action="store_true", help="показать, кто и чем отреагировал")
+    rc.add_argument("--remove-from", metavar="КТО",
+                    help="снять реакции участника — нужны права администратора")
+    rc.add_argument("--all-messages", action="store_true",
+                    help="вместе с --remove-from: снять его реакции во всём чате")
+    rc.add_argument("--limit", type=int, default=50)
+    rc.add_argument("--jsonl", action="store_true")
     rc.set_defaults(func=cmd_react)
 
     ed = sub.add_parser("edit", help="изменить своё сообщение")
