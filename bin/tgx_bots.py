@@ -286,6 +286,20 @@ def parse_style(label: str) -> tuple[str, Any]:
         icon=int(icon) if icon else None)
 
 
+def join_buttons(spec: Any) -> str:
+    """Повторённый --button — это несколько рядов, а не перезапись.
+
+    argparse без `action="append"` молча оставляет от повторного флага только
+    последний, и человек узнаёт об этом, увидев в сообщении одну кнопку вместо
+    двух. Флаги теперь копятся, а каждый даёт свой ряд — то, чего от них и ждут.
+    """
+    if not spec:
+        return ""
+    if isinstance(spec, str):
+        return spec
+    return "; ".join(str(row) for row in spec if row)
+
+
 def parse_buttons(spec: str) -> list[list[Any]]:
     """`Текст=https://…, Ещё=webapp:https://… ; вторая строка=cb:data` → inline keyboard.
 

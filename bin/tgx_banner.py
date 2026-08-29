@@ -55,7 +55,7 @@ def _colour(value: Any, fallback: str) -> str:
 
 
 def capture(command: list[str], *, cols: int = 40, rows: int = 16, fps: int = 20,
-            seconds: float = 8.0) -> list[list[list[tuple[str, str]]]]:
+            seconds: float = 60.0) -> list[list[list[tuple[str, str]]]]:
     """Прогнать команду в псевдотерминале и снять кадры сетки символов.
 
     Возвращает список кадров; кадр — строки, строка — пары (символ, цвет).
@@ -91,13 +91,17 @@ def capture(command: list[str], *, cols: int = 40, rows: int = 16, fps: int = 20
 
         interval = 1.0 / fps
         started = last = time.monotonic()
+        # Останавливаемся, когда закончил рисовать сам эффект, а не когда истекло
+        # время. Срок оставлен предохранителем: у эффектов разная длина, и
+        # секундомер обрезал медленные на середине — в кадре оставались
+        # неразобранные символы, которые выглядели как брак в логотипе.
         while time.monotonic() - started < seconds:
             ready, _, _ = select.select([fd], [], [], interval)
             if ready:
                 try:
                     chunk = os.read(fd, 65536)
                 except OSError:
-                    break
+                    break                          # ребёнок закрыл терминал
                 if not chunk:
                     break
                 stream.feed(chunk)
@@ -105,6 +109,24 @@ def capture(command: list[str], *, cols: int = 40, rows: int = 16, fps: int = 20
             if now - last >= interval:
                 frames.append(snapshot())
                 last = now
+            if not ready and os.waitpid(pid, os.WNOHANG)[0] == pid:
+                break                              # эффект доигран
+
+        # Дочитать хвост. Ребёнок успевает выйти, дописав последний кадр, и без
+        # этого в записи остаётся предпоследний: у медленных эффектов там ещё
+        # висят неразобранные символы.
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.05)
+            if not ready:
+                break
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            stream.feed(chunk)
     finally:
         try:
             os.close(fd)
@@ -201,7 +223,7 @@ def encode(frames: list[Path], out: Path, *, fps: int = 20, hold: float = 1.2) -
 
 
 def record(out: Path, *, effect: str = "beams", cols: int = 40, rows: int = 16,
-           fps: int = 30, seconds: float = 12.0, size: int = 512, speed: int = 60,
+           fps: int = 30, seconds: float = 60.0, size: int = 512, speed: int = 60,
            hold: float = 1.5, work: Path | None = None) -> dict[str, Any]:
     """Полный путь: анимация в pty → кадры → mp4.
 

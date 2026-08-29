@@ -156,7 +156,7 @@ def call(token: str, method: str, payload: dict[str, Any]) -> Any:
     except tgx_net.NetError as exc:
         raise RichError(str(exc)) from exc
     if not answer.get("ok"):
-        raise RichError(f"Bot API отказал: {answer.get('description', 'без объяснений')}")
+        raise RichError(_explain_send(answer.get("description", "без объяснений")))
     return answer["result"]
 
 
@@ -178,7 +178,7 @@ def call_with_files(token: str, method: str, payload: dict[str, Any],
     except tgx_net.NetError as exc:
         raise RichError(str(exc)) from exc
     if not answer.get("ok"):
-        raise RichError(f"Bot API отказал: {answer.get('description', 'без объяснений')}")
+        raise RichError(_explain_send(answer.get("description", "без объяснений")))
     return answer["result"]
 
 
@@ -294,6 +294,36 @@ def rich_text(node: Any, colors: dict[str, str] | None = None) -> Any:
     elif kind in {"TextSubscript", "TextSuperscript"}:
         inner.stylize(Style(color=muted))
     return inner
+
+
+# Ответы Bot API на богатые сообщения приходят кодами; человеку нужно знать,
+# что делать, а не как это называется внутри.
+SEND_HINTS = {
+    "RICH_MESSAGE_PHOTO_INVALID": (
+        "вложением богатое сообщение принимает только фотографию — ссылки "
+        "tg://video?id= не существует. Видео кладётся блоком: --blocks"),
+    "RICH_MESSAGE_TOO_LONG": "текст длиннее, чем принимает богатое сообщение",
+    "RICH_MESSAGE_BLOCKS_TOO_MUCH": "блоков больше, чем разрешено",
+    "MESSAGE_EMPTY": "нечего отправлять",
+    "BUTTON_URL_INVALID": "у кнопки негодный адрес",
+    "MEDIA_EMPTY": "медиа не приложено — проверьте --media имя=путь",
+    "WEBPAGE_MEDIA_EMPTY": "по ссылке ничего не нашлось",
+}
+
+
+def _explain_send(description: str) -> str:
+    """Код в ответе Bot API → что с этим делать.
+
+    Разбор общий, через `tgx_net.explain`: свою копию этой логики я однажды уже
+    написал в восьми модулях, и половина подсказок молча не срабатывала. Bot API
+    отдаёт код строкой, а не исключением, поэтому оборачиваем — правило важнее
+    удобства.
+    """
+    import tgx_net
+
+    told = tgx_net.explain(RichError(description), SEND_HINTS, RichError)
+    text = str(told)
+    return text if text != description else f"Bot API отказал: {description}"
 
 
 def render_message(rich: Any, colors: dict[str, str] | None = None, width: int = 72) -> Any:
@@ -519,18 +549,40 @@ def check_blocks(blocks: Sequence[dict[str, Any]]) -> None:
             raise RichError(f"блок {index}: размер заголовка вне 1–{MAX_HEADING}")
 
 
+# что за медиа — видно по расширению; посылать видео как фотографию значит
+# молча получить стоп-кадр вместо ролика
+MEDIA_KINDS = {".mp4": "video", ".mov": "video", ".webm": "video", ".m4v": "video",
+               ".gif": "animation",
+               ".mp3": "audio", ".m4a": "audio", ".ogg": "audio", ".oga": "audio",
+               ".jpg": "photo", ".jpeg": "photo", ".png": "photo", ".webp": "photo"}
+
+
+def media_kind(url_or_path: str) -> str:
+    """Тип медиа по расширению. Незнакомое отдаём документом, а не картинкой."""
+    from pathlib import Path
+
+    suffix = Path(url_or_path.split("?", 1)[0]).suffix.lower()
+    if not suffix:
+        return "photo"
+    return MEDIA_KINDS.get(suffix, "document")
+
+
 def photo_media(identifier: str, url_or_path: str) -> dict[str, Any]:
     """A media entry for a tg://photo?id=<identifier> reference in the text.
 
     Локальный файл превращается в ссылку `attach://…`: Bot API берёт медиа либо
     по публичному URL, либо частью той же формы, а публичного URL у файла с
     диска нет. Сам файл кладётся в `_upload` и уезжает multipart-ом.
+
+    Тип берётся из расширения. Раньше здесь всегда стояло «фото», и отправленный
+    ролик молча превращался в стоп-кадр: сервер не спорит, а просто берёт кадр.
     """
     from pathlib import Path
 
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", identifier):
         raise RichError(f"идентификатор «{identifier}»: только A-Z a-z 0-9 _ - и до 64 символов")
-    entry: dict[str, Any] = {"id": identifier, "media": {"type": "photo", "media": url_or_path}}
+    entry: dict[str, Any] = {"id": identifier,
+                             "media": {"type": media_kind(url_or_path), "media": url_or_path}}
     if not url_or_path.startswith(("http://", "https://")):
         source = Path(url_or_path).expanduser()
         if not source.is_file():

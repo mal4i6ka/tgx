@@ -217,6 +217,22 @@ def media_label(msg: Any) -> str:
     return _chip("файл", f"{name} {weight}".strip() if name else weight)
 
 
+def rich_body(msg: Any) -> str:
+    """Богатое сообщение в читаемый текст.
+
+    Оно приходит не вложением, а отдельным полем самого сообщения, поэтому
+    обычный разбор его не замечал: tgx умел такие сообщения отправлять, но не
+    умел прочесть собственные. Отрисовщик уже был — не хватало вызова здесь.
+    """
+    rich = getattr(msg, "rich_message", None)
+    if rich is None:
+        return ""
+    try:
+        return tgx_rich.render_message(rich).plain.strip()
+    except Exception:
+        return "[богатое сообщение]"
+
+
 def msg_to_obj(msg: Any) -> dict[str, Any]:
     sender = getattr(msg, "sender", None)
     dt = msg.date
@@ -227,8 +243,9 @@ def msg_to_obj(msg: Any) -> dict[str, Any]:
         "date": dt.isoformat() if dt else None,
         "sender_id": getattr(msg, "sender_id", None),
         "sender": entity_title(sender) if sender else None,
-        "text": msg.message or media_label(msg),
+        "text": msg.message or rich_body(msg) or media_label(msg),
         "media": media_label(msg) or None,
+        "rich": bool(getattr(msg, "rich_message", None)) or None,
         "views": getattr(msg, "views", None),
         "forwards": getattr(msg, "forwards", None),
         "reply_to": getattr(getattr(msg, "reply_to", None), "reply_to_msg_id", None),
@@ -1728,7 +1745,7 @@ async def cmd_rich(args: argparse.Namespace) -> None:
         # Слой 227 разрешил кнопки не только ботам — обычному аккаунту тоже.
         markup = None
         if args.button:
-            rows = tgx_bots.parse_buttons(args.button)
+            rows = tgx_bots.parse_buttons(tgx_bots.join_buttons(args.button))
             markup = types.ReplyInlineMarkup(
                 rows=[types.KeyboardButtonRow(buttons=r) for r in rows])
         result = await client(functions.messages.SendMessageRequest(
@@ -3392,7 +3409,8 @@ async def cmd_bot(args: argparse.Namespace) -> None:
         def publish() -> Any:
             return tgx_rich.send_rich(
                 bot.token, chat_id, "" if blocks else markdown, blocks=blocks,
-                buttons=args.button or "", silent=args.silent, protect=args.protect,
+                buttons=tgx_bots.join_buttons(args.button), silent=args.silent,
+                protect=args.protect,
                 draft=args.draft, media=media, is_rtl=args.rtl, topic=args.topic,
                 skip_entity_detection=args.no_autolinks)
 
@@ -3408,7 +3426,8 @@ async def cmd_bot(args: argparse.Namespace) -> None:
 
         async def publish(session: Any) -> Any:
             return await session.post(
-                args.peer, args.text or "", buttons=args.button or "", parse_mode=args.parse_mode,
+                args.peer, args.text or "", buttons=tgx_bots.join_buttons(args.button),
+                parse_mode=args.parse_mode,
                 link_preview=not args.no_preview, silent=args.silent,
                 files=args.file or None, schedule=schedule,
             )
@@ -4088,7 +4107,8 @@ def build_parser() -> argparse.ArgumentParser:
     b_post.add_argument("peer")
     b_post.add_argument("text", nargs="?", default="")
     b_post.add_argument("--as", dest="bot", required=True, help="от имени какого бота")
-    b_post.add_argument("--button", help="кнопки: «Текст=https://…, Ещё=webapp:https://…»")
+    b_post.add_argument("--button", action="append",
+                        help="кнопки: «Текст=https://…, Ещё=webapp:https://…»; можно повторять — каждый флаг даёт свой ряд")
     b_post.add_argument("--file", action="append")
     b_post.add_argument("--parse-mode", choices=list(tgx_format.MODES), default="md")
     b_post.add_argument("--no-preview", action="store_true")
@@ -4100,7 +4120,8 @@ def build_parser() -> argparse.ArgumentParser:
     b_rich.add_argument("text", nargs="?", default="", help="разметка; либо --file")
     b_rich.add_argument("--as", dest="bot", required=True)
     b_rich.add_argument("--file", help="файл с разметкой")
-    b_rich.add_argument("--button", help="кнопки под сообщением")
+    b_rich.add_argument("--button", action="append",
+                        help="кнопки под сообщением; можно повторять — каждый флаг даёт свой ряд")
     b_rich.add_argument("--media", action="append",
                         help="имя=ссылка для ![](tg://photo?id=имя); можно повторять")
     b_rich.add_argument("--topic", type=int, help="id темы форума")
@@ -5117,7 +5138,8 @@ def build_parser() -> argparse.ArgumentParser:
     rich.add_argument("text", nargs="?", default="", help="разметка; либо --file")
     rich.add_argument("--file", help="файл с разметкой")
     rich.add_argument("--topic", type=int, help="id темы форума")
-    rich.add_argument("--button", help="кнопки под сообщением; см. tgx bot buttons")
+    rich.add_argument("--button", action="append",
+                      help="кнопки под сообщением; можно повторять — каждый флаг даёт свой ряд; см. tgx bot buttons")
     rich.add_argument("--media", action="append", metavar="ИМЯ=ПУТЬ",
                       help="картинка внутрь документа; ссылка в тексте — tg://photo?id=ИМЯ. "
                            "Если ссылки нет, картинка встаёт в начало")
