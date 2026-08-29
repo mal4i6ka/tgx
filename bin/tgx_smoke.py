@@ -1135,6 +1135,62 @@ def collapsed_quote_regression() -> None:
     check("продолжение свёрнутой — обычной полосой", "\n▌ " in folded.plain)
 
 
+def pay_regression() -> None:
+    """Платежи: одна ошибка в масштабе суммы — и счёт выписан не на ту сумму,
+    а заметно это только у плательщика."""
+    import tgx_pay as Y
+
+    # Звёзды целые: 50 — это пятьдесят звёзд, а не полста сотых.
+    check("звёзды не делятся на сотые", Y.minor_units("XTR", 50) == 50)
+    check("рубли уходят в копейках", Y.minor_units("RUB", 12.5) == 1250)
+    check("доллары уходят в центах", Y.minor_units("USD", 9.99) == 999)
+    check("иена без дробной части", Y.minor_units("JPY", 1200) == 1200)
+    check("регистр валюты не важен", Y.minor_units("usd", 1) == 100)
+
+    class Amount:
+        def __init__(self, amount, nanos=0):
+            self.amount, self.nanos = amount, nanos
+
+    check("сумма собирается из целых и нанозвёзд",
+          Y.amount_of(Amount(2, 500_000_000)) == 2.5)
+    check("отсутствующая сумма — ноль", Y.amount_of(None) == 0.0)
+
+    class Row:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    # Поле называется amount: на stars приходили сплошные нули.
+    spent = Y.describe_transaction(Row(id="x", amount=Amount(-1), date=None,
+                                       peer=None, title="Paid message"))
+    check("расход виден по знаку", spent["направление"] == "расход" and spent["сумма"] == -1.0)
+    got = Y.describe_transaction(Row(id="y", amount=Amount(7), date=None, peer=None))
+    check("приход тоже", got["направление"] == "приход" and got["сумма"] == 7.0)
+
+    refused = ""
+    try:
+        Y.Pay.bot_invoice_link("123:AA", title="t", description="d", currency="USD",
+                               prices=[("Услуга", 10)])
+    except Y.PayError as exc:
+        refused = str(exc)
+    check("обычная валюта требует провайдера", "провайдер" in refused)
+    refused = ""
+    try:
+        Y.Pay.bot_invoice_link("123:AA", title="t", description="d", currency="XTR", prices=[])
+    except Y.PayError as exc:
+        refused = str(exc)
+    check("счёт без строк отвергается", "хотя бы одна строка" in refused)
+    refused = ""
+    try:
+        Y.Pay.bot_invoice_link("123:AA", title="t", description="d", currency="USD",
+                               prices=[("x", 1)], provider="tok", subscription_period=2592000)
+    except Y.PayError as exc:
+        refused = str(exc)
+    check("подписка — только за звёзды", "только за звёзды" in refused)
+
+    check("оплаты в модуле нет", not hasattr(Y.Pay, "send_payment_form")
+          and "нет оплаты" in (Y.__doc__ or ""))
+
+
 def rich_render_regression() -> None:
     """A received rich message is an Instant-View block tree — it has to become
     readable terminal text, not a bare "unsupported media" chip."""
@@ -1406,6 +1462,7 @@ async def main() -> int:
     date_entity_regression()
     command_surface_regression()
     collapsed_quote_regression()
+    pay_regression()
     await resolve_peer_regression()
     autotools_regression()
     rich_render_regression()

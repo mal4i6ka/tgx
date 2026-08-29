@@ -1,0 +1,269 @@
+#!/usr/bin/env python3
+"""Платежи: звёзды, TON и обычные инвойсы.
+
+Три разные валюты живут в одних и тех же вызовах и различаются флагом. Баланс
+звёзд и баланс TON читает `payments.getStarsStatus` — с `ton=True` он отвечает
+про криптовалюту; то же и у истории операций. Обычные деньги (карты через
+провайдера) идут отдельным путём: инвойс со списком цен в минимальных единицах
+валюты, форма оплаты и чек.
+
+Здесь нарочно нет оплаты. Читать баланс, историю, чеки и выписывать счета —
+безопасно; нажать «заплатить» за человека нельзя, и подтверждение суммы должно
+происходить у него на экране, а не в скрипте.
+"""
+from __future__ import annotations
+
+from typing import Any, Sequence
+
+# Звезда делится на 10^9 «нанозвёзд» — суммы приходят парой (amount, nanos).
+NANOS = 1_000_000_000
+
+# Валюты без дробной части: суммы в них передаются как есть, а не в сотых.
+# XTR — звёзды — тоже целые: 50 в счёте означает пятьдесят звёзд, а не полста
+# сотых. Без этого счёт на 50 выписывается на 5000.
+ZERO_DECIMAL = {"XTR", "JPY", "KRW", "VND", "CLP", "ISK", "UGX", "XAF", "XOF",
+                "PYG", "RWF", "VUV"}
+
+
+class PayError(RuntimeError):
+    """Платёжная операция, которую не удалось выполнить или разобрать."""
+
+
+def amount_of(value: Any) -> float:
+    """StarsAmount или StarsTonAmount → число. У звёзд есть дробная часть."""
+    if value is None:
+        return 0.0
+    whole = getattr(value, "amount", 0) or 0
+    nanos = getattr(value, "nanos", 0) or 0
+    return round(whole + nanos / NANOS, 9)
+
+
+def minor_units(currency: str, amount: float) -> int:
+    """`12.5` в USD → 1250. Telegram принимает цену только в минимальных единицах."""
+    if (currency or "").upper() in ZERO_DECIMAL:
+        return int(round(amount))
+    return int(round(amount * 100))
+
+
+def describe_transaction(row: Any) -> dict[str, Any]:
+    """Одна операция — плоской записью, без разбора всех видов партнёров."""
+    partner = getattr(row, "peer", None)
+    kind = type(partner).__name__.replace("StarsTransactionPeer", "") or "?"
+    # Поле называется amount, а не stars: на stars приходили сплошные нули.
+    stars = amount_of(getattr(row, "amount", None))
+    date = getattr(row, "date", None)
+    return {
+        "id": getattr(row, "id", None),
+        "дата": date.isoformat(timespec="seconds") if date else None,
+        "сумма": stars,
+        "направление": "приход" if stars > 0 else "расход",
+        "кому": kind,
+        "за что": getattr(row, "title", None) or getattr(row, "description", None) or "",
+        "возврат": bool(getattr(row, "refund", False)),
+        "не завершена": bool(getattr(row, "pending", False)),
+    }
+
+
+class Pay:
+    """Балансы, история, чеки и выписка счетов."""
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    async def balance(self, *, ton: bool = False) -> dict[str, Any]:
+        """Баланс звёзд или TON — тот же вызов, разный флаг."""
+        from telethon.tl import functions, types
+
+        result = await self.client(functions.payments.GetStarsStatusRequest(
+            peer=types.InputPeerSelf(), ton=ton or None))
+        subs = getattr(result, "subscriptions", None) or []
+        return {
+            "валюта": "TON" if ton else "звёзды",
+            "баланс": amount_of(getattr(result, "balance", None)),
+            "подписок": len(subs),
+            "подписки": [{"чат": getattr(getattr(s, "peer", None), "channel_id", None),
+                          "сумма": amount_of(getattr(s, "pricing", None)),
+                          "до": str(getattr(s, "until_date", "") or "")[:10]}
+                         for s in subs[:10]],
+        }
+
+    async def transactions(self, *, limit: int = 30, inbound: bool = False,
+                           outbound: bool = False, ton: bool = False) -> list[dict[str, Any]]:
+        """История операций. Без флагов — и приход, и расход."""
+        from telethon.tl import functions, types
+
+        result = await self.client(functions.payments.GetStarsTransactionsRequest(
+            peer=types.InputPeerSelf(), offset="", limit=int(limit),
+            inbound=inbound or None, outbound=outbound or None, ton=ton or None,
+            ascending=None, subscription_id=None))
+        return [describe_transaction(row) for row in (getattr(result, "history", None) or [])]
+
+    async def receipt(self, chat: Any, msg_id: int) -> dict[str, Any]:
+        """Чек по оплаченному сообщению."""
+        from telethon.tl import functions
+
+        peer = await self.client.get_input_entity(chat)
+        try:
+            got = await self.client(functions.payments.GetPaymentReceiptRequest(
+                peer=peer, msg_id=int(msg_id)))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        invoice = getattr(got, "invoice", None)
+        date = getattr(got, "date", None)
+        return {
+            "название": getattr(got, "title", None),
+            "описание": getattr(got, "description", None),
+            "валюта": getattr(invoice, "currency", None),
+            "итого": sum(p.amount for p in (getattr(invoice, "prices", None) or [])),
+            "оплачено": date.isoformat(timespec="seconds") if date else None,
+            "провайдер": getattr(got, "provider_id", None),
+        }
+
+    async def form(self, slug_or_link: str) -> dict[str, Any]:
+        """Что просит счёт: сумма, валюта, какие данные потребуются.
+
+        Только чтение — форма не отправляется, платёж не совершается.
+        """
+        from telethon.tl import functions, types
+
+        slug = slug_or_link.rstrip("/").split("/")[-1].lstrip("$")
+        try:
+            got = await self.client(functions.payments.GetPaymentFormRequest(
+                invoice=types.InputInvoiceSlug(slug=slug), theme_params=None))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        invoice = getattr(got, "invoice", None)
+        prices = getattr(invoice, "prices", None) or []
+        return {
+            "название": getattr(got, "title", None),
+            "описание": getattr(got, "description", None),
+            "валюта": getattr(invoice, "currency", None),
+            "итого": sum(p.amount for p in prices),
+            "строки": [{"за что": p.label, "сумма": p.amount} for p in prices],
+            "нужен адрес": bool(getattr(invoice, "shipping_address_requested", False)),
+            "нужен телефон": bool(getattr(invoice, "phone_requested", False)),
+            "нужна почта": bool(getattr(invoice, "email_requested", False)),
+            "пробный": bool(getattr(invoice, "test", False)),
+            "повторяющийся": bool(getattr(invoice, "recurring", False)),
+        }
+
+    @staticmethod
+    def bot_invoice_link(token: str, *, title: str, description: str, currency: str,
+                         prices: Sequence[tuple[str, float]], payload: str = "tgx",
+                         provider: str = "", test: bool = False, needs_name: bool = False,
+                         needs_phone: bool = False, needs_email: bool = False,
+                         needs_address: bool = False, subscription_period: int | None = None,
+                         ) -> str:
+        """Ссылка-счёт через Bot API.
+
+        Счета выписывает бот: `payments.exportInvoice` от лица пользователя
+        отвечает USER_BOT_REQUIRED. В звёздах валюта пишется XTR и провайдер не
+        нужен — платёжной системой выступает сам Telegram.
+        """
+        import json
+
+        import tgx_net
+
+        code = (currency or "").upper()
+        if not prices:
+            raise PayError("в счёте должна быть хотя бы одна строка с ценой")
+        if code != "XTR" and not provider:
+            raise PayError(f"для валюты {code} нужен токен платёжного провайдера "
+                           f"(--provider); звёзды — валюта XTR — обходятся без него")
+        if subscription_period and code != "XTR":
+            raise PayError("подписку можно продавать только за звёзды (XTR)")
+
+        payload_fields: dict[str, Any] = {
+            "title": title.strip(), "description": description.strip(),
+            "payload": payload, "currency": code,
+            "prices": json.dumps([{"label": str(label),
+                                   "amount": minor_units(code, value)}
+                                  for label, value in prices], ensure_ascii=False),
+        }
+        if provider:
+            payload_fields["provider_token"] = provider
+        if subscription_period:
+            payload_fields["subscription_period"] = int(subscription_period)
+        for flag, name in ((needs_name, "need_name"), (needs_phone, "need_phone_number"),
+                           (needs_email, "need_email"), (needs_address, "need_shipping_address")):
+            if flag:
+                payload_fields[name] = "true"
+        try:
+            answer = tgx_net.post_form(
+                f"https://api.telegram.org/bot{token}/createInvoiceLink",
+                payload_fields, "Bot API")
+        except tgx_net.NetError as exc:
+            raise PayError(str(exc)) from exc
+        if not answer.get("ok"):
+            raise PayError(f"Bot API отказал: {answer.get('description', 'без объяснений')}")
+        return answer["result"]
+
+    async def invoice_link(self, *, title: str, description: str, currency: str,
+                           prices: Sequence[tuple[str, float]], payload: str = "tgx",
+                           provider: str = "", provider_data: str = "{}",
+                           test: bool = False, needs_name: bool = False,
+                           needs_phone: bool = False, needs_email: bool = False,
+                           needs_address: bool = False) -> str:
+        """Выписать ссылку-счёт от лица пользователя — Telegram это запрещает.
+
+        Оставлено, чтобы объяснить отказ: счета выписывает бот, см. bot_invoice_link.
+
+        В звёздах валюта пишется как XTR, и провайдер не нужен: Telegram сам
+        выступает платёжной системой. Для обычных денег провайдерский токен
+        обязателен, иначе счёт выписать не выйдет.
+        """
+        from telethon.tl import functions, types
+
+        code = (currency or "").upper()
+        if not prices:
+            raise PayError("в счёте должна быть хотя бы одна строка с ценой")
+        if code != "XTR" and not provider:
+            raise PayError(f"для валюты {code} нужен токен платёжного провайдера "
+                           f"(--provider); без него Telegram счёт не выпишет. "
+                           f"Звёзды — валюта XTR — провайдера не требуют")
+
+        rows = [types.LabeledPrice(label=str(label), amount=minor_units(code, value))
+                for label, value in prices]
+        media = types.InputMediaInvoice(
+            title=title.strip(), description=description.strip(),
+            invoice=types.Invoice(currency=code, prices=rows, test=test or None,
+                                  name_requested=needs_name or None,
+                                  phone_requested=needs_phone or None,
+                                  email_requested=needs_email or None,
+                                  shipping_address_requested=needs_address or None),
+            payload=payload.encode(), provider=provider or None,
+            provider_data=types.DataJSON(data=provider_data))
+        try:
+            exported = await self.client(functions.payments.ExportInvoiceRequest(
+                invoice_media=media))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        return exported.url
+
+    async def gift_options(self, user: Any) -> list[dict[str, Any]]:
+        """Во что обойдётся подарить звёзды этому человеку."""
+        from telethon.tl import functions
+
+        entity = await self.client.get_input_entity(user)
+        result = await self.client(functions.payments.GetStarsGiftOptionsRequest(user_id=entity))
+        return [{"звёзд": getattr(o, "stars", None),
+                 "цена": getattr(o, "amount", None),
+                 "валюта": getattr(o, "currency", None)} for o in (result or [])]
+
+    @staticmethod
+    def _explain(exc: Exception) -> Exception:
+        text = str(exc)
+        hints = {
+            "PAYMENT_PROVIDER_INVALID": "платёжный провайдер не принят: проверьте токен от @BotFather",
+            "CURRENCY_TOTAL_AMOUNT_INVALID": "сумма не подходит под правила этой валюты "
+                                             "(есть минимум и максимум)",
+            "INVOICE_PAYLOAD_INVALID": "служебная метка счёта слишком длинная или пустая",
+            "MESSAGE_ID_INVALID": "по этому сообщению чека нет",
+            "SLUG_INVALID": "такой ссылки-счёта не существует",
+            "BOT_INVALID": "счета выписывает бот — нужен его токен",
+            "STARGIFT_INVALID": "этот подарок недоступен",
+        }
+        for code, message in hints.items():
+            if code in text:
+                return PayError(message)
+        return exc

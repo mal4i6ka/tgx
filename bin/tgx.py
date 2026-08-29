@@ -31,6 +31,7 @@ import tgx_format
 import tgx_forum
 import tgx_guard
 import tgx_net
+import tgx_pay
 import tgx_poll
 import tgx_profile
 import tgx_rich
@@ -489,6 +490,77 @@ async def input_user(client: TelegramClient, peer: str) -> Any:
 async def uploaded_chat_photo(client: TelegramClient, file_path: str) -> Any:
     uploaded = await client.upload_file(str(Path(file_path).expanduser()))
     return types.InputChatUploadedPhoto(file=uploaded)
+
+
+async def cmd_pay(args: argparse.Namespace) -> None:
+    """Звёзды, TON и обычные счета. Оплаты здесь нет — только чтение и выписка."""
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        pay = tgx_pay.Pay(client)
+
+        if args.paycmd == "balance":
+            render.emit(await pay.balance(ton=args.ton))
+            return
+
+        if args.paycmd == "history":
+            rows = await pay.transactions(limit=args.limit, inbound=args.inbound,
+                                          outbound=args.outbound, ton=args.ton)
+            print_jsonl(rows) if args.jsonl else print_table(
+                rows, ["дата", "сумма", "направление", "за что"],
+                title="TON" if args.ton else "операции со звёздами")
+            return
+
+        if args.paycmd == "receipt":
+            peer = await resolve_peer(client, args.chat)
+            render.emit(await pay.receipt(peer, args.id))
+            return
+
+        if args.paycmd == "show":
+            data = await pay.form(args.link)
+            render.emit({k: v for k, v in data.items() if k != "строки"},
+                        title=data.get("название") or "счёт")
+            if data.get("строки"):
+                print_table(data["строки"], ["за что", "сумма"])
+            return
+
+        if args.paycmd == "invoice":
+            prices = []
+            for item in args.price:
+                label, _, value = item.rpartition("=")
+                if not label:
+                    raise tgx_pay.PayError(f"строка счёта пишется «за что=сумма», а не «{item}»")
+                try:
+                    prices.append((label, float(value)))
+                except ValueError:
+                    raise tgx_pay.PayError(f"«{value}» — не сумма") from None
+            # Счета выписывает бот: от лица пользователя Telegram отвечает
+            # USER_BOT_REQUIRED, поэтому --as обязателен.
+            if not args.bot:
+                raise tgx_pay.PayError("счёт выписывает бот — добавьте --as @бот")
+            bot = tgx_bots.Registry().get(args.bot)
+            if not bot.token:
+                raise tgx_pay.PayError(f"у @{bot.username} нет токена — "
+                                       f"`tgx bot token @{bot.username}`")
+            url = await asyncio.to_thread(
+                lambda: tgx_pay.Pay.bot_invoice_link(
+                    bot.token, title=args.title, description=args.description,
+                    currency=args.currency, prices=prices, payload=args.payload,
+                    provider=args.provider or "", test=args.test,
+                    needs_name=args.need_name, needs_phone=args.need_phone,
+                    needs_email=args.need_email, needs_address=args.need_address,
+                    subscription_period=args.subscription))
+            render.emit({"ok": True, "ссылка": url, "валюта": args.currency.upper(),
+                         "итого": sum(v for _, v in prices)})
+            return
+
+        if args.paycmd == "gift-options":
+            rows = await pay.gift_options(args.user)
+            print_jsonl(rows) if args.jsonl else print_table(rows, ["звёзд", "цена", "валюта"],
+                                                            title="подарить звёзды")
+            return
+    finally:
+        await client.disconnect()
 
 
 async def cmd_poll(args: argparse.Namespace) -> None:
@@ -2205,6 +2277,7 @@ GROUPS = [
     ("интерфейс", ["ui", "banner"]),
     ("боты и статьи", ["bot", "article", "business"]),
     ("форумы", ["forum", "guard", "poll", "boosts"]),
+    ("платежи", ["pay"]),
     ("голос", ["transcribe"]),
     ("аккаунт", ["auth", "me", "profile", "profile-get", "profile-edit", "profile-photo-set", "profile-photos", "profile-photo-delete"]),
     ("чаты и папки", ["dialogs", "folders", "folder-upsert"]),
@@ -2517,6 +2590,48 @@ def build_parser() -> argparse.ArgumentParser:
     fu.add_argument("--match-regex", help="include dialogs whose title or username matches this regex")
     fu.add_argument("--exclude", action="append", help="id, username, or exact title to exclude from --match-regex; can be repeated")
     fu.set_defaults(func=cmd_folder_upsert)
+
+    pay = sub.add_parser("pay", help="звёзды, TON и счета — чтение и выписка, без оплаты")
+    pay_sub = pay.add_subparsers(dest="paycmd", required=True)
+    pay.set_defaults(func=cmd_pay)
+
+    y_bal = pay_sub.add_parser("balance", help="баланс звёзд или TON")
+    y_bal.add_argument("--ton", action="store_true", help="криптовалюта вместо звёзд")
+
+    y_hist = pay_sub.add_parser("history", help="история операций")
+    y_hist.add_argument("--limit", type=int, default=30)
+    y_hist.add_argument("--inbound", action="store_true", help="только приход")
+    y_hist.add_argument("--outbound", action="store_true", help="только расход")
+    y_hist.add_argument("--ton", action="store_true")
+    y_hist.add_argument("--jsonl", action="store_true")
+
+    y_rec = pay_sub.add_parser("receipt", help="чек по оплаченному сообщению")
+    y_rec.add_argument("chat")
+    y_rec.add_argument("id", type=int)
+
+    y_show = pay_sub.add_parser("show", help="что просит счёт по ссылке (без оплаты)")
+    y_show.add_argument("link")
+
+    y_inv = pay_sub.add_parser("invoice", help="выписать ссылку-счёт")
+    y_inv.add_argument("title")
+    y_inv.add_argument("description")
+    y_inv.add_argument("--currency", default="XTR", help="XTR — звёзды, иначе код валюты")
+    y_inv.add_argument("--price", action="append", required=True, metavar="ЗА-ЧТО=СУММА",
+                       help="строка счёта; можно повторять")
+    y_inv.add_argument("--as", dest="bot", help="бот, который выписывает счёт (обязателен)")
+    y_inv.add_argument("--provider", help="токен платёжного провайдера; звёздам не нужен")
+    y_inv.add_argument("--subscription", type=int, metavar="СЕК",
+                       help="продавать подписку: период в секундах (только звёзды)")
+    y_inv.add_argument("--payload", default="tgx", help="служебная метка счёта")
+    y_inv.add_argument("--test", action="store_true", help="тестовый платёж")
+    y_inv.add_argument("--need-name", action="store_true")
+    y_inv.add_argument("--need-phone", action="store_true")
+    y_inv.add_argument("--need-email", action="store_true")
+    y_inv.add_argument("--need-address", action="store_true")
+
+    y_gift = pay_sub.add_parser("gift-options", help="во что обойдётся подарить звёзды")
+    y_gift.add_argument("user")
+    y_gift.add_argument("--jsonl", action="store_true")
 
     pl = sub.add_parser("poll", help="опросы и викторины")
     pl_sub = pl.add_subparsers(dest="pollcmd", required=True)
@@ -3097,7 +3212,7 @@ async def amain() -> None:
 # Errors these modules raise are already written for a person to read; a stack
 # trace on top of them only hides the sentence that explains what to do.
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError,
-                 tgx_banner.BannerError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_poll.PollError,
+                 tgx_banner.BannerError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
                  tgx_rich.RichError, tgx_transcribe.TranscribeError)
 
