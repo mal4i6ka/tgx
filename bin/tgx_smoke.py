@@ -1212,6 +1212,49 @@ def pay_regression() -> None:
                       ("paid_reaction", "платная реакция"), ("saved_info", "платёжные данные"),
                       ("clear_saved", "стирание данных")):
         check(f"ветка на месте: {why}", hasattr(Y.Pay, name))
+    for name, why in (("withdrawal_url", "вывод средств"), ("card_bank", "банк по карте")):
+        check(f"ветка на месте: {why}", hasattr(Y.Pay, name))
+
+
+def secret_input_regression() -> None:
+    """Секреты не должны попадать в аргументы команды: там их видит история
+    оболочки, список процессов и логи. Читаем скрыто — или честно отказываем."""
+    import tgx
+
+    os.environ.pop("TGX_TEST_SECRET", None)
+
+    class NoTty:
+        @staticmethod
+        def isatty():
+            return False
+
+    original = sys.stdin
+    sys.stdin = NoTty()
+    refused = ""
+    try:
+        tgx.read_secret("пароль: ", "TGX_TEST_SECRET")
+    except tgx_pay_error() as exc:
+        refused = str(exc)
+    finally:
+        sys.stdin = original
+    check("без терминала команда отказывает, а не ждёт вечно", "терминала нет" in refused)
+    check("и подсказывает переменную окружения", "TGX_TEST_SECRET" in refused)
+
+    os.environ["TGX_TEST_SECRET"] = "из-переменной"
+    try:
+        check("для автоматизации читает переменную окружения",
+              tgx.read_secret("пароль: ", "TGX_TEST_SECRET") == "из-переменной")
+    finally:
+        os.environ.pop("TGX_TEST_SECRET", None)
+
+    import inspect
+    source = inspect.getsource(tgx.read_secret)
+    check("секрет читается getpass, а не input", "getpass" in source and "input(" not in source)
+
+
+def tgx_pay_error():
+    import tgx_pay
+    return tgx_pay.PayError
 
 
 def confirm_regression() -> None:
@@ -1555,6 +1598,7 @@ async def main() -> int:
     collapsed_quote_regression()
     pay_regression()
     confirm_regression()
+    secret_input_regression()
     await resolve_peer_regression()
     autotools_regression()
     rich_render_regression()

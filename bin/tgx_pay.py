@@ -454,6 +454,70 @@ class Pay:
             credentials=credentials or None, info=info or None))
         return {"стёрто": {"способ оплаты": credentials, "адрес и контакты": info}}
 
+    # ── то, что требует секрета ──────────────────────────────────────────────
+    async def withdrawal_url(self, peer: Any, amount: float, *, ton: bool = False,
+                             secret: str = "") -> dict[str, Any]:
+        """Ссылка на вывод средств.
+
+        Пароль от аккаунта не уходит на сервер: Telegram проверяет его по SRP,
+        то есть по доказательству знания. Сам пароль не попадает ни в аргументы
+        команды, ни в историю оболочки — его вводят в скрытую строку.
+
+        Деньги эта команда не переводит: она возвращает ссылку на страницу
+        вывода, где подтверждение происходит уже у человека.
+        """
+        from telethon import password as srp
+        from telethon.tl import functions
+
+        if not secret:
+            raise PayError("для вывода нужен пароль от аккаунта — введите его в приглашении")
+        target = await self.client.get_input_entity(peer)
+        state = await self.client(functions.account.GetPasswordRequest())
+        if not getattr(state, "has_password", False):
+            raise PayError("на аккаунте не включён пароль (двухэтапная проверка) — "
+                           "вывод без него невозможен")
+        check = srp.compute_check(state, secret)
+        try:
+            result = await self.client(functions.payments.GetStarsRevenueWithdrawalUrlRequest(
+                peer=target, password=check, ton=ton or None,
+                amount=int(amount) if not ton else None))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        return {"ссылка": getattr(result, "url", None),
+                "валюта": "TON" if ton else "звёзды", "сумма": amount}
+
+    async def card_bank(self, number: str) -> dict[str, Any]:
+        """Какой банк выпустил карту.
+
+        Сервер требует **полный** номер, а не только первые цифры: на шести
+        отвечает BANK_CARD_NUMBER_INVALID. Тем важнее скрытый ввод — номер не
+        должен попадать ни в аргументы команды, ни в историю оболочки, ни в
+        логи. Здесь он живёт только в памяти процесса.
+        """
+        from telethon.tl import functions
+
+        digits = "".join(c for c in number if c.isdigit())
+        if len(digits) < 12:
+            raise PayError("нужен полный номер карты: на первых цифрах сервер "
+                           "отвечает отказом")
+        request = functions.payments.GetBankCardDataRequest(number=digits)
+        try:
+            result = await self.client(request)
+        except Exception as exc:
+            # Справочник банков лежит не в «домашнем» дата-центре, и сервер
+            # отвечает FILE_MIGRATE_N. Повторяем запрос там, куда он указал.
+            dc = getattr(exc, "new_dc", None)
+            if dc is None:
+                raise self._explain(exc) from exc
+            sender = await self.client._borrow_exported_sender(dc)
+            try:
+                result = await self.client._call(sender, request)
+            except Exception as inner:
+                raise self._explain(inner) from inner
+        return {"банк": getattr(result, "title", None),
+                "ссылки": [{"название": u.text, "адрес": u.url}
+                           for u in (getattr(result, "open_urls", None) or [])]}
+
     @staticmethod
     def _explain(exc: Exception) -> Exception:
         text = str(exc)
@@ -471,6 +535,11 @@ class Pay:
             "PREMIUM_ACCOUNT_REQUIRED": "нужен Telegram Premium",
             "BALANCE_TOO_LOW": "не хватает звёзд на балансе",
             "STARGIFT_TRANSFER_TOO_EARLY": "подарок ещё нельзя передавать — не вышел срок",
+            "PASSWORD_HASH_INVALID": "пароль не подошёл",
+            "PASSWORD_MISSING": "на аккаунте не включена двухэтапная проверка",
+            "BALANCE_TOO_LOW": "на балансе меньше запрошенной суммы",
+            "BANK_CARD_NUMBER_INVALID": "номер карты не принят — нужен полный номер",
+            "BANK_CARD_NOT_FOUND": "по этому номеру банк не определился",
         }
         for code, message in hints.items():
             if code in text:

@@ -526,6 +526,43 @@ async def cmd_confirm(args: argparse.Namespace) -> None:
         await client.disconnect()
 
 
+async def gated_or_die(client: Any, args: argparse.Namespace, title: str,
+                       details: str, danger: str) -> dict[str, Any]:
+    """Ворота для необратимого: без согласия человека команда не продолжается.
+
+    Отсутствие `--confirm-to` — это отказ, а не предупреждение: иначе опасное
+    действие однажды выполнится потому, что флаг забыли.
+    """
+    if not getattr(args, "confirm_to", None):
+        raise tgx_pay.PayError(
+            "это действие тратит деньги или необратимо — нужно подтверждение: "
+            "добавьте --confirm-to КОГО --as @бот")
+    verdict = await ask_human(client, args.bot, args.confirm_to, title, details,
+                              danger=danger, timeout=args.timeout)
+    if verdict["decision"] != "approved":
+        render.emit({"ok": False, "действие": "отменено", **verdict})
+        raise SystemExit(2)
+    return verdict
+
+
+def read_secret(prompt: str, env: str = "") -> str:
+    """Секрет из скрытой строки — не из аргумента и не из истории оболочки.
+
+    Для автоматизации остаётся переменная окружения: она хотя бы не оседает в
+    истории команд. Без терминала и без переменной команда честно отказывается,
+    а не зависает в ожидании ввода, которого никто не сделает.
+    """
+    import getpass
+
+    if env and os.environ.get(env):
+        return os.environ[env]
+    if not sys.stdin.isatty():
+        raise tgx_pay.PayError(
+            f"нужен ввод секрета, а терминала нет. Запустите команду в терминале "
+            f"или передайте значение через переменную {env or 'окружения'}")
+    return getpass.getpass(prompt)
+
+
 async def cmd_pay(args: argparse.Namespace) -> None:
     """Звёзды, TON и обычные счета. Оплаты здесь нет — только чтение и выписка."""
     client = await make_client()
@@ -634,22 +671,29 @@ async def cmd_pay(args: argparse.Namespace) -> None:
             render.emit(await pay.giveaway(await resolve_peer(client, args.chat), args.id))
             return
 
+        if args.paycmd == "card-bank":
+            number = read_secret("номер карты (не отображается): ", "TGX_CARD_NUMBER")
+            render.emit(await pay.card_bank(number))
+            return
+
+        if args.paycmd == "withdraw":
+            chat = await resolve_peer(client, args.chat)
+            v = await gated_or_die(client, args, "Вывести средства?",
+                                   f"{entity_title(chat)}: {args.amount} "
+                                   f"{'TON' if args.ton else '⭐'}",
+                                   "ссылка на вывод открывает страницу подтверждения")
+            secret = read_secret("пароль от аккаунта (не отображается): ", "TGX_PASSWORD")
+            render.emit({"ok": True, **await pay.withdrawal_url(
+                chat, args.amount, ton=args.ton, secret=secret), "подтвердил": v["by"]})
+            return
+
         if args.paycmd == "saved-info":
             render.emit(await pay.saved_info())
             return
 
         # ── тратящее и необратимое: только через подтверждение человеком ────
         async def gated(title: str, details: str, danger: str) -> dict[str, Any]:
-            if not args.confirm_to:
-                raise tgx_pay.PayError(
-                    "это действие тратит деньги или необратимо — нужно подтверждение: "
-                    "добавьте --confirm-to КОГО --as @бот")
-            verdict = await ask_human(client, args.bot, args.confirm_to, title, details,
-                                      danger=danger, timeout=args.timeout)
-            if verdict["decision"] != "approved":
-                render.emit({"ok": False, "действие": "отменено", **verdict})
-                raise SystemExit(2)
-            return verdict
+            return await gated_or_die(client, args, title, details, danger)
 
         if args.paycmd == "convert-gift":
             v = await gated("Обменять подарок на звёзды?", f"Подарок {args.id}",
@@ -2828,6 +2872,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     pay_sub.add_parser("saved-info", help="что Telegram хранит из платёжных данных")
 
+    pay_sub.add_parser("card-bank", help="какой банк выпустил карту; номер спросим скрытно")
+
     # тратящие и необратимые — у всех общие ключи подтверждения
     def gated_parser(name: str, help_text: str) -> Any:
         parser = pay_sub.add_parser(name, help=help_text + " (требует подтверждения)")
@@ -2853,6 +2899,11 @@ def build_parser() -> argparse.ArgumentParser:
     y_apply.add_argument("slug")
 
     gated_parser("clear-saved", "стереть сохранённые платёжные данные")
+
+    y_wd = gated_parser("withdraw", "вывести средства: вернёт ссылку на страницу вывода")
+    y_wd.add_argument("chat", help="канал или бот, чей доход выводим")
+    y_wd.add_argument("amount", type=float, help="сколько выводим")
+    y_wd.add_argument("--ton", action="store_true", help="в TON вместо звёзд")
 
     y_cancel = gated_parser("cancel-subscription", "отменить или возобновить подписку")
     y_cancel.add_argument("chat")
