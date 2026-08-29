@@ -46,6 +46,7 @@ import tgx_profile
 import tgx_rich
 import tgx_transcribe
 import tgx_render as render
+import tgx_safety
 import tgx_security
 import tgx_splash
 import tgx_stats
@@ -2825,6 +2826,60 @@ async def cmd_ai(args: argparse.Namespace) -> None:
         return
 
 
+async def cmd_safety(args: argparse.Namespace) -> None:
+    """Блокировки, жалобы и уборка — почти всё через подтверждение."""
+    command = args.safetycmd
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        safety = tgx_safety.Safety(client)
+        peer = await resolve_peer(client, args.peer) if getattr(args, "peer", None) else None
+
+        if command == "block":
+            await gated_or_die(client, args, f"заблокировать {args.who}",
+                               "человек не сможет вам писать и видеть вас", danger=True)
+            render.emit(await safety.block(args.who, stories_only=args.stories_only))
+        elif command == "unblock":
+            render.emit(await safety.block(args.who, unblock=True,
+                                           stories_only=args.stories_only))
+        elif command == "blocked":
+            render.emit({"заблокированы": await safety.blocked(
+                limit=args.limit, stories_only=args.stories_only)})
+        elif command == "block-replier":
+            await gated_or_die(client, args, f"заблокировать автора сообщения {args.id}",
+                               "и, если просили, стереть переписку", danger=True)
+            render.emit(await safety.block_replier(
+                args.id, delete=args.delete, wipe=args.wipe, spam=args.spam))
+        elif command == "peer-settings":
+            render.emit(await safety.peer_settings(peer))
+        elif command == "hide-bar":
+            render.emit(await safety.hide_bar(peer))
+        elif command == "report-spam":
+            await gated_or_die(client, args, f"пожаловаться на {args.peer} как на спам",
+                               "жалобу нельзя отозвать", danger=True)
+            render.emit(await safety.report_spam(peer))
+        elif command == "report":
+            if args.option or args.comment:
+                await gated_or_die(client, args, f"отправить жалобу на {args.peer}",
+                                   "жалобу нельзя отозвать", danger=True)
+            render.emit(await safety.report(peer, args.id, option=args.option or "",
+                                            comment=args.comment or ""))
+        elif command == "clear-history":
+            await gated_or_die(
+                client, args, f"стереть переписку с {args.peer}",
+                "у собеседника тоже" if args.both_sides else "только у вас", danger=True)
+            render.emit(await safety.clear_history(
+                peer, both_sides=args.both_sides, keep_chat=not args.drop_chat))
+        elif command == "unpin-all":
+            await gated_or_die(client, args, f"снять все закрепления в {args.peer}",
+                               "вернуть можно только вручную", danger=True)
+            render.emit(await safety.unpin_all(peer, topic=args.topic or 0))
+        elif command == "sponsored":
+            render.emit(await safety.sponsored(args.state == "on"))
+    finally:
+        await client.disconnect()
+
+
 async def cmd_notify(args: argparse.Namespace) -> None:
     """Чем вас беспокоят и кого вы впускаете."""
     command = args.notifycmd
@@ -3538,6 +3593,66 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=["auto", "tgp", "sixel", "halfcell", "unicode", "off"],
                     help="как рисовать превью: auto (по возможностям терминала), протокол явно, либо off")
     ui.set_defaults(func=cmd_ui)
+
+    sf = sub.add_parser("safety", help="блокировки, жалобы, уборка переписки")
+    sf_sub = sf.add_subparsers(dest="safetycmd", required=True)
+    sf.set_defaults(func=cmd_safety)
+
+    def confirmable(parser):
+        parser.add_argument("--confirm-to", help="кто подтверждает")
+        parser.add_argument("--as", dest="bot", help="бот, который спросит")
+        parser.add_argument("--timeout", type=float, default=300.0)
+        return parser
+
+    s_bl = confirmable(sf_sub.add_parser("block", help="заблокировать (требует подтверждения)"))
+    s_bl.add_argument("who")
+    s_bl.add_argument("--stories-only", action="store_true", help="закрыть только истории")
+
+    s_ub = sf_sub.add_parser("unblock", help="разблокировать")
+    s_ub.add_argument("who")
+    s_ub.add_argument("--stories-only", action="store_true")
+
+    s_bd = sf_sub.add_parser("blocked", help="кого вы заблокировали")
+    s_bd.add_argument("--limit", type=int, default=100)
+    s_bd.add_argument("--stories-only", action="store_true")
+
+    s_br = confirmable(sf_sub.add_parser(
+        "block-replier", help="заблокировать автора комментария (требует подтверждения)"))
+    s_br.add_argument("id", type=int, help="id сообщения-ответа")
+    s_br.add_argument("--delete", action="store_true", help="удалить это сообщение")
+    s_br.add_argument("--wipe", action="store_true", help="стереть всю его переписку")
+    s_br.add_argument("--spam", action="store_true", help="заодно пожаловаться")
+
+    s_ps = sf_sub.add_parser("peer-settings", help="что Telegram думает о собеседнике")
+    s_ps.add_argument("peer")
+
+    s_hb = sf_sub.add_parser("hide-bar", help="убрать полоску над чатом")
+    s_hb.add_argument("peer")
+
+    s_rs = confirmable(sf_sub.add_parser(
+        "report-spam", help="пожаловаться на спам (требует подтверждения)"))
+    s_rs.add_argument("peer")
+
+    s_rp = confirmable(sf_sub.add_parser(
+        "report", help="жалоба по меню сервера: без варианта показывает меню"))
+    s_rp.add_argument("peer")
+    s_rp.add_argument("id", type=int, nargs="+")
+    s_rp.add_argument("--option", help="ключ варианта из предыдущего шага")
+    s_rp.add_argument("--comment", default="", help="комментарий, если сервер попросил")
+
+    s_ch = confirmable(sf_sub.add_parser(
+        "clear-history", help="стереть переписку (требует подтверждения)"))
+    s_ch.add_argument("peer")
+    s_ch.add_argument("--both-sides", action="store_true", help="и у собеседника тоже")
+    s_ch.add_argument("--drop-chat", action="store_true", help="убрать чат из списка")
+
+    s_up = confirmable(sf_sub.add_parser(
+        "unpin-all", help="снять все закрепления (требует подтверждения)"))
+    s_up.add_argument("peer")
+    s_up.add_argument("--topic", type=int, help="только в этой теме форума")
+
+    s_sp = sf_sub.add_parser("sponsored", help="показывать ли рекламу (скрыть — Premium)")
+    s_sp.add_argument("state", choices=["on", "off"])
 
     nt = sub.add_parser("notify", help="уведомления, заявки на вступление, реакции")
     nt_sub = nt.add_subparsers(dest="notifycmd", required=True)
@@ -5369,7 +5484,7 @@ async def amain() -> None:
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_calls.CallError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_pending.PendingError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
-                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
+                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_safety.SafetyError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
                  tgx_stories.StoryError,
                  tgx_transcribe.TranscribeError)
 

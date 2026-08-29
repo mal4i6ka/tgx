@@ -1758,6 +1758,60 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+async def safety_regression() -> None:
+    """Жалоба идёт по меню сервера: причины меняются, зашивать их к себе —
+    значит устареть. Варианты приходят байтами, а в терминал их надо отдать
+    строкой и принять обратно ровно теми же байтами."""
+    import base64
+    import tgx_safety as S
+
+    class Thing:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    sent = []
+
+    class Fake(S.Safety):
+        def __init__(self, answer):
+            self.answer = answer
+
+        async def _call(self, request):
+            sent.append(request)
+            return self.answer
+
+    menu = Thing(title="За что?", options=[
+        Thing(text="Спам", option=b"\x09"), Thing(text="Другое", option=b"a")])
+    menu.__class__.__name__ = "ReportResultChooseOption"
+    shown = await Fake(menu).report(None, [1])
+    check("меню показано словами сервера", shown["шаг"] == "За что?")
+    check("вариантов столько, сколько прислали", len(shown["варианты"]) == 2)
+    key = shown["варианты"][0]["ключ"]
+    check("ключ пригоден для командной строки", key.isalnum() or "-" in key or "_" in key)
+    check("ключ разворачивается в те же байты",
+          base64.urlsafe_b64decode(key + "==") == b"\x09")
+    check("первый шаг ничего не выбирает", sent[0].option == b"")
+
+    sent.clear()
+    await Fake(menu).report(None, [1], option=key)
+    check("выбранный вариант уходит байтами", sent[0].option == b"\x09")
+
+    done = Thing()
+    done.__class__.__name__ = "ReportResultReported"
+    check("отправленная жалоба так и называется",
+          (await Fake(done).report(None, [1], option=key))["жалоба"] == "отправлена")
+
+    # полоска над чатом — это ответ сервера, а не украшение
+    bar = Thing(report_spam=True, block_contact=True, add_contact=False,
+                charge_paid_message_stars=5, phone_country="IL")
+    settings = await Fake(Thing(settings=bar)).peer_settings(None)
+    check("поднятые признаки названы", len(settings["полоска"]) == 2)
+    check("платное сообщение видно", settings["платное сообщение"] == "5 звёзд")
+    check("страна номера видна", settings["номер из"] == "IL")
+
+    quiet = await Fake(Thing(settings=Thing())).peer_settings(None)
+    check("обычный собеседник так и подписан", quiet["полоска"] == ["обычный собеседник"])
+
+
 def notify_regression() -> None:
     """Тишина у Telegram — это отметка времени, а не «сколько часов молчать».
     Отсюда две ловушки: незаглушённое приходит нулём, который становится
@@ -2197,6 +2251,7 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    await safety_regression()
     notify_regression()
     await digest_regression()
     triage_regression()
