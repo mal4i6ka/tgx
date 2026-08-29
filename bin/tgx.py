@@ -29,6 +29,7 @@ import tgx_bots
 import tgx_business
 import tgx_format
 import tgx_forum
+import tgx_guard
 import tgx_net
 import tgx_profile
 import tgx_rich
@@ -457,6 +458,51 @@ async def uploaded_chat_photo(client: TelegramClient, file_path: str) -> Any:
     return types.InputChatUploadedPhoto(file=uploaded)
 
 
+async def cmd_guard(args: argparse.Namespace) -> None:
+    """Именные одноразовые приглашения и проверка, кто по ним вошёл."""
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        guard = tgx_guard.Guard(client)
+
+        if args.guardcmd == "journal":
+            rows = guard.journal()
+            print_jsonl(rows) if args.jsonl else print_table(
+                rows, ["for_label", "status", "issued", "link"], title="выписанные приглашения")
+            return
+
+        peer = await resolve_peer(client, args.chat)
+
+        if args.guardcmd == "invite":
+            row = await guard.issue(peer, args.user, hours=args.hours, note=args.note or "")
+            render.emit({"ok": True, "for": row["for_label"], "link": row["link"],
+                         "expires": row["expires"], "usage_limit": 1})
+            return
+
+        if args.guardcmd == "check":
+            report = await guard.check(peer, kick=not args.no_kick)
+            trouble = [r for r in report if r["status"] == "нарушена"]
+            if args.jsonl:
+                print_jsonl(report)
+            else:
+                print_table(report, ["for_label", "status", "joined", "kicked"],
+                            title="сверка приглашений")
+                if trouble:
+                    render.fail(f"по {len(trouble)} ссылке(ам) вошёл не тот, кого звали — "
+                                f"они удалены, ссылки отозваны")
+            return
+
+        if args.guardcmd == "revoke":
+            render.emit({"ok": True, **await guard.revoke(peer, args.link)})
+            return
+
+        if args.guardcmd == "lock":
+            render.emit({"ok": True, **await guard.lock(peer)})
+            return
+    finally:
+        await client.disconnect()
+
+
 async def cmd_rich(args: argparse.Namespace) -> None:
     """Богатое сообщение от своего имени — MTProto это умеет, ограничение только в Bot API."""
     markdown = Path(args.file).expanduser().read_text() if args.file else (args.text or "")
@@ -467,14 +513,41 @@ async def cmd_rich(args: argparse.Namespace) -> None:
     try:
         await ensure_login(client)
         chat = await resolve_peer(client, args.peer)
+
+        # Картинка живёт внутри самого документа: в разметке на неё ссылаются
+        # как tg://photo?id=ИМЯ, а сам файл едет в поле files.
+        files = []
+        for item in args.media or []:
+            name, _, path = item.partition("=")
+            if not path:
+                raise tgx_rich.RichError(f"--media ждёт ИМЯ=путь, а получил «{item}»")
+            source = Path(path).expanduser()
+            if not source.is_file():
+                raise tgx_rich.RichError(f"файла {source} нет")
+            uploaded = await client.upload_file(str(source))
+            holder = await client(functions.messages.UploadMediaRequest(
+                peer=chat, media=types.InputMediaUploadedPhoto(file=uploaded)))
+            photo = holder.photo
+            files.append(types.InputRichFilePhoto(
+                id=name, photo=types.InputPhoto(id=photo.id, access_hash=photo.access_hash,
+                                                file_reference=photo.file_reference)))
+            reference = f"tg://photo?id={name}"
+            if reference not in markdown:
+                markdown = f"![]({reference})\n\n" + markdown
         # Тема форума — тред служебного сообщения, которым её создали: чтобы
         # попасть в неё, отвечаем на её корневое сообщение.
         reply = types.InputReplyToMessage(reply_to_msg_id=args.topic) if args.topic else None
+        # Слой 227 разрешил кнопки не только ботам — обычному аккаунту тоже.
+        markup = None
+        if args.button:
+            rows = tgx_bots.parse_buttons(args.button)
+            markup = types.ReplyInlineMarkup(
+                rows=[types.KeyboardButtonRow(buttons=r) for r in rows])
         result = await client(functions.messages.SendMessageRequest(
             peer=chat, message="", random_id=helpers.generate_random_long(),
             rich_message=types.InputRichMessageMarkdown(
-                markdown=markdown, rtl=False, noautolink=False, files=[]),
-            reply_to=reply, silent=args.silent or None))
+                markdown=markdown, rtl=False, noautolink=False, files=files or []),
+            reply_to=reply, reply_markup=markup, silent=args.silent or None))
         sent_id = 0
         for update in getattr(result, "updates", None) or []:
             sent_id = getattr(update, "id", 0) or getattr(getattr(update, "message", None), "id", 0) or sent_id
@@ -1538,6 +1611,12 @@ async def cmd_bot(args: argparse.Namespace) -> None:
         missing = set(tgx_rich.media_ids(markdown)) - {m["id"] for m in media}
         if missing:
             raise SystemExit(f"в тексте есть ссылки на медиа, которых нет в --media: {', '.join(sorted(missing))}")
+        # Обратный случай: вложение передано, а ссылки на него в тексте нет —
+        # Telegram такое молча игнорирует, поэтому ставим картинку в начало.
+        for entry in media:
+            reference = f"tg://photo?id={entry['id']}"
+            if reference not in markdown:
+                markdown = f"![]({reference})\n\n" + markdown
         bot = tgx_bots.Registry().get(args.bot)
         if not bot.token:
             raise SystemExit(f"у @{bot.username} нет токена — `tgx bot token @{bot.username}`")
@@ -1553,7 +1632,7 @@ async def cmd_bot(args: argparse.Namespace) -> None:
         result = await asyncio.to_thread(
             tgx_rich.send_rich, bot.token, chat_id, markdown,
             buttons=args.button or "", silent=args.silent, protect=args.protect,
-            draft=args.draft, media=media, is_rtl=args.rtl,
+            draft=args.draft, media=media, is_rtl=args.rtl, topic=args.topic,
             skip_entity_detection=args.no_autolinks,
         )
         render.emit({"ok": True, "message_id": result.get("message_id"), "chat": chat_id,
@@ -1833,7 +1912,7 @@ async def cmd_banner(args: argparse.Namespace) -> None:
 GROUPS = [
     ("интерфейс", ["ui", "banner"]),
     ("боты и статьи", ["bot", "article", "business"]),
-    ("форумы", ["forum"]),
+    ("форумы", ["forum", "guard"]),
     ("голос", ["transcribe"]),
     ("аккаунт", ["auth", "me", "profile", "profile-get", "profile-edit", "profile-photo-set", "profile-photos", "profile-photo-delete"]),
     ("чаты и папки", ["dialogs", "folders", "folder-upsert"]),
@@ -1988,6 +2067,7 @@ def build_parser() -> argparse.ArgumentParser:
     b_rich.add_argument("--button", help="кнопки под сообщением")
     b_rich.add_argument("--media", action="append",
                         help="имя=ссылка для ![](tg://photo?id=имя); можно повторять")
+    b_rich.add_argument("--topic", type=int, help="id темы форума")
     b_rich.add_argument("--draft", action="store_true", help="отправить черновиком (стриминг)")
     b_rich.add_argument("--silent", action="store_true")
     b_rich.add_argument("--protect", action="store_true", help="запретить пересылку и копирование")
@@ -2142,11 +2222,40 @@ def build_parser() -> argparse.ArgumentParser:
     fu.add_argument("--exclude", action="append", help="id, username, or exact title to exclude from --match-regex; can be repeated")
     fu.set_defaults(func=cmd_folder_upsert)
 
+    gd = sub.add_parser("guard", help="именные одноразовые приглашения: вошёл не тот — удаляем")
+    gd_sub = gd.add_subparsers(dest="guardcmd", required=True)
+    gd.set_defaults(func=cmd_guard)
+
+    g_inv = gd_sub.add_parser("invite", help="выписать ссылку на одного человека")
+    g_inv.add_argument("chat")
+    g_inv.add_argument("user", help="@имя или id того, кого зовём")
+    g_inv.add_argument("--hours", type=int, default=tgx_guard.DEFAULT_HOURS, help="срок жизни ссылки")
+    g_inv.add_argument("--note", help="пометка в журнал: зачем звали")
+
+    g_chk = gd_sub.add_parser("check", help="сверить, кто вошёл, и удалить чужих")
+    g_chk.add_argument("chat")
+    g_chk.add_argument("--no-kick", action="store_true", help="только показать, никого не трогать")
+    g_chk.add_argument("--jsonl", action="store_true")
+
+    g_rev = gd_sub.add_parser("revoke", help="отозвать ссылку")
+    g_rev.add_argument("chat")
+    g_rev.add_argument("link")
+
+    g_lock = gd_sub.add_parser("lock", help="запретить обычным участникам звать людей")
+    g_lock.add_argument("chat")
+
+    g_jrn = gd_sub.add_parser("journal", help="кому какие ссылки выписаны и чем кончилось")
+    g_jrn.add_argument("--jsonl", action="store_true")
+
     rich = sub.add_parser("rich", help="богатое сообщение от своего имени: заголовки, таблицы, цитаты")
     rich.add_argument("peer")
     rich.add_argument("text", nargs="?", default="", help="разметка; либо --file")
     rich.add_argument("--file", help="файл с разметкой")
     rich.add_argument("--topic", type=int, help="id темы форума")
+    rich.add_argument("--button", help="кнопки под сообщением; см. tgx bot buttons")
+    rich.add_argument("--media", action="append", metavar="ИМЯ=ПУТЬ",
+                      help="картинка внутрь документа; ссылка в тексте — tg://photo?id=ИМЯ. "
+                           "Если ссылки нет, картинка встаёт в начало")
     rich.add_argument("--silent", action="store_true")
     rich.set_defaults(func=cmd_rich)
 
@@ -2603,7 +2712,7 @@ async def amain() -> None:
 # Errors these modules raise are already written for a person to read; a stack
 # trace on top of them only hides the sentence that explains what to do.
 SPOKEN_ERRORS = (tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError,
-                 tgx_banner.BannerError, tgx_forum.ForumError, tgx_net.NetError,
+                 tgx_banner.BannerError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError,
                  tgx_profile.ProfileError,
                  tgx_rich.RichError, tgx_transcribe.TranscribeError)
 

@@ -253,7 +253,37 @@ BUTTON_SYNTAX = """Текст=https://…            ссылка
 Текст=switch:запрос        поделиться инлайн-запросом
 Текст=copy:что копировать  кнопка копирования
 Текст=user:123456          профиль пользователя
+Текст[primary]=…          цветная кнопка: primary, danger, success
+Текст[success:5312…]=…    та же кнопка с эмодзи вместо галочки
 ряды разделяются «;», кнопки в ряду — запятой"""
+
+
+STYLES = ("primary", "danger", "success")
+
+
+def parse_style(label: str) -> tuple[str, Any]:
+    """`Скачать[primary]` или `Готово[success:5312…]` → подпись и стиль кнопки.
+
+    Слой 227 разрешил кнопкам свой цвет фона и эмодзи вместо галочки; до него
+    кнопка была только серой, поэтому синтаксис добавлен, а не заменён — старые
+    строки без скобок работают как работали.
+    """
+    from telethon.tl.types import KeyboardButtonStyle
+
+    if not (label.endswith("]") and "[" in label):
+        return label, None
+    head, _, tail = label.rpartition("[")
+    spec = tail[:-1].strip().lower()
+    name, _, icon = spec.partition(":")
+    if name not in STYLES:
+        raise BotError(f"стиль «{name}» неизвестен; есть: {', '.join(STYLES)}")
+    if icon and not icon.isdigit():
+        raise BotError(f"иконке кнопки нужен числовой id эмодзи, а не «{icon}»")
+    return head.strip(), KeyboardButtonStyle(
+        bg_primary=name == "primary" or None,
+        bg_danger=name == "danger" or None,
+        bg_success=name == "success" or None,
+        icon=int(icon) if icon else None)
 
 
 def parse_buttons(spec: str) -> list[list[Any]]:
@@ -278,16 +308,17 @@ def parse_buttons(spec: str) -> list[list[Any]]:
             if not sep:
                 raise BotError(f"кнопка «{chunk}» без адреса — нужно «Текст=https://…»\n{BUTTON_SYNTAX}")
             label, target = label.strip(), target.strip()
+            label, style = parse_style(label)
             kind, _, rest = target.partition(":")
             kind = kind.lower()
             if target.startswith(("http://", "https://", "tg://")):
-                row.append(KeyboardButtonUrl(label, target))
+                row.append(KeyboardButtonUrl(label, target, style=style))
             elif kind == "webapp":
                 if not rest.startswith("https://"):
                     raise BotError(f"веб-приложению «{label}» нужен https-адрес")
-                row.append(KeyboardButtonWebView(label, rest))
+                row.append(KeyboardButtonWebView(label, rest, style=style))
             elif kind == "cb":
-                row.append(KeyboardButtonCallback(label, rest.encode()))
+                row.append(KeyboardButtonCallback(label, rest.encode(), style=style))
             elif kind == "switch":
                 row.append(KeyboardButtonSwitchInline(label, rest, same_peer=False))
             elif kind == "copy":
@@ -297,7 +328,7 @@ def parse_buttons(spec: str) -> list[list[Any]]:
                     raise BotError(f"кнопке профиля «{label}» нужен числовой id")
                 row.append(KeyboardButtonUserProfile(label, int(rest)))
             else:
-                row.append(KeyboardButtonCallback(label, target.encode()))
+                row.append(KeyboardButtonCallback(label, target.encode(), style=style))
         if row:
             rows.append(row)
     return rows

@@ -77,6 +77,14 @@ def bot_chat_id(chat: Any) -> str:
 
 
 # ── buttons ──────────────────────────────────────────────────────────────────
+def split_style(label: str) -> tuple[str, str]:
+    """`Скачать[primary]` → («Скачать», «primary»). Без скобок — как было."""
+    if not (label.endswith("]") and "[" in label):
+        return label, ""
+    head, _, tail = label.rpartition("[")
+    return head.strip(), tail[:-1].strip().lower()
+
+
 def buttons_json(spec: str) -> dict[str, Any] | None:
     """The same button syntax as the rest of tgx, in the Bot API's own JSON shape."""
     if not (spec or "").strip():
@@ -92,6 +100,10 @@ def buttons_json(spec: str) -> dict[str, Any] | None:
             if not sep:
                 raise RichError(f"кнопка «{chunk}» без адреса — нужно «Текст=https://…»")
             label, target = label.strip(), target.strip()
+            # Тот же синтаксис стиля, что и в MTProto-ветке: Текст[primary]=…
+            # Bot API поля стиля пока не документирует, поэтому метку снимаем
+            # всегда — иначе она уезжает в подпись кнопки, как и случилось.
+            label, style = split_style(label)
             kind, _, rest = target.partition(":")
             if target.startswith(("http://", "https://", "tg://")):
                 row.append({"text": label, "url": target})
@@ -148,6 +160,28 @@ def call(token: str, method: str, payload: dict[str, Any]) -> Any:
     return answer["result"]
 
 
+def call_with_files(token: str, method: str, payload: dict[str, Any],
+                    uploads: dict[str, Any]) -> Any:
+    """Тот же вызов Bot API, но с файлами формы — вложенные поля едут строками JSON."""
+    import mimetypes
+
+    import tgx_net
+
+    fields = {k: (v if isinstance(v, str) else json.dumps(v, ensure_ascii=False))
+              for k, v in payload.items()}
+    files = {}
+    for name, path in uploads.items():
+        mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        files[name] = (path.name, path.read_bytes(), mime)
+    try:
+        answer = tgx_net.post_multipart(f"{API}/bot{token}/{method}", fields, files, "Bot API")
+    except tgx_net.NetError as exc:
+        raise RichError(str(exc)) from exc
+    if not answer.get("ok"):
+        raise RichError(f"Bot API отказал: {answer.get('description', 'без объяснений')}")
+    return answer["result"]
+
+
 def send_rich(
     token: str,
     chat_id: str,
@@ -160,6 +194,7 @@ def send_rich(
     silent: bool = False,
     protect: bool = False,
     reply_to: int | None = None,
+    topic: int | None = None,
     is_rtl: bool = False,
     skip_entity_detection: bool = False,
     draft: bool = False,
@@ -186,6 +221,8 @@ def send_rich(
         rich["skip_entity_detection"] = True
 
     payload: dict[str, Any] = {"chat_id": chat_id, "rich_message": rich}
+    if topic:
+        payload["message_thread_id"] = int(topic)   # тема форума на стороне Bot API
     keyboard = buttons_json(buttons)
     if keyboard:
         payload["reply_markup"] = keyboard
@@ -195,7 +232,11 @@ def send_rich(
         payload["protect_content"] = True
     if reply_to:
         payload["reply_parameters"] = {"message_id": int(reply_to)}
-    return call(token, "sendRichMessageDraft" if draft else "sendRichMessage", payload)
+    method = "sendRichMessageDraft" if draft else "sendRichMessage"
+    uploads = {m["id"]: m.pop("_upload") for m in rich.get("media", []) if m.get("_upload")}
+    if uploads:
+        return call_with_files(token, method, payload, uploads)
+    return call(token, method, payload)
 
 
 # ── rendering what arrives ───────────────────────────────────────────────────
@@ -321,7 +362,21 @@ def render_message(rich: Any, colors: dict[str, str] | None = None, width: int =
 
 
 def photo_media(identifier: str, url_or_path: str) -> dict[str, Any]:
-    """A media entry for a tg://photo?id=<identifier> reference in the text."""
+    """A media entry for a tg://photo?id=<identifier> reference in the text.
+
+    Локальный файл превращается в ссылку `attach://…`: Bot API берёт медиа либо
+    по публичному URL, либо частью той же формы, а публичного URL у файла с
+    диска нет. Сам файл кладётся в `_upload` и уезжает multipart-ом.
+    """
+    from pathlib import Path
+
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", identifier):
         raise RichError(f"идентификатор «{identifier}»: только A-Z a-z 0-9 _ - и до 64 символов")
-    return {"id": identifier, "media": {"type": "photo", "media": url_or_path}}
+    entry: dict[str, Any] = {"id": identifier, "media": {"type": "photo", "media": url_or_path}}
+    if not url_or_path.startswith(("http://", "https://")):
+        source = Path(url_or_path).expanduser()
+        if not source.is_file():
+            raise RichError(f"файла {source} нет — нужен путь на диске или https-ссылка")
+        entry["media"]["media"] = f"attach://{identifier}"
+        entry["_upload"] = source
+    return entry

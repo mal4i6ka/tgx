@@ -63,6 +63,40 @@ def post_json(url: str, payload: dict[str, Any], what: str = "сервис") -> 
     return json.loads(_open(request, what))
 
 
+def post_multipart(url: str, fields: dict[str, Any], files: dict[str, tuple[str, bytes, str]],
+                   what: str = "сервис") -> Any:
+    """multipart/form-data вручную — так Bot API принимает файлы с диска.
+
+    Ссылка на файл внутри JSON-полей выглядит как `attach://имя`, где «имя» —
+    название части этой же формы; иначе Telegram умеет брать медиа только по
+    публичному URL, а у приватного репозитория его нет.
+    """
+    import secrets
+
+    boundary = "----tgx" + secrets.token_hex(16)
+    body = bytearray()
+    for name, value in fields.items():
+        if value is None:
+            continue
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        body += f"--{boundary}\r\n".encode()
+        body += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+        body += text.encode() + b"\r\n"
+    for name, (filename, blob, mime) in files.items():
+        body += f"--{boundary}\r\n".encode()
+        body += (f'Content-Disposition: form-data; name="{name}"; '
+                 f'filename="{filename}"\r\n').encode()
+        body += f"Content-Type: {mime}\r\n\r\n".encode()
+        body += blob + b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
+
+    request = urllib.request.Request(url, data=bytes(body), headers={
+        "User-Agent": "tgx/1.0",
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+    })
+    return json.loads(_open(request, what))
+
+
 def post_form(url: str, fields: dict[str, Any], what: str = "сервис") -> Any:
     data = urllib.parse.urlencode({k: v for k, v in fields.items() if v is not None}).encode()
     request = urllib.request.Request(url, data=data, headers={"User-Agent": "tgx/1.0"})

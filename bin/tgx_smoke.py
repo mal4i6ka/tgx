@@ -716,6 +716,149 @@ async def transcribe_regression() -> None:
     check("голосовое не отвергается", refused == "")
 
 
+async def guard_regression() -> None:
+    """Сторож удаляет людей из чата — решение об этом обязано быть проверяемым
+    без живых людей, поэтому оно вынесено в отдельную функцию."""
+    import tgx_guard
+
+    row = {"for_user_id": 651287, "for_label": "@makros23"}
+    check("никто не вошёл — ждём", tgx_guard.verdict(row, []) == ("ждёт", []))
+    check("вошёл тот, кого звали", tgx_guard.verdict(row, [651287]) == ("использована", []))
+    status, strangers = tgx_guard.verdict(row, [999])
+    check("вошёл чужой — ссылка нарушена", status == "нарушена")
+    check("и чужой назван поимённо", strangers == [999])
+    status, strangers = tgx_guard.verdict(row, [651287, 999])
+    check("если вошли оба, удаляют только лишнего", status == "нарушена" and strangers == [999])
+
+    with tempfile.TemporaryDirectory() as home:
+        os.environ["TGX_HOME"] = home
+        journal = Path(home) / "data" / "invite-guard.json"
+
+        calls = []
+
+        class Server:
+            """Отвечает так же, как Telegram: по ссылке вошёл не тот человек."""
+            async def get_entity(self, who):
+                return type("U", (), {"id": 651287, "username": "makros23"})()
+
+            async def get_input_entity(self, who):
+                return who
+
+            async def __call__(self, request):
+                name = type(request).__name__
+                calls.append(name)
+                if name == "ExportChatInviteRequest":
+                    check("ссылка выписана на одно использование", request.usage_limit == 1)
+                    check("в заголовке ссылки — кому она", "makros23" in (request.title or ""))
+                    return type("I", (), {"link": "https://t.me/+test"})()
+                if name == "GetChatInviteImportersRequest":
+                    return type("R", (), {"importers": [
+                        type("P", (), {"user_id": 424242})()]})()
+                return None
+
+        server = Server()
+        guard = tgx_guard.Guard(server, journal)
+        row = await guard.issue("chat", "@makros23")
+        check("журнал записан на диск", journal.exists())
+        check("журнал закрыт от чужих глаз", oct(journal.stat().st_mode)[-3:] == "600")
+        check("в журнале запомнили, кого звали", row["for_user_id"] == 651287)
+
+        report = await guard.check("chat", kick=True)
+        check("нарушение замечено", report[0]["status"] == "нарушена")
+        check("чужого выгнали", report[0]["kicked"] == [424242])
+        check("выгоняют баном и сразу разбаном, без вечного бана",
+              calls.count("EditBannedRequest") == 2)
+        check("нарушенная ссылка отзывается", "DeleteExportedChatInviteRequest" in calls)
+
+        # Тот же прогон без права выгонять — только отчёт.
+        calls.clear()
+        guard2 = tgx_guard.Guard(Server(), journal)
+        await guard2.issue("chat", "@makros23")
+        calm = await guard2.check("chat", kick=False)
+        check("с --no-kick никого не трогают",
+              all("EditBannedRequest" != c for c in calls) and calm[-1]["kicked"] == [])
+        os.environ.pop("TGX_HOME", None)
+
+
+def multipart_regression() -> None:
+    """Bot API берёт медиа либо по публичному URL, либо частью формы. Файл с диска
+    публичного URL не имеет, поэтому он уезжает как attach:// плюс multipart —
+    и если ссылку на него не поставить в текст, Telegram молча его выбросит."""
+    import tgx_net
+    import tgx_rich
+
+    with tempfile.TemporaryDirectory() as folder:
+        picture = Path(folder) / "banner.png"
+        picture.write_bytes(b"\x89PNG\r\n\x1a\nbody")
+
+        remote = tgx_rich.photo_media("banner", "https://example.com/b.png")
+        check("публичная ссылка идёт как есть",
+              remote["media"]["media"] == "https://example.com/b.png" and "_upload" not in remote)
+
+        local = tgx_rich.photo_media("banner", str(picture))
+        check("файл с диска превращается в attach://",
+              local["media"]["media"] == "attach://banner")
+        check("и запоминается для загрузки", local["_upload"] == picture)
+
+        refused = False
+        try:
+            tgx_rich.photo_media("banner", str(Path(folder) / "нет.png"))
+        except tgx_rich.RichError:
+            refused = True
+        check("несуществующий файл отвергается", refused)
+
+        sent = {}
+
+        def fake_multipart(url, fields, files, what="сервис"):
+            sent.update(url=url, fields=fields, files=files)
+            return {"ok": True, "result": {"message_id": 7}}
+
+        original = tgx_net.post_multipart
+        tgx_net.post_multipart = fake_multipart
+        try:
+            result = tgx_rich.send_rich("123:AA", "-100777", "# Заголовок\n\n![](tg://photo?id=banner)",
+                                        media=[tgx_rich.photo_media("banner", str(picture))],
+                                        buttons="Сайт[primary]=https://example.com", topic=4)
+        finally:
+            tgx_net.post_multipart = original
+
+        check("ушло multipart-ом", bool(sent))
+        check("файл лежит частью формы под своим именем", "banner" in sent["files"])
+        check("и это его настоящие байты", sent["files"]["banner"][1].startswith(b"\x89PNG"))
+        check("тип файла определён", sent["files"]["banner"][2] == "image/png")
+        check("вложенные поля ушли строками JSON",
+              isinstance(sent["fields"]["rich_message"], str))
+        check("тема формы доехала", sent["fields"]["message_thread_id"] == "4")
+        check("кнопки доехали", "reply_markup" in sent["fields"])
+        check("метка стиля снята с подписи", "[primary]" not in sent["fields"]["reply_markup"])
+        check("вернулся разобранный ответ", result == {"message_id": 7})
+
+    # сам сборщик формы: одна граница на всё, части с именами, хвостовая граница
+    seen = {}
+
+    def capture(request, what):
+        seen["body"] = request.data
+        seen["type"] = request.headers.get("Content-type", "")
+        return '{"ok": true, "result": 1}'
+
+    original_open = tgx_net._open
+    tgx_net._open = capture
+    try:
+        tgx_net.post_multipart("https://example.com/x", {"chat_id": "-100", "n": 5},
+                               {"pic": ("b.png", b"\x89PNG", "image/png")})
+    finally:
+        tgx_net._open = original_open
+
+    body, kind = seen["body"], seen["type"]
+    boundary = kind.split("boundary=")[-1]
+    check("граница объявлена в заголовке и стоит в теле", boundary.encode() in body)
+    check("текстовое поле подписано именем", b'name="chat_id"' in body)
+    check("число уходит как JSON", b"\r\n\r\n5\r\n" in body)
+    check("файл несёт имя и тип", b'filename="b.png"' in body and b"image/png" in body)
+    check("байты файла на месте", b"\x89PNG" in body)
+    check("форма закрыта хвостовой границей", body.rstrip().endswith(f"--{boundary}--".encode()))
+
+
 def rich_render_regression() -> None:
     """A received rich message is an Instant-View block tree — it has to become
     readable terminal text, not a bare "unsupported media" chip."""
@@ -980,6 +1123,8 @@ async def main() -> int:
     appearance_regression()
     await forum_regression()
     await transcribe_regression()
+    await guard_regression()
+    multipart_regression()
     autotools_regression()
     rich_render_regression()
     article_regression()
