@@ -3389,6 +3389,12 @@ async def cmd_bot(args: argparse.Namespace) -> None:
                 # блок без файла и не понять, почему он пустой
                 raise SystemExit("в блоках нет ссылок attach:// на: " + ", ".join(sorted(unused)))
         markdown = Path(args.file).expanduser().read_text() if args.file and not blocks else (args.text or "")
+        if args.as_blocks and markdown:
+            # Сервер разбирает разметку сам, но принимает вложением только
+            # фотографию. Свой перевод в блоки — единственный способ вложить видео.
+            attached = dict(pair.partition("=")[::2] for pair in (args.attach or []))
+            blocks = tgx_rich.blocks_from_markdown(markdown, attachments=attached)
+            markdown = ""
         media = []
         for pair in args.media or []:
             name, _, source = pair.partition("=")
@@ -4138,7 +4144,10 @@ def build_parser() -> argparse.ArgumentParser:
     b_rich.add_argument("--blocks", help="файл JSON с блоками (Bot API 10.2+); "
                                         "кнопки и файлы внутри документа возможны только так")
     b_rich.add_argument("--attach", action="append", metavar="ИМЯ=ПУТЬ",
-                        help="файл для блока-документа с attach://ИМЯ; можно повторять")
+                        help="файл для блока с attach://ИМЯ; можно повторять")
+    b_rich.add_argument("--as-blocks", action="store_true",
+                        help="перевести разметку в блоки у себя, а не на сервере — "
+                             "только так в сообщение кладётся видео")
     b_rich.add_argument("--draft", action="store_true", help="отправить черновиком (стриминг)")
     b_rich.add_argument("--silent", action="store_true")
     b_rich.add_argument("--protect", action="store_true", help="запретить пересылку и копирование")

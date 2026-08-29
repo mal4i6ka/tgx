@@ -1758,6 +1758,62 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+def markdown_to_blocks_regression() -> None:
+    """Форма текста внутри блока выяснена опытом на живом сервере: строка даёт
+    TextPlain, массив — TextConcat, {"type": "bold", …} — TextBold, узлы
+    вкладываются. Привычная по обычным сообщениям пара text+entities здесь не
+    принимается вовсе, поэтому переводчик обязан собирать именно дерево."""
+    import tgx_rich as R
+
+    check("голый текст остаётся строкой", R.inline_text("просто") == "просто")
+
+    bold = R.inline_text("**жирный**")
+    check("жирное — узел", bold == {"type": "bold", "text": "жирный"})
+
+    mixed = R.inline_text("а **б** в")
+    check("смесь становится массивом", isinstance(mixed, list) and len(mixed) == 3)
+    check("части идут по порядку", mixed[0] == "а " and mixed[2] == " в")
+
+    link = R.inline_text("[текст](https://example.org)")
+    check("ссылка несёт адрес", link["url"] == "https://example.org")
+    check("и подпись", link["text"] == "текст")
+
+    code = R.inline_text("`x = 1`")
+    check("код — узел без разбора внутри", code == {"type": "code", "text": "x = 1"})
+    check("внутри кода разметка не ищется",
+          R.inline_text("`**не жирный**`")["text"] == "**не жирный**")
+
+    check("звёздочка в слове не курсив", R.inline_text("2*3*4") == "2*3*4")
+    nested = R.inline_text("**[ссылка](https://a.b)**")
+    check("узлы вкладываются", nested["type"] == "bold" and nested["text"]["type"] == "url")
+
+    # блоки
+    doc = R.blocks_from_markdown(
+        "# Раз\n\nабзац\n\n## Два\n\n- пункт\n- ещё\n\n```py\nx=1\n```\n\n---\n\n> цитата")
+    kinds = [b["type"] for b in doc]
+    check("заголовки, абзац, список, код, черта, цитата",
+          kinds == ["heading", "paragraph", "heading", "list", "pre", "divider", "blockquote"])
+    check("первый заголовок крупнее", doc[0]["size"] == 1 and doc[2]["size"] == 2)
+    check("в списке два пункта", len(doc[3]["items"]) == 2)
+    check("у кода сохранён язык", doc[4]["language"] == "py")
+    check("код не склеивается в строку", doc[4]["text"] == "x=1")
+
+    # соседние строки — один абзац, пустая строка их разделяет
+    two = R.blocks_from_markdown("первая\nвторая\n\nтретья")
+    check("перенос внутри абзаца не рвёт его", len(two) == 2)
+    check("строки склеиваются пробелом", two[0]["text"] == "первая вторая")
+
+    # вложение
+    with_video = R.blocks_from_markdown("![](tg://video?id=b)", attachments={"b": __file__})
+    check("ссылка на видео даёт видеоблок", with_video[0]["type"] == "video")
+    check("и цепляет файл", "_upload" in with_video[0])
+    no_file = R.blocks_from_markdown("![](tg://photo?id=c)")
+    check("без файла блок всё равно собирается", no_file[0]["type"] == "photo")
+    check("но ничего не цепляет", "_upload" not in no_file[0])
+
+    check("пустая разметка даёт пустой список", R.blocks_from_markdown("\n\n  \n") == [])
+
+
 def blocks_media_regression() -> None:
     """Ссылка attach:// лежит в поле, названном по типу блока. Пока её искали
     только в document, у видеоблока имя выходило пустым — и в форму уезжало поле
@@ -2409,6 +2465,7 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    markdown_to_blocks_regression()
     blocks_media_regression()
     media_label_regression()
     await inline_regression()

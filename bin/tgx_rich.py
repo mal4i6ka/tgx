@@ -561,6 +561,150 @@ def document_block(identifier: str, caption: Any = None, source: str | None = No
     return block
 
 
+# ── разметка → блоки ─────────────────────────────────────────────────────────
+# Разметку сервер разбирает сам, но только в форме markdown, а она принимает
+# вложением одну лишь фотографию. Чтобы положить в сообщение видео, дерево
+# блоков приходится собрать у себя. Форма текста внутри блока выяснена опытом:
+#
+#   строка                                     → TextPlain
+#   ["часть ", {...}]                          → TextConcat
+#   {"type": "bold"|"italic"|"code", "text":…} → TextBold и прочие
+#   {"type": "url", "text": …, "url": …}       → TextUrl
+#
+# Узлы вкладываются друг в друга. Форма {"text": …, "entities": […]}, привычная
+# по обычным сообщениям, здесь не принимается.
+
+INLINE = re.compile(
+    r"\*\*(?P<bold>.+?)\*\*"
+    r"|(?<![\w*])\*(?P<italic>[^*\n]+?)\*(?![\w*])"
+    r"|`(?P<code>[^`\n]+?)`"
+    r"|\[(?P<label>[^\]\n]+?)\]\((?P<url>[^)\s]+)\)")
+
+
+def inline_text(line: str) -> Any:
+    """Строка разметки → узел текста. Без разметки возвращаем саму строку."""
+    parts: list[Any] = []
+    cursor = 0
+    for match in INLINE.finditer(line):
+        if match.start() > cursor:
+            parts.append(line[cursor:match.start()])
+        if match.group("bold") is not None:
+            parts.append({"type": "bold", "text": inline_text(match.group("bold"))})
+        elif match.group("italic") is not None:
+            parts.append({"type": "italic", "text": inline_text(match.group("italic"))})
+        elif match.group("code") is not None:
+            parts.append({"type": "code", "text": match.group("code")})
+        else:
+            parts.append({"type": "url", "text": inline_text(match.group("label")),
+                          "url": match.group("url")})
+        cursor = match.end()
+    if cursor < len(line):
+        parts.append(line[cursor:])
+    if not parts:
+        return line
+    return parts[0] if len(parts) == 1 else parts
+
+
+MEDIA_REF = re.compile(r"^!\[(?P<caption>[^\]]*)\]\(tg://(?P<kind>photo|video)\?id="
+                       r"(?P<id>[A-Za-z0-9_-]{1,64})\)$")
+
+
+def blocks_from_markdown(text: str, *, attachments: dict[str, str] | None = None,
+                         ) -> list[dict[str, Any]]:
+    """Разметку — в дерево блоков, чтобы можно было положить видео.
+
+    Понимает то, чем обычно пишут: заголовки, абзацы, списки, цитаты, ограду
+    кода, черту и ссылку на вложение. Ссылка `![](tg://video?id=имя)` в форме
+    markdown не работает — сервер её не знает, — но здесь она наша собственная
+    и превращается в видеоблок.
+    """
+    files = attachments or {}
+    blocks: list[dict[str, Any]] = []
+    lines = text.replace("\r\n", "\n").split("\n")
+    index = 0
+
+    def flush(buffer: list[str]) -> None:
+        body = " ".join(x.strip() for x in buffer if x.strip())
+        if body:
+            blocks.append(paragraph(inline_text(body)))
+        buffer.clear()
+
+    buffer: list[str] = []
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+
+        if stripped.startswith("```"):
+            flush(buffer)
+            language = stripped[3:].strip()
+            index += 1
+            code: list[str] = []
+            while index < len(lines) and not lines[index].strip().startswith("```"):
+                code.append(lines[index])
+                index += 1
+            blocks.append(preformatted("\n".join(code), language))
+            index += 1
+            continue
+
+        media = MEDIA_REF.match(stripped)
+        if media:
+            flush(buffer)
+            name = media.group("id")
+            block = media_block(media.group("kind"), name,
+                                caption=media.group("caption") or None,
+                                source=files.get(name))
+            blocks.append(block)
+            index += 1
+            continue
+
+        if not stripped:
+            flush(buffer)
+        elif set(stripped) <= {"-", "─", "*", "_"} and len(stripped) >= 3:
+            flush(buffer)
+            blocks.append(divider())
+        elif stripped.startswith("#"):
+            flush(buffer)
+            level = len(stripped) - len(stripped.lstrip("#"))
+            blocks.append(heading(inline_text(stripped[level:].strip()),
+                                  min(level, MAX_HEADING)))
+        elif stripped.startswith(("- ", "* ")) or re.match(r"^\d+[.)] ", stripped):
+            flush(buffer)
+            ordered = bool(re.match(r"^\d+[.)] ", stripped))
+            items: list[Any] = []
+            while index < len(lines):
+                item = lines[index].strip()
+                if ordered:
+                    got = re.match(r"^\d+[.)] (.*)", item)
+                    if not got:
+                        break
+                    items.append(inline_text(got.group(1)))
+                elif item.startswith(("- ", "* ")):
+                    items.append(inline_text(item[2:]))
+                elif item and items and not item.startswith("#"):
+                    continue_line = items.pop()
+                    items.append([continue_line, " " + item] if not isinstance(
+                        continue_line, list) else continue_line + [" " + item])
+                else:
+                    break
+                index += 1
+            blocks.append(bullet_list(items, ordered))
+            continue
+        elif stripped.startswith(">"):
+            flush(buffer)
+            said: list[str] = []
+            while index < len(lines) and lines[index].strip().startswith(">"):
+                said.append(lines[index].strip().lstrip(">").strip())
+                index += 1
+            blocks.append(quote(inline_text(" ".join(said))))
+            continue
+        else:
+            buffer.append(line)
+        index += 1
+
+    flush(buffer)
+    return blocks
+
+
 # Отправка блоков работает, а чтение обратно — нет: конструкторы блочной формы
 # новее слоя 227, и Telethon отдаёт такое сообщение как MessageMediaUnsupported.
 # Получатель с обновлённым клиентом видит документ полностью; tgx — пока нет.
