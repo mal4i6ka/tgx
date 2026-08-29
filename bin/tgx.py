@@ -36,6 +36,7 @@ import tgx_contacts
 import tgx_folders
 import tgx_format
 import tgx_forum
+import tgx_inline
 import tgx_guard
 import tgx_net
 import tgx_notify
@@ -2826,6 +2827,50 @@ async def cmd_ai(args: argparse.Namespace) -> None:
         return
 
 
+async def cmd_inline(args: argparse.Namespace) -> None:
+    """Чужие боты: инлайн-запросы, кнопки, мини-приложения."""
+    command = args.inlinecmd
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        inline = tgx_inline.Inline(client)
+        peer = await resolve_peer(client, args.peer) if getattr(args, "peer", None) else None
+
+        if command == "ask":
+            # без чата спрашиваем «для избранного»: результаты те же, а чат не нужен
+            from telethon.tl import types as _t
+            render.emit(await inline.ask(args.bot, peer or _t.InputPeerSelf(), args.query,
+                                         offset=args.offset or ""))
+        elif command == "send":
+            render.emit(await inline.send(peer, args.query_id, args.result_id,
+                                          silent=args.silent, hide_via=args.hide_via,
+                                          reply_to=args.reply_to or 0))
+        elif command == "start":
+            render.emit(await inline.start(args.bot, peer or await resolve_peer(
+                client, args.bot), args.param or ""))
+        elif command == "press":
+            data = args.data.encode() if not args.hex else bytes.fromhex(args.data)
+            secret = read_secret("пароль двухфакторной защиты: ",
+                                 "TGX_PASSWORD") if args.password else ""
+            render.emit(await inline.press(peer, args.id, data, password=secret))
+        elif command == "attach-list":
+            render.emit({"меню вложений": await inline.attach_menu()})
+        elif command == "attach":
+            render.emit(await inline.attach_toggle(args.bot, args.state == "on",
+                                                   allow_write=args.allow_write))
+        elif command == "web-app":
+            answer = await inline.web_app(args.bot, peer=peer, url=args.url or "",
+                                          param=args.param or "")
+            if args.open and answer.get("адрес"):
+                import webbrowser
+
+                webbrowser.open(answer["адрес"])
+                answer["открыто"] = "в браузере"
+            render.emit(answer)
+    finally:
+        await client.disconnect()
+
+
 async def cmd_safety(args: argparse.Namespace) -> None:
     """Блокировки, жалобы и уборка — почти всё через подтверждение."""
     command = args.safetycmd
@@ -3593,6 +3638,51 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=["auto", "tgp", "sixel", "halfcell", "unicode", "off"],
                     help="как рисовать превью: auto (по возможностям терминала), протокол явно, либо off")
     ui.set_defaults(func=cmd_ui)
+
+    il = sub.add_parser("inline", help="чужие боты: инлайн-запросы, кнопки, мини-приложения")
+    il_sub = il.add_subparsers(dest="inlinecmd", required=True)
+    il.set_defaults(func=cmd_inline)
+
+    i_ask = il_sub.add_parser("ask", help="спросить инлайн-бота, как через @бот запрос")
+    i_ask.add_argument("bot")
+    i_ask.add_argument("query", nargs="?", default="")
+    i_ask.add_argument("--peer", help="для какого чата спрашиваем; по умолчанию избранное")
+    i_ask.add_argument("--offset", help="страница из «дальше» прошлого ответа")
+
+    i_snd = il_sub.add_parser("send", help="отправить выбранный результат")
+    i_snd.add_argument("peer")
+    i_snd.add_argument("query_id", type=int, help="метка из ask")
+    i_snd.add_argument("result_id", help="id результата")
+    i_snd.add_argument("--silent", action="store_true")
+    i_snd.add_argument("--hide-via", action="store_true", help="без подписи «через бота»")
+    i_snd.add_argument("--reply-to", type=int)
+
+    i_st = il_sub.add_parser("start", help="запустить бота с параметром из ссылки")
+    i_st.add_argument("bot")
+    i_st.add_argument("param", nargs="?", default="")
+    i_st.add_argument("--peer", help="где запускать; по умолчанию личка с ботом")
+
+    i_pr = il_sub.add_parser("press", help="нажать кнопку и услышать ответ бота")
+    i_pr.add_argument("peer")
+    i_pr.add_argument("id", type=int, help="id сообщения с кнопками")
+    i_pr.add_argument("data", help="данные кнопки")
+    i_pr.add_argument("--hex", action="store_true", help="данные шестнадцатеричные")
+    i_pr.add_argument("--password", action="store_true",
+                      help="кнопка требует пароль двухфакторной защиты")
+
+    il_sub.add_parser("attach-list", help="боты в меню вложений")
+
+    i_at = il_sub.add_parser("attach", help="добавить бота в меню вложений или убрать")
+    i_at.add_argument("bot")
+    i_at.add_argument("state", choices=["on", "off"])
+    i_at.add_argument("--allow-write", action="store_true", help="разрешить ему писать вам")
+
+    i_wa = il_sub.add_parser("web-app", help="подписанный адрес мини-приложения бота")
+    i_wa.add_argument("bot")
+    i_wa.add_argument("--peer", help="от имени какого чата открывать")
+    i_wa.add_argument("--url", help="конкретная страница приложения")
+    i_wa.add_argument("--param", help="параметр запуска")
+    i_wa.add_argument("--open", action="store_true", help="сразу открыть в браузере")
 
     sf = sub.add_parser("safety", help="блокировки, жалобы, уборка переписки")
     sf_sub = sf.add_subparsers(dest="safetycmd", required=True)
@@ -5484,7 +5574,7 @@ async def amain() -> None:
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_calls.CallError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_pending.PendingError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
-                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_safety.SafetyError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
+                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_safety.SafetyError, tgx_inline.InlineError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
                  tgx_stories.StoryError,
                  tgx_transcribe.TranscribeError)
 

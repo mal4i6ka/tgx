@@ -1758,6 +1758,61 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+async def inline_regression() -> None:
+    """Инлайн-бот отдаёт разнородные результаты: у одних заголовок, у других
+    только вложение. Печатать надо всё, но без пустых полей — иначе список
+    из тридцати гифок превращается в простыню из null."""
+    import tgx_inline as I
+
+    class Thing:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    gif = I._describe(Thing(id="gif1", type="gif", document=Thing(), title=None))
+    check("вид результата виден", gif["вид"] == "gif")
+    check("вложение названо по-русски", gif["вложение"] == "документ")
+    check("пустых полей нет", "заголовок" not in gif and "описание" not in gif)
+
+    page = I._describe(Thing(id="a2", type="article", title="Заголовок",
+                             description="Пояснение", url="https://example.org"))
+    check("заголовок попадает в вывод", page["заголовок"] == "Заголовок")
+    check("адрес тоже", page["адрес"] == "https://example.org")
+    check("несуществующего вложения не выдумываем", "вложение" not in page)
+
+    # меню вложений: типы чатов должны читаться словами
+    check("личные чаты названы", I.WHERE["PM"] == "в личных чатах")
+    check("каналы названы", I.WHERE["Broadcast"] == "в каналах")
+
+    # адрес мини-приложения подписан сессией — предупреждение обязано быть
+    sent = []
+
+    class Fake(I.Inline):
+        def __init__(self):
+            pass
+
+        async def _call(self, request):
+            sent.append(request)
+            return Thing(url="https://app.example/x?hash=секрет")
+
+        async def get_input_entity(self, who):
+            return who
+
+        @property
+        def client(self):
+            return self
+
+    got = await Fake().web_app("bot")
+    check("адрес возвращается", got["адрес"].startswith("https://"))
+    check("предупреждение о подписи на месте", "не передавайте" in got["осторожно"])
+    check("боковое меню запрошено явно", sent[0].from_side_menu is True)
+    check("выдуманного срока жизни нет", "живёт секунд" not in got)
+
+    check("протухшие результаты объяснены сроком годности",
+          "протухли" in I.HINTS["INLINE_RESULT_EXPIRED"])
+    check("отсутствие приложения отсылает к BotFather",
+          "BotFather" in I.HINTS["URL_INVALID"])
+
+
 async def safety_regression() -> None:
     """Жалоба идёт по меню сервера: причины меняются, зашивать их к себе —
     значит устареть. Варианты приходят байтами, а в терминал их надо отдать
@@ -2251,6 +2306,7 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    await inline_regression()
     await safety_regression()
     notify_regression()
     await digest_regression()
