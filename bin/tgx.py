@@ -40,6 +40,7 @@ import tgx_rich
 import tgx_transcribe
 import tgx_render as render
 import tgx_splash
+import tgx_stories
 
 BASE = Path(os.environ.get("TGX_HOME", Path.home() / "telegram-cli-tools"))
 DATA = BASE / "data"
@@ -562,6 +563,76 @@ def read_secret(prompt: str, env: str = "") -> str:
             f"нужен ввод секрета, а терминала нет. Запустите команду в терминале "
             f"или передайте значение через переменную {env or 'окружения'}")
     return getpass.getpass(prompt)
+
+
+async def cmd_stories(args: argparse.Namespace) -> None:
+    """Истории: лента, публикация, просмотры, альбомы."""
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        st = tgx_stories.Stories(client)
+        cmd = args.storycmd
+        columns = ["id", "подпись", "просмотров", "реакций", "истекает"]
+
+        if cmd == "feed":
+            rows = await st.feed(hidden=args.hidden)
+            print_jsonl(rows) if args.jsonl else print_table(
+                rows, ["чей", *columns], title="лента историй")
+            return
+
+        if cmd in {"of", "pinned", "archive", "search"}:
+            rows = await {
+                "of": lambda: st.of(args.chat),
+                "pinned": lambda: st.pinned(args.chat, args.limit),
+                "archive": lambda: st.archive(args.limit),
+                "search": lambda: st.search(args.hashtag, args.limit),
+            }[cmd]()
+            print_jsonl(rows) if args.jsonl else print_table(rows, columns, title=cmd)
+            return
+
+        if cmd == "viewers":
+            rows = await st.viewers(args.id, limit=args.limit, contacts_only=args.contacts)
+            print_jsonl(rows) if args.jsonl else print_table(
+                rows, ["кто", "реакция", "когда"], title=f"кто смотрел {args.id}")
+            return
+
+        if cmd == "albums":
+            rows = await st.albums(args.chat)
+            print_jsonl(rows) if args.jsonl else print_table(
+                rows, ["id", "название", "историй"], title="альбомы историй")
+            return
+
+        singles = {
+            "publish": lambda: st.publish(
+                args.file, caption=args.caption or "", audience=args.audience,
+                hours=args.hours, pinned=args.pin, no_forwards=args.no_forwards,
+                allow=args.allow or [], deny=args.deny or []),
+            "pin": lambda: st.pin(args.id, not args.off),
+            "react": lambda: st.react(args.chat, args.id, None if args.clear else args.emoji),
+            "read": lambda: st.mark_read(args.chat, args.id),
+            "stealth": lambda: st.stealth(past=not args.future_only, future=not args.past_only),
+            "link": lambda: st.link(args.chat, args.id),
+            "hide": lambda: st.hide_peer(args.chat, not args.show),
+            "can-post": lambda: st.can_post(args.chat),
+            "new-album": lambda: st.create_album(args.title, args.id, args.chat),
+        }
+        if cmd in singles:
+            render.emit({"ok": True, **await singles[cmd]()})
+            return
+
+        if cmd in {"delete", "delete-album"}:
+            v = await gated_or_die(
+                client, args,
+                "Удалить истории?" if cmd == "delete" else "Удалить альбом историй?",
+                f"{'Истории' if cmd == 'delete' else 'Альбом'}: "
+                f"{args.id if isinstance(args.id, int) else ', '.join(map(str, args.id))}",
+                "восстановить нельзя")
+            result = await (st.delete(args.id) if cmd == "delete"
+                            else st.delete_album(args.id))
+            render.emit({"ok": True, **result, "подтвердил": v["by"]})
+            return
+    finally:
+        await client.disconnect()
 
 
 async def cmd_contacts(args: argparse.Namespace) -> None:
@@ -2755,7 +2826,7 @@ GROUPS = [
     ("форумы", ["forum", "guard", "poll", "boosts"]),
     ("платежи", ["pay", "confirm"]),
     ("голос", ["transcribe"]),
-    ("люди", ["contacts"]),
+    ("люди", ["contacts", "stories"]),
     ("аккаунт", ["auth", "me", "profile", "profile-get", "profile-edit", "profile-photo-set", "profile-photos", "profile-photo-delete"]),
     ("чаты и папки", ["dialogs", "folders", "folder-upsert"]),
     ("сообщения", ["history", "search", "send", "edit", "delete", "forward", "react", "pin", "pinned", "todo", "todo-check", "todo-add", "format", "export", "message-get", "message-click"]),
@@ -3077,6 +3148,101 @@ def build_parser() -> argparse.ArgumentParser:
     cf.add_argument("--timeout", type=float, default=tgx_confirm.DEFAULT_TIMEOUT,
                     help="сколько ждать ответа, секунд")
     cf.set_defaults(func=cmd_confirm)
+
+    stz = sub.add_parser("stories", help="истории: лента, публикация, просмотры, альбомы")
+    stz_sub = stz.add_subparsers(dest="storycmd", required=True)
+    stz.set_defaults(func=cmd_stories)
+
+    s_feed = stz_sub.add_parser("feed", help="лента историй")
+    s_feed.add_argument("--hidden", action="store_true", help="скрытые из ленты")
+    s_feed.add_argument("--jsonl", action="store_true")
+
+    s_of = stz_sub.add_parser("of", help="активные истории конкретного человека или канала")
+    s_of.add_argument("chat")
+    s_of.add_argument("--jsonl", action="store_true")
+
+    s_pin = stz_sub.add_parser("pinned", help="истории, оставленные в профиле")
+    s_pin.add_argument("chat", nargs="?")
+    s_pin.add_argument("--limit", type=int, default=30)
+    s_pin.add_argument("--jsonl", action="store_true")
+
+    s_ar = stz_sub.add_parser("archive", help="свой архив историй")
+    s_ar.add_argument("--limit", type=int, default=30)
+    s_ar.add_argument("--jsonl", action="store_true")
+
+    s_pub = stz_sub.add_parser("publish", help="опубликовать историю")
+    s_pub.add_argument("file", help="фото или видео")
+    s_pub.add_argument("--caption")
+    s_pub.add_argument("--audience", default="close", choices=list(tgx_stories.AUDIENCES),
+                       help="кому видно; по умолчанию близким друзьям")
+    s_pub.add_argument("--hours", type=int, default=24,
+                       choices=list(tgx_stories.PERIODS), help="сколько живёт")
+    s_pub.add_argument("--pin", action="store_true", help="оставить в профиле после срока")
+    s_pub.add_argument("--no-forwards", action="store_true", help="запретить пересылку")
+    s_pub.add_argument("--allow", action="append", help="добавить конкретных людей")
+    s_pub.add_argument("--deny", action="append", help="исключить конкретных людей")
+
+    s_pn = stz_sub.add_parser("pin", help="оставить историю в профиле или убрать")
+    s_pn.add_argument("id", nargs="+", type=int)
+    s_pn.add_argument("--off", action="store_true", help="убрать из профиля")
+
+    s_v = stz_sub.add_parser("viewers", help="кто смотрел вашу историю")
+    s_v.add_argument("id", type=int)
+    s_v.add_argument("--limit", type=int, default=50)
+    s_v.add_argument("--contacts", action="store_true", help="только контакты")
+    s_v.add_argument("--jsonl", action="store_true")
+
+    s_re = stz_sub.add_parser("react", help="реакция на чужую историю")
+    s_re.add_argument("chat")
+    s_re.add_argument("id", type=int)
+    s_re.add_argument("emoji", nargs="?", default="❤")
+    s_re.add_argument("--clear", action="store_true", help="снять реакцию")
+
+    s_rd = stz_sub.add_parser("read", help="отметить истории прочитанными")
+    s_rd.add_argument("chat")
+    s_rd.add_argument("id", type=int, help="до какого номера включительно")
+
+    s_stl = stz_sub.add_parser("stealth", help="скрытный режим: просмотры не засчитываются")
+    s_stl.add_argument("--past-only", action="store_true", help="только за прошедшие минуты")
+    s_stl.add_argument("--future-only", action="store_true", help="только на ближайшие")
+
+    s_lk = stz_sub.add_parser("link", help="ссылка на историю")
+    s_lk.add_argument("chat")
+    s_lk.add_argument("id", type=int)
+
+    s_hd = stz_sub.add_parser("hide", help="убрать чьи-то истории из ленты")
+    s_hd.add_argument("chat")
+    s_hd.add_argument("--show", action="store_true", help="вернуть в ленту")
+
+    s_cp = stz_sub.add_parser("can-post", help="можно ли публиковать сюда историю")
+    s_cp.add_argument("chat", nargs="?")
+
+    s_sr = stz_sub.add_parser("search", help="публичные истории по хештегу")
+    s_sr.add_argument("hashtag")
+    s_sr.add_argument("--limit", type=int, default=20)
+    s_sr.add_argument("--jsonl", action="store_true")
+
+    s_al = stz_sub.add_parser("albums", help="альбомы историй")
+    s_al.add_argument("chat", nargs="?")
+    s_al.add_argument("--jsonl", action="store_true")
+
+    s_na = stz_sub.add_parser("new-album", help="создать альбом историй")
+    s_na.add_argument("title")
+    s_na.add_argument("id", nargs="+", type=int)
+    s_na.add_argument("--chat")
+
+    def story_gate(name: str, help_text: str) -> Any:
+        parser = stz_sub.add_parser(name, help=help_text + " (требует подтверждения)")
+        parser.add_argument("--confirm-to", help="кто подтверждает")
+        parser.add_argument("--as", dest="bot", help="бот, который спросит")
+        parser.add_argument("--timeout", type=float, default=300.0)
+        return parser
+
+    s_del = story_gate("delete", "удалить истории")
+    s_del.add_argument("id", nargs="+", type=int)
+
+    s_da = story_gate("delete-album", "удалить альбом историй")
+    s_da.add_argument("id", type=int)
 
     ct = sub.add_parser("contacts", help="адресная книга, чёрный список, поиск людей")
     ct_sub = ct.add_subparsers(dest="contactcmd", required=True)
@@ -3991,7 +4157,8 @@ async def amain() -> None:
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
-                 tgx_rich.RichError, tgx_transcribe.TranscribeError)
+                 tgx_rich.RichError, tgx_stories.StoryError,
+                 tgx_transcribe.TranscribeError)
 
 
 def main() -> None:

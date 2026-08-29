@@ -1442,6 +1442,51 @@ async def contacts_regression() -> None:
     check("свой номер по умолчанию не показывается", added["номер показан"] is False)
 
 
+def stories_regression() -> None:
+    """История — не сообщение: у неё своя приватность, свой срок и свой счётчик
+    просмотров. Промах в приватности виден всем сразу, поэтому она проверяется."""
+    import tgx_stories as S
+
+    check("по умолчанию — близкие друзья, а не «всем»",
+          "CloseFriends" in type(S.privacy("close")[0]).__name__)
+    check("«всем» задаётся явно", "AllowAll" in type(S.privacy("everyone")[0]).__name__)
+    check("контакты — отдельная аудитория",
+          "AllowContacts" in type(S.privacy("contacts")[0]).__name__)
+
+    rules = S.privacy("contacts", allow=[1], deny=[2])
+    check("правила складываются, а не заменяют друг друга", len(rules) == 3)
+    check("исключения попадают в правила",
+          any("Disallow" in type(r).__name__ for r in rules))
+
+    refused = False
+    try:
+        S.privacy("никому")
+    except S.StoryError:
+        refused = True
+    check("незнакомая аудитория отвергается", refused)
+    refused = False
+    try:
+        S.privacy("selected")          # «выбранным» без списка — пусто
+    except S.StoryError:
+        refused = True
+    check("«выбранным» без списка отвергается", refused)
+
+    check("сроки заданы явно", sorted(S.PERIODS) == [6, 12, 24, 48])
+    check("сутки — это 86400 секунд", S.PERIODS[24] == 86400)
+
+    class Story:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    row = S.story_row(Story(id=490, caption="привет", date=None, expire_date=None,
+                            views=Story(views_count=29, reactions_count=4),
+                            pinned=True, out=True, media=None))
+    check("просмотры и реакции читаются", row["просмотров"] == 29 and row["реакций"] == 4)
+    check("закреплённая история помечена", row["закреплена"] is True)
+    check("длинная подпись обрезается",
+          len(S.story_row(Story(id=1, caption="я" * 200, views=None))["подпись"]) == 60)
+
+
 def rich_render_regression() -> None:
     """A received rich message is an Instant-View block tree — it has to become
     readable terminal text, not a bare "unsupported media" chip."""
@@ -1708,6 +1753,7 @@ async def main() -> int:
     await transcribe_regression()
     await guard_regression()
     await contacts_regression()
+    stories_regression()
     multipart_regression()
     rich_blocks_regression()
     poll_regression()
