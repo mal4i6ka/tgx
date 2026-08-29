@@ -1758,6 +1758,44 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+def notify_regression() -> None:
+    """Тишина у Telegram — это отметка времени, а не «сколько часов молчать».
+    Отсюда две ловушки: незаглушённое приходит нулём, который становится
+    началом эпохи, а «навсегда» — датой на краю тридцатидвухбитного времени."""
+    import tgx_notify as N
+    from datetime import datetime, timedelta, timezone
+
+    check("ноль — это не тишина", N._when(0) is None)
+    check("начало эпохи — тоже не тишина",
+          N._when(datetime(1970, 1, 1, tzinfo=timezone.utc)) is None)
+    check("вышедший срок больше не тишина",
+          N._when(datetime.now(timezone.utc) - timedelta(hours=1)) is None)
+    check("край времени называем словом", N._when(N.FOREVER) == "навсегда")
+    ahead = datetime.now(timezone.utc) + timedelta(hours=2)
+    check("будущее показываем датой", N._when(ahead).startswith(str(ahead.year)))
+
+    # разбор срока: и словами, и числами с единицей
+    now = datetime.now(timezone.utc)
+    check("выключение — это отсутствие срока", N.mute_until("off") is None)
+    check("пустое — тоже", N.mute_until("") is None)
+    check("навсегда упирается в край времени",
+          int(N.mute_until("forever").timestamp()) == N.FOREVER)
+    two = N.mute_until("2h")
+    check("два часа считаются от сейчас", 7100 < (two - now).total_seconds() < 7300)
+    check("минуты понимаются", 1700 < (N.mute_until("30m") - now).total_seconds() < 1900)
+    check("дни понимаются", 258000 < (N.mute_until("3d") - now).total_seconds() < 260000)
+    check("голое число — это секунды", 590 < (N.mute_until("600") - now).total_seconds() < 610)
+
+    try:
+        N.mute_until("послезавтра")
+        check("непонятный срок должен ругаться", False)
+    except N.NotifyError as exc:
+        check("непонятный срок объяснён примерами", "30m" in str(exc) and "forever" in str(exc))
+
+    check("уже обработанная заявка объяснена",
+          "уже обработана" in N.HINTS["HIDE_REQUESTER_MISSING"])
+
+
 async def digest_regression() -> None:
     """Сводка по чату: длинное пересказать, короткое взять как есть. Лишний
     вызов к серверу за пересказом двух слов — это время и лимит частоты."""
@@ -2159,6 +2197,7 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    notify_regression()
     await digest_regression()
     triage_regression()
     takeout_regression()

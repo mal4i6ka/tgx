@@ -38,6 +38,7 @@ import tgx_format
 import tgx_forum
 import tgx_guard
 import tgx_net
+import tgx_notify
 import tgx_pay
 import tgx_pending
 import tgx_poll
@@ -2824,6 +2825,59 @@ async def cmd_ai(args: argparse.Namespace) -> None:
         return
 
 
+async def cmd_notify(args: argparse.Namespace) -> None:
+    """Чем вас беспокоят и кого вы впускаете."""
+    command = args.notifycmd
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        notify = tgx_notify.Notify(client)
+        asks = tgx_notify.Requests(client)
+        marks = tgx_notify.Reactions(client)
+        peer = await resolve_peer(client, args.peer) if getattr(args, "peer", None) else None
+
+        if command == "show":
+            render.emit(await notify.get(peer=peer, kind=args.scope))
+        elif command == "mute":
+            render.emit(await notify.set(peer=peer, kind=args.scope, span=args.span,
+                                         previews=args.previews, stories=args.stories))
+        elif command == "reset":
+            render.emit(await notify.reset())
+        elif command == "reactions":
+            render.emit(await notify.reactions(from_whom=args.from_whom or "",
+                                               previews=args.previews))
+        elif command == "new-contacts":
+            render.emit(await notify.new_contacts(args.state == "off"))
+        elif command == "requests":
+            render.emit({"админы и их ссылки": await asks.admins_with_invites(peer)})
+        elif command == "approve":
+            render.emit(await asks.decide(peer, args.who, True))
+        elif command == "decline":
+            render.emit(await asks.decide(peer, args.who, False))
+        elif command == "approve-all":
+            render.emit(await asks.decide_all(peer, True, link=args.link or ""))
+        elif command == "decline-all":
+            render.emit(await asks.decide_all(peer, False, link=args.link or ""))
+        elif command == "invite-edit":
+            render.emit(await asks.edit_link(
+                peer, args.link, title=args.title or "", limit=args.limit,
+                expires=args.expires or "", request_needed=args.request_needed,
+                revoke=args.revoke))
+        elif command == "invite-purge":
+            render.emit(await asks.purge_revoked(peer, admin=args.admin))
+        elif command == "emoji-list":
+            render.emit({"доступны": await marks.available()})
+        elif command == "emoji-top":
+            render.emit({"чаще всего": await marks.top(args.limit)})
+        elif command == "emoji-default":
+            render.emit(await marks.set_default(args.emoji))
+        elif command == "emoji-allow":
+            render.emit(await marks.allow(peer, args.emoji, limit=args.limit,
+                                          paid=args.paid))
+    finally:
+        await client.disconnect()
+
+
 async def cmd_triage(args: argparse.Namespace) -> None:
     """Что ждёт вашего внимания в чате."""
     command = args.func_name
@@ -3484,6 +3538,74 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=["auto", "tgp", "sixel", "halfcell", "unicode", "off"],
                     help="как рисовать превью: auto (по возможностям терминала), протокол явно, либо off")
     ui.set_defaults(func=cmd_ui)
+
+    nt = sub.add_parser("notify", help="уведомления, заявки на вступление, реакции")
+    nt_sub = nt.add_subparsers(dest="notifycmd", required=True)
+    nt.set_defaults(func=cmd_notify)
+
+    SCOPES = ["users", "chats", "channels"]
+    n_show = nt_sub.add_parser("show", help="как сейчас настроено")
+    n_show.add_argument("peer", nargs="?", help="конкретный чат; без него — весь разряд")
+    n_show.add_argument("--scope", default="users", choices=SCOPES)
+
+    n_mute = nt_sub.add_parser("mute", help="заглушить: 30m, 2h, 3d, forever, off")
+    n_mute.add_argument("span")
+    n_mute.add_argument("peer", nargs="?")
+    n_mute.add_argument("--scope", default="users", choices=SCOPES)
+    n_mute.add_argument("--previews", action=argparse.BooleanOptionalAction,
+                        help="показывать ли текст в уведомлении")
+    n_mute.add_argument("--stories", action=argparse.BooleanOptionalAction,
+                        help="звук у историй")
+
+    nt_sub.add_parser("reset", help="сбросить все уведомления к исходным")
+
+    n_re = nt_sub.add_parser("reactions", help="кто может уведомлять вас реакциями")
+    n_re.add_argument("--from", dest="from_whom", choices=["all", "contacts"])
+    n_re.add_argument("--previews", action=argparse.BooleanOptionalAction)
+
+    n_nc = nt_sub.add_parser("new-contacts", help="сообщать ли о регистрации контактов")
+    n_nc.add_argument("state", choices=["on", "off"])
+
+    n_rq = nt_sub.add_parser("requests", help="кто из админов сколько ссылок наделал")
+    n_rq.add_argument("peer")
+
+    for name, help_text in (("approve", "принять заявку"), ("decline", "отклонить заявку")):
+        parser = nt_sub.add_parser(name, help=help_text)
+        parser.add_argument("peer")
+        parser.add_argument("who")
+
+    for name, help_text in (("approve-all", "принять все заявки"),
+                            ("decline-all", "отклонить все заявки")):
+        parser = nt_sub.add_parser(name, help=help_text)
+        parser.add_argument("peer")
+        parser.add_argument("--link", help="только по этой ссылке")
+
+    n_ie = nt_sub.add_parser("invite-edit", help="поправить ссылку, не выпуская новую")
+    n_ie.add_argument("peer")
+    n_ie.add_argument("link")
+    n_ie.add_argument("--title")
+    n_ie.add_argument("--limit", type=int, help="сколько человек может войти")
+    n_ie.add_argument("--expires", help="срок: 2h, 3d, forever")
+    n_ie.add_argument("--request-needed", action=argparse.BooleanOptionalAction,
+                      help="входить по заявке, а не сразу")
+    n_ie.add_argument("--revoke", action="store_true", help="отозвать")
+
+    n_ip = nt_sub.add_parser("invite-purge", help="выбросить отозванные ссылки")
+    n_ip.add_argument("peer")
+    n_ip.add_argument("--admin", help="чьи; по умолчанию свои")
+
+    nt_sub.add_parser("emoji-list", help="какие реакции вообще есть")
+    n_et = nt_sub.add_parser("emoji-top", help="какие ставят чаще всего")
+    n_et.add_argument("--limit", type=int, default=20)
+
+    n_ed = nt_sub.add_parser("emoji-default", help="ваша реакция по умолчанию")
+    n_ed.add_argument("emoji")
+
+    n_ea = nt_sub.add_parser("emoji-allow", help="что можно ставить в чате")
+    n_ea.add_argument("peer")
+    n_ea.add_argument("emoji", nargs="*", help="список, `all` — любые, пусто — запретить")
+    n_ea.add_argument("--limit", type=int, help="сколько разных на сообщение")
+    n_ea.add_argument("--paid", action=argparse.BooleanOptionalAction, help="платные звёздами")
 
     ai = sub.add_parser("ai", help="правка текста руками Telegram: вычитка, эмодзи, перевод, тон")
     ai_sub = ai.add_subparsers(dest="aicmd", required=True)
@@ -5247,7 +5369,7 @@ async def amain() -> None:
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_calls.CallError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_pending.PendingError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
-                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
+                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
                  tgx_stories.StoryError,
                  tgx_transcribe.TranscribeError)
 
