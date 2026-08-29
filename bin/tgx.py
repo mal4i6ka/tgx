@@ -3371,13 +3371,23 @@ async def cmd_bot(args: argparse.Namespace) -> None:
                 blocks = json.loads(source.read_text())
             except json.JSONDecodeError as exc:
                 raise SystemExit(f"{source}: не разбирается как JSON — {exc}")
-            # Файлы для блоков-документов подставляются по имени из --attach.
+            # Файлы подставляются по имени из --attach. Ссылка attach:// лежит
+            # в поле, названном по типу блока: у документа в document, у видео
+            # в video, у фотографии в photo.
             attached = dict(pair.partition("=")[::2] for pair in (args.attach or []))
+            unused = set(attached)
             for block in blocks:
-                if block.get("type") == "document":
-                    name = str(block.get("document", {}).get("media", "")).removeprefix("attach://")
-                    if name in attached:
-                        block["_upload"] = Path(attached[name]).expanduser()
+                holder = block.get(block.get("type") or "")
+                if not isinstance(holder, dict):
+                    continue
+                name = str(holder.get("media", "")).removeprefix("attach://")
+                if name in attached:
+                    block["_upload"] = Path(attached[name]).expanduser()
+                    unused.discard(name)
+            if unused:
+                # молчаливое несовпадение имён — самый частый способ отправить
+                # блок без файла и не понять, почему он пустой
+                raise SystemExit("в блоках нет ссылок attach:// на: " + ", ".join(sorted(unused)))
         markdown = Path(args.file).expanduser().read_text() if args.file and not blocks else (args.text or "")
         media = []
         for pair in args.media or []:

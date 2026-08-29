@@ -235,12 +235,21 @@ def send_rich(
         payload["reply_parameters"] = {"message_id": int(reply_to)}
     method = "sendRichMessageDraft" if draft else "sendRichMessage"
     uploads = {m["id"]: m.pop("_upload") for m in rich.get("media", []) if m.get("_upload")}
-    # Блок-документ ссылается на attach://имя — файл кладётся в ту же форму.
+    # Блок ссылается на attach://имя — файл кладётся в ту же форму. Ссылка лежит
+    # в поле, названном по типу блока: у документа в document, у видео в video.
+    # Пока искали только в document, у видеоблока имя выходило пустым, и в форму
+    # уезжало поле без имени: сервер отвечал 400 с пустым телом.
     for block in rich.get("blocks", []) or []:
         source = block.pop("_upload", None)
-        if source is not None:
-            reference = str(block.get("document", {}).get("media", ""))
-            uploads[reference.removeprefix("attach://")] = source
+        if source is None:
+            continue
+        holder = block.get(block.get("type") or "")
+        reference = str(holder.get("media", "")) if isinstance(holder, dict) else ""
+        name = reference.removeprefix("attach://")
+        if not name:
+            raise RichError(f"блок «{block.get('type')}» ждёт файл, но ссылки "
+                            f"attach:// в нём нет")
+        uploads[name] = source
     if uploads:
         return call_with_files(token, method, payload, uploads)
     return call(token, method, payload)
@@ -300,8 +309,10 @@ def rich_text(node: Any, colors: dict[str, str] | None = None) -> Any:
 # что делать, а не как это называется внутри.
 SEND_HINTS = {
     "RICH_MESSAGE_PHOTO_INVALID": (
-        "вложением богатое сообщение принимает только фотографию — ссылки "
-        "tg://video?id= не существует. Видео кладётся блоком: --blocks"),
+        "ссылка tg://photo?id= принимает только фотографию, и ссылки "
+        "tg://video?id= не существует. Видео кладётся блоком: --blocks с "
+        '{"type": "video", "video": {"type": "video", "media": "attach://имя"}} '
+        "и --attach имя=путь"),
     "RICH_MESSAGE_TOO_LONG": "текст длиннее, чем принимает богатое сообщение",
     "RICH_MESSAGE_BLOCKS_TOO_MUCH": "блоков больше, чем разрешено",
     "MESSAGE_EMPTY": "нечего отправлять",
@@ -503,6 +514,33 @@ def _specs(spec: str) -> list[str]:
             if chunk:
                 out.append(chunk.partition("=")[0].strip())
     return out
+
+
+def media_block(kind: str, identifier: str, caption: Any = None,
+                source: str | None = None) -> dict[str, Any]:
+    """Видео или фотография блоком.
+
+    Проверено на живом сервере: блочная форма действительно принимает видео —
+    приходит `PageBlockVideo` с настоящим mp4 внутри, а не стоп-кадр, как через
+    ссылку tg://photo?id=. Ссылка attach:// кладётся в поле, названное по типу
+    блока, — иначе имя поля формы выходит пустым и сервер отвечает 400 без тела.
+    """
+    if kind not in {"video", "photo"}:
+        raise RichError(f"блок «{kind}»: сюда годятся video и photo")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", identifier):
+        raise RichError(f"идентификатор «{identifier}»: только A-Z a-z 0-9 _ - и до 64 символов")
+    block: dict[str, Any] = {"type": kind,
+                             kind: {"type": kind, "media": f"attach://{identifier}"}}
+    if caption:
+        block["caption"] = {"text": as_text(caption)}
+    if source is not None:
+        from pathlib import Path
+
+        path = Path(source).expanduser()
+        if not path.is_file():
+            raise RichError(f"файла {path} нет")
+        block["_upload"] = path
+    return block
 
 
 def document_block(identifier: str, caption: Any = None, source: str | None = None) -> dict[str, Any]:

@@ -1758,6 +1758,54 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+def blocks_media_regression() -> None:
+    """Ссылка attach:// лежит в поле, названном по типу блока. Пока её искали
+    только в document, у видеоблока имя выходило пустым — и в форму уезжало поле
+    без имени, на что сервер отвечал 400 с пустым телом. Ошибку в таком виде
+    не прочесть, поэтому проверяем обе стороны: и сборку, и разбор."""
+    from pathlib import Path
+
+    import tgx_rich as R
+
+    here = Path(__file__)
+
+    video = R.media_block("video", "banner", source=str(here))
+    check("тип блока — видео", video["type"] == "video")
+    check("ссылка лежит в поле по имени типа",
+          video["video"]["media"] == "attach://banner")
+    check("вложенный тип тоже видео", video["video"]["type"] == "video")
+    check("файл прицеплен к блоку", video["_upload"] == here)
+
+    photo = R.media_block("photo", "cover")
+    check("фотография собирается так же", photo["photo"]["media"] == "attach://cover")
+    check("без файла ничего не цепляем", "_upload" not in photo)
+
+    for bad, why in (("document", "документ идёт своим блоком"),
+                     ("audio", "звук блоком не кладётся")):
+        try:
+            R.media_block(bad, "x")
+            check(f"{why}: должно ругаться", False)
+        except R.RichError as exc:
+            check(f"{why}: сказано, что годится", "video" in str(exc))
+
+    # блоки проходят общую проверку
+    R.check_blocks([video, {"type": "paragraph", "text": "рядом"}])
+    check("видеоблок принимается проверкой", True)
+
+    # и разбор на отправке находит ссылку по типу блока
+    uploads = {}
+    for block in [dict(video)]:
+        source = block.pop("_upload", None)
+        holder = block.get(block.get("type") or "")
+        name = str(holder.get("media", "")).removeprefix("attach://")
+        uploads[name] = source
+    check("имя поля формы не пустое", list(uploads) == ["banner"])
+
+    # ошибка про tg://video теперь называет рабочий путь целиком
+    hint = R.SEND_HINTS["RICH_MESSAGE_PHOTO_INVALID"]
+    check("подсказка ведёт к блокам", "--blocks" in hint and "attach://" in hint)
+
+
 def media_label_regression() -> None:
     """Сообщение без подписи не должно быть пустой строкой. Стикер, голосовое,
     фотография без текста — в ленте они выглядели одинаково никак, и читать её
@@ -2361,6 +2409,7 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    blocks_media_regression()
     media_label_regression()
     await inline_regression()
     await safety_regression()

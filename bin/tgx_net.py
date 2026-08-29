@@ -41,11 +41,18 @@ def context() -> ssl.SSLContext:
 
 
 def _open(request: urllib.request.Request, what: str) -> str:
+    """Тело ответа строкой. Пустое тело — это тоже ответ, и о нём надо сказать.
+
+    Иначе пустая строка уезжает в разбор JSON, и человек видит «Expecting value:
+    line 1 column 1» вместо кода, с которым сервер отказал.
+    """
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT, context=context()) as response:
-            return response.read().decode()
+            body = response.read().decode()
+            status = response.status
     except urllib.error.HTTPError as exc:
-        return exc.read().decode(errors="replace")
+        body = exc.read().decode(errors="replace")
+        status = exc.code
     except ssl.SSLCertVerificationError as exc:
         raise NetError(
             f"{what}: не проверяется TLS-сертификат ({exc.verify_message}). "
@@ -53,6 +60,10 @@ def _open(request: urllib.request.Request, what: str) -> str:
         ) from exc
     except Exception as exc:
         raise NetError(f"{what} недоступен: {exc}") from exc
+    if not body.strip():
+        raise NetError(f"{what} ответил {status} и пустым телом — сказать нечего, "
+                       f"но и ответа нет")
+    return body
 
 
 def post_json(url: str, payload: dict[str, Any], what: str = "сервис") -> Any:
