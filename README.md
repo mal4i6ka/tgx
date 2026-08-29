@@ -126,6 +126,20 @@ tgx transcribe rate @чат 295429 3874… good
 супергруппе с бустом от `group_transcribe_level_min` они не тратятся. `status`
 показывает эти числа для вашего аккаунта, а остаток — `free_left` в ответе.
 
+## Обложка и точка старта видео
+
+```bash
+tgx send @чат "подпись" --file ролик.mp4 --cover обложка.png --start-at 12
+```
+
+Из Bot API 8.3. Telethon не пробрасывает `video_cover` и `video_timestamp`
+через `send_file`, поэтому медиа собирается вручную, а обложка сперва
+загружается как фотография.
+
+**У ролика без звуковой дорожки этого не будет.** Telegram добавляет такому
+файлу `DocumentAttributeAnimated`, обращается с ним как с гифкой, и оба поля
+молча пропадают — видно только на живом сообщении.
+
 ## Дата и время в тексте
 
 Сущность `date_time` (Bot API 9.5, в слое MTProto — `MessageEntityFormattedDate`)

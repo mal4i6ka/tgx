@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+import re
 from typing import Any
 
 BACKENDS = ("auto", "tgp", "sixel", "halfcell", "unicode", "off")
@@ -253,6 +254,64 @@ def poster_frame(path: Path) -> Path | None:
 
 
 PREVIEWABLE = ("photo", "video", "sticker", "animation", "image")
+
+
+async def video_with_cover(client: Any, path: Path, cover: Path | None = None,
+                          start_at: float | None = None, caption_mime: str = "video/mp4") -> Any:
+    """Видео со своей обложкой и точкой старта (Bot API 8.3).
+
+    Telethon не пробрасывает `video_cover` и `video_timestamp` через send_file,
+    поэтому медиа собирается вручную. Обложка должна стать фотографией на
+    сервере — отсюда лишний шаг с uploadMedia.
+
+    Оговорка, которую видно только на живом сообщении: у ролика без звуковой
+    дорожки Telegram добавляет DocumentAttributeAnimated и обращается с ним как
+    с гифкой, а у гифок обложек не бывает — оба поля молча пропадают.
+    """
+    from telethon.tl import functions, types
+
+    uploaded = await client.upload_file(str(path))
+    duration, width, height = 0, 0, 0
+    probe = dimensions(path)
+    if probe:
+        width, height, duration = probe[0], probe[1], int(probe[2])
+
+    photo = None
+    if cover is not None:
+        holder = await client(functions.messages.UploadMediaRequest(
+            peer=types.InputPeerSelf(),
+            media=types.InputMediaUploadedPhoto(file=await client.upload_file(str(cover)))))
+        shot = holder.photo
+        photo = types.InputPhoto(id=shot.id, access_hash=shot.access_hash,
+                                 file_reference=shot.file_reference)
+
+    return types.InputMediaUploadedDocument(
+        file=uploaded, mime_type=caption_mime,
+        attributes=[types.DocumentAttributeVideo(
+            duration=duration, w=width, h=height, supports_streaming=True)],
+        video_cover=photo,
+        video_timestamp=int(start_at) if start_at is not None else None,
+        thumb=None if cover else (
+            await client.upload_file(str(poster_frame(path))) if poster_frame(path) else None),
+    )
+
+
+def dimensions(path: Path) -> tuple[int, int, float] | None:
+    """Ширина, высота и длительность через ffprobe — 0, если его нет."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=width,height:format=duration", "-of", "csv=p=0:s=,", str(path)],
+            capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    numbers = [p for p in re.split(r"[,\n]", out.stdout) if p.strip()]
+    try:
+        return int(numbers[0]), int(numbers[1]), float(numbers[2]) if len(numbers) > 2 else 0.0
+    except (IndexError, ValueError):
+        return None
 
 
 def wants_preview(media_label_text: str) -> bool:

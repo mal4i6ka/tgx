@@ -1473,6 +1473,28 @@ async def cmd_send(args: argparse.Namespace) -> None:
             from datetime import datetime
 
             schedule = datetime.fromisoformat(args.schedule)
+        if files and (args.cover or args.start_at is not None):
+            # Своя обложка и точка старта — только для одного видео за раз.
+            if len(files) > 1:
+                raise SystemExit("--cover и --start-at работают с одним файлом")
+            media = await tgx_media.video_with_cover(
+                client, Path(files[0]),
+                Path(args.cover).expanduser() if args.cover else None, args.start_at)
+            result = await client(functions.messages.SendMediaRequest(
+                peer=peer, media=media, message=body, entities=entities or None,
+                random_id=helpers.generate_random_long(),
+                reply_to=types.InputReplyToMessage(reply_to_msg_id=args.reply_to)
+                if args.reply_to else None,
+                silent=args.silent or None))
+            sent_id = 0
+            for update in getattr(result, "updates", None) or []:
+                sent_id = (getattr(update, "id", 0)
+                           or getattr(getattr(update, "message", None), "id", 0) or sent_id)
+            render.emit({"ok": True, "chat_id": getattr(peer, "id", None),
+                         "message_id": sent_id, "cover": bool(args.cover),
+                         "start_at": args.start_at})
+            return
+
         if files:
             sent = await client.send_file(
                 peer,
@@ -2877,6 +2899,11 @@ def build_parser() -> argparse.ArgumentParser:
     snd.add_argument("--as-document", action="store_true", help="отправить как файл, без сжатия")
     snd.add_argument("--voice", action="store_true", help="голосовое сообщение (ogg/opus)")
     snd.add_argument("--video-note", action="store_true", help="видео-кружок")
+    snd.add_argument("--cover", help="своя обложка видео вместо кадра из него (Bot API 8.3); "
+                                     "у ролика без звука Telegram её отбросит — он считает такой "
+                                     "файл гифкой")
+    snd.add_argument("--start-at", type=float, metavar="СЕК",
+                     help="с какой секунды начинать проигрывание")
     snd.add_argument("--silent", action="store_true", help="без звука уведомления")
     snd.add_argument("--reply-to", type=int, help="id сообщения, на которое отвечаем")
     snd.add_argument("--comment-to", type=int, help="id поста канала — отправить комментарием")
