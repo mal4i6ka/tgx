@@ -35,6 +35,7 @@ import tgx_forum
 import tgx_guard
 import tgx_net
 import tgx_pay
+import tgx_pending
 import tgx_poll
 import tgx_profile
 import tgx_rich
@@ -566,6 +567,68 @@ def read_secret(prompt: str, env: str = "") -> str:
             f"нужен ввод секрета, а терминала нет. Запустите команду в терминале "
             f"или передайте значение через переменную {env or 'окружения'}")
     return getpass.getpass(prompt)
+
+
+async def cmd_pending(args: argparse.Namespace) -> None:
+    """Черновики, отложенные, быстрые ответы и закладки."""
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        pend = tgx_pending.Pending(client)
+        cmd = args.pendcmd
+
+        tables = {
+            "drafts": (lambda: pend.drafts(), ["чат", "текст", "изменён"]),
+            "shortcuts": (lambda: pend.shortcuts(), ["id", "ярлык", "сообщений"]),
+            "saved": (lambda: pend.saved(args.limit), ["от кого", "закреплено"]),
+            "tags": (lambda: pend.tags(), ["метка", "название", "сообщений"]),
+        }
+        if cmd in tables:
+            getter, fields = tables[cmd]
+            rows = await getter()
+            print_jsonl(rows) if getattr(args, "jsonl", False) else print_table(
+                rows, fields, title=cmd)
+            return
+
+        if cmd == "scheduled":
+            rows = await pend.scheduled(await resolve_peer(client, args.chat))
+            print_jsonl(rows) if args.jsonl else print_table(
+                rows, ["id", "уйдёт", "текст", "вложение"], title="отложенные")
+            return
+
+        if cmd == "shortcut":
+            rows = await pend.shortcut_messages(args.id)
+            print_jsonl(rows) if args.jsonl else print_table(rows, ["id", "текст"],
+                                                            title=f"заготовка {args.id}")
+            return
+
+        peer = await resolve_peer(client, args.chat) if getattr(args, "chat", None) else None
+        singles = {
+            "draft": lambda: pend.save_draft(peer, args.text or "", reply_to=args.reply_to,
+                                             no_preview=args.no_preview),
+            "send-now": lambda: pend.send_now(peer, args.id),
+            "cancel": lambda: pend.cancel(peer, args.id),
+            "send-shortcut": lambda: pend.send_shortcut(peer, args.id),
+            "rename-shortcut": lambda: pend.rename_shortcut(args.id, args.name),
+            "name-tag": lambda: pend.name_tag(args.emoji, args.title or ""),
+            "fact-check": lambda: pend.fact_check(peer, args.id),
+        }
+        if cmd in singles:
+            render.emit({"ok": True, **await singles[cmd]()})
+            return
+
+        if cmd in {"clear-drafts", "delete-shortcut"}:
+            v = await gated_or_die(
+                client, args,
+                "Стереть все черновики?" if cmd == "clear-drafts" else "Удалить заготовку?",
+                "во всех чатах" if cmd == "clear-drafts" else f"заготовка {args.id}",
+                "восстановить нельзя")
+            result = await (pend.clear_drafts() if cmd == "clear-drafts"
+                            else pend.delete_shortcut(args.id))
+            render.emit({"ok": True, **result, "подтвердил": v["by"]})
+            return
+    finally:
+        await client.disconnect()
 
 
 async def cmd_stats(args: argparse.Namespace) -> None:
@@ -3276,6 +3339,66 @@ def build_parser() -> argparse.ArgumentParser:
                     help="сколько ждать ответа, секунд")
     cf.set_defaults(func=cmd_confirm)
 
+    pd = sub.add_parser("pending", help="черновики, отложенные, заготовки, закладки")
+    pd_sub = pd.add_subparsers(dest="pendcmd", required=True)
+    pd.set_defaults(func=cmd_pending)
+
+    for name, help_text in (("drafts", "все черновики"), ("shortcuts", "быстрые ответы"),
+                            ("tags", "метки в избранном")):
+        parser = pd_sub.add_parser(name, help=help_text)
+        parser.add_argument("--jsonl", action="store_true")
+
+    d_sv = pd_sub.add_parser("saved", help="избранное по авторам")
+    d_sv.add_argument("--limit", type=int, default=30)
+    d_sv.add_argument("--jsonl", action="store_true")
+
+    d_dr = pd_sub.add_parser("draft", help="сохранить черновик; пустой текст стирает")
+    d_dr.add_argument("chat")
+    d_dr.add_argument("text", nargs="?", default="")
+    d_dr.add_argument("--reply-to", type=int)
+    d_dr.add_argument("--no-preview", action="store_true")
+
+    d_sc = pd_sub.add_parser("scheduled", help="что уйдёт само и когда")
+    d_sc.add_argument("chat")
+    d_sc.add_argument("--jsonl", action="store_true")
+
+    for name, help_text in (("send-now", "отправить отложенное немедленно"),
+                            ("cancel", "отменить отложенное")):
+        parser = pd_sub.add_parser(name, help=help_text)
+        parser.add_argument("chat")
+        parser.add_argument("id", nargs="+", type=int)
+
+    d_sh = pd_sub.add_parser("shortcut", help="сообщения внутри заготовки")
+    d_sh.add_argument("id", type=int)
+    d_sh.add_argument("--jsonl", action="store_true")
+
+    d_ss = pd_sub.add_parser("send-shortcut", help="отправить заготовку в чат")
+    d_ss.add_argument("chat")
+    d_ss.add_argument("id", type=int)
+
+    d_rs = pd_sub.add_parser("rename-shortcut", help="переименовать заготовку")
+    d_rs.add_argument("id", type=int)
+    d_rs.add_argument("name")
+
+    d_nt = pd_sub.add_parser("name-tag", help="назвать метку в избранном")
+    d_nt.add_argument("emoji")
+    d_nt.add_argument("title", nargs="?")
+
+    d_fc = pd_sub.add_parser("fact-check", help="проверка фактов на сообщении")
+    d_fc.add_argument("chat")
+    d_fc.add_argument("id", type=int)
+
+    d_cd = pd_sub.add_parser("clear-drafts", help="стереть все черновики (требует подтверждения)")
+    d_cd.add_argument("--confirm-to")
+    d_cd.add_argument("--as", dest="bot")
+    d_cd.add_argument("--timeout", type=float, default=300.0)
+
+    d_ds = pd_sub.add_parser("delete-shortcut", help="удалить заготовку (требует подтверждения)")
+    d_ds.add_argument("id", type=int)
+    d_ds.add_argument("--confirm-to")
+    d_ds.add_argument("--as", dest="bot")
+    d_ds.add_argument("--timeout", type=float, default=300.0)
+
     stt = sub.add_parser("stats", help="статистика каналов, групп, постов и историй")
     stt_sub = stt.add_subparsers(dest="statscmd", required=True)
     stt.set_defaults(func=cmd_stats)
@@ -4417,7 +4540,7 @@ async def amain() -> None:
 # Errors these modules raise are already written for a person to read; a stack
 # trace on top of them only hides the sentence that explains what to do.
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
-                 tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_poll.PollError,
+                 tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_pending.PendingError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
                  tgx_rich.RichError, tgx_stats.StatsError, tgx_stickers.StickerError,
                  tgx_stories.StoryError,

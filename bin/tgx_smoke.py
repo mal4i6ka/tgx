@@ -1587,6 +1587,54 @@ def stickers_stats_regression() -> None:
           sorted(T.graphs(Summary())) == ["growth_graph", "views_graph"])
 
 
+async def pending_regression() -> None:
+    """Четыре способа отложить сообщение Telegram держит порознь, и путать их
+    опасно: черновик не уйдёт никогда, а отложенное уйдёт само."""
+    from datetime import datetime, timedelta, timezone
+
+    import tgx_pending as P
+
+    now = datetime.now(timezone.utc)
+    check("«+30m» — через полчаса", abs((P.when("+30m") - now).total_seconds() - 1800) < 5)
+    check("«+2h» — через два часа", abs((P.when("+2h") - now).total_seconds() - 7200) < 5)
+    check("«+3d» — через три дня", abs((P.when("+3d") - now).total_seconds() - 259200) < 5)
+    future = (now + timedelta(days=1)).replace(microsecond=0)
+    check("полное время принимается",
+          P.when(future.isoformat()).replace(microsecond=0) == future)
+
+    for bad, why in (("вчера", "слово вместо времени"),
+                     ("2020-01-01T10:00", "время в прошлом"),
+                     ("+5x", "неизвестная единица"),
+                     ("+часа", "не число")):
+        refused = False
+        try:
+            P.when(bad)
+        except P.PendingError:
+            refused = True
+        check(f"отвергает {why}", refused)
+
+    # Метка бывает премиум-эмодзи: у него нет emoticon, и поле пустовало.
+    class Thing:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    class Server:
+        def __init__(self, tags):
+            self.tags = tags
+
+        async def __call__(self, request):
+            return Thing(tags=self.tags)
+
+    rows = await P.Pending(Server([
+        Thing(reaction=Thing(emoticon="🔥"), count=4, title="Важное"),
+        Thing(reaction=Thing(document_id=555), count=15, title=None),
+    ])).tags()
+    check("обычная метка читается как эмодзи", rows[0]["метка"] == "🔥")
+    check("название метки сохраняется", rows[0]["название"] == "Важное")
+    check("премиум-метка не теряется", "555" in rows[1]["метка"])
+    check("безымянная метка помечается", rows[1]["название"] == "без названия")
+
+
 def rich_render_regression() -> None:
     """A received rich message is an Instant-View block tree — it has to become
     readable terminal text, not a bare "unsupported media" chip."""
@@ -1856,6 +1904,7 @@ async def main() -> int:
     stories_regression()
     error_explain_regression()
     stickers_stats_regression()
+    await pending_regression()
     multipart_regression()
     rich_blocks_regression()
     poll_regression()
