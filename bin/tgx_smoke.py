@@ -1635,6 +1635,52 @@ async def pending_regression() -> None:
     check("безымянная метка помечается", rows[1]["название"] == "без названия")
 
 
+def security_regression() -> None:
+    """Приватность Telegram хранит парами правил, и напечатанные подряд они
+    читаются как противоречие: «контактам, никому». Ошибка в этом месте стоит
+    дорого — человек решает по ней, что видно посторонним."""
+    import tgx_security as S
+
+    def rule(name, **kw):
+        """Правило сервера подделывается именем класса — по нему и различают."""
+        return type(name, (), kw)()
+
+    only_contacts = [rule("PrivacyValueAllowContacts"), rule("PrivacyValueDisallowAll")]
+    check("«разрешить контактам + запретить всем» читается как «контактам»",
+          S.describe_rules(only_contacts) == "контактам")
+    check("«всем» остаётся «всем»",
+          S.describe_rules([rule("PrivacyValueAllowAll")]) == "всем")
+    check("«никому» остаётся «никому»",
+          S.describe_rules([rule("PrivacyValueDisallowAll")]) == "никому")
+    check("пустое правило названо",
+          S.describe_rules([]) == "не задано")
+
+    with_extra = [rule("PrivacyValueAllowContacts"), rule("PrivacyValueDisallowAll"),
+                  rule("PrivacyValueDisallowUsers", users=[1, 2, 3])]
+    shown = S.describe_rules(with_extra)
+    check("исключения дописываются к основе", shown.startswith("контактам ·"))
+    check("и считаются", "3" in shown)
+
+    check("предмет переводится в ключ",
+          type(S.topic_key("last-seen")).__name__ == "InputPrivacyKeyStatusTimestamp")
+    for bad in ("никому", "phone-number"):
+        refused = False
+        try:
+            S.topic_key(bad)
+        except S.SecurityError:
+            refused = True
+        check(f"неизвестный предмет «{bad}» отвергается", refused)
+
+    # Основа обязательна: без неё правило молча оставит прежнюю аудиторию.
+    refused = False
+    try:
+        S.rules("")
+    except S.SecurityError:
+        refused = True
+    check("правило без основы отвергается", refused)
+    check("основа идёт первой", len(S.rules("nobody", deny=[1])) == 2)
+
+
 def rich_render_regression() -> None:
     """A received rich message is an Instant-View block tree — it has to become
     readable terminal text, not a bare "unsupported media" chip."""
@@ -1905,6 +1951,7 @@ async def main() -> int:
     error_explain_regression()
     stickers_stats_regression()
     await pending_regression()
+    security_regression()
     multipart_regression()
     rich_blocks_regression()
     poll_regression()

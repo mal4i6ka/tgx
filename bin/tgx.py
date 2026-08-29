@@ -41,6 +41,7 @@ import tgx_profile
 import tgx_rich
 import tgx_transcribe
 import tgx_render as render
+import tgx_security
 import tgx_splash
 import tgx_stats
 import tgx_stickers
@@ -567,6 +568,75 @@ def read_secret(prompt: str, env: str = "") -> str:
             f"нужен ввод секрета, а терминала нет. Запустите команду в терминале "
             f"или передайте значение через переменную {env or 'окружения'}")
     return getpass.getpass(prompt)
+
+
+async def cmd_security(args: argparse.Namespace) -> None:
+    """Сессии, приватность и сроки."""
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        sec = tgx_security.Security(client)
+        cmd = args.seccmd
+
+        tables = {
+            "sessions": (lambda: sec.sessions(),
+                         ["устройство", "программа", "откуда", "активна", "текущая"]),
+            "websites": (lambda: sec.websites(), ["сайт", "через бота", "браузер", "откуда"]),
+            "privacy": (lambda: sec.privacy(getattr(args, "topic", None)),
+                        ["предмет", "видно"]),
+            "notify-exceptions": (lambda: sec.notify_exceptions(args.limit),
+                                  ["чат", "заглушён до", "звук"]),
+        }
+        if cmd in tables:
+            getter, fields = tables[cmd]
+            rows = await getter()
+            print_jsonl(rows) if getattr(args, "jsonl", False) else print_table(
+                rows, fields, title=cmd)
+            return
+
+        if cmd == "global-privacy":
+            if args.archive is None and args.hide_read is None and args.premium_only is None:
+                render.emit(await sec.global_privacy())
+            else:
+                render.emit({"ok": True, **await sec.set_global_privacy(
+                    archive_new=bool_from_arg(args.archive) if args.archive else None,
+                    hide_read=bool_from_arg(args.hide_read) if args.hide_read else None,
+                    premium_only=bool_from_arg(args.premium_only) if args.premium_only else None)})
+            return
+
+        if cmd == "set-privacy":
+            render.emit({"ok": True, **await sec.set_privacy(
+                args.topic, args.audience, allow=args.allow or [], deny=args.deny or [])})
+            return
+
+        if cmd == "session-ttl":
+            render.emit(await sec.session_ttl(args.days))
+            return
+
+        if cmd == "account-ttl":
+            render.emit(await sec.account_ttl(args.days))
+            return
+
+        if cmd == "session-settings":
+            render.emit({"ok": True, **await sec.session_settings(
+                args.hash, calls=bool_from_arg(args.calls) if args.calls else None,
+                secret_chats=bool_from_arg(args.secret) if args.secret else None)})
+            return
+
+        if cmd in {"close-session", "close-website", "close-all-websites"}:
+            titles = {"close-session": ("Завершить сессию?", f"Сессия {getattr(args, 'hash', '')}"),
+                      "close-website": ("Отозвать доступ у сайта?", f"Сайт {getattr(args, 'hash', '')}"),
+                      "close-all-websites": ("Отозвать доступ у всех сайтов?", "все сайты")}
+            title, details = titles[cmd]
+            v = await gated_or_die(client, args, title, details,
+                                   "устройство или сайт потеряет доступ немедленно")
+            result = await (sec.close_session(args.hash) if cmd == "close-session"
+                            else sec.close_website(getattr(args, "hash", None)
+                                                   if cmd == "close-website" else None))
+            render.emit({"ok": True, **result, "подтвердил": v["by"]})
+            return
+    finally:
+        await client.disconnect()
 
 
 async def cmd_pending(args: argparse.Namespace) -> None:
@@ -3016,6 +3086,7 @@ GROUPS = [
     ("платежи", ["pay", "confirm"]),
     ("голос", ["transcribe"]),
     ("люди", ["contacts", "stories"]),
+    ("безопасность", ["security"]),
     ("аккаунт", ["auth", "me", "profile", "profile-get", "profile-edit", "profile-photo-set", "profile-photos", "profile-photo-delete"]),
     ("чаты и папки", ["dialogs", "folders", "folder-upsert"]),
     ("сообщения", ["history", "search", "send", "edit", "delete", "forward", "react", "pin", "pinned", "todo", "todo-check", "todo-add", "format", "export", "message-get", "message-click"]),
@@ -3338,6 +3409,59 @@ def build_parser() -> argparse.ArgumentParser:
     cf.add_argument("--timeout", type=float, default=tgx_confirm.DEFAULT_TIMEOUT,
                     help="сколько ждать ответа, секунд")
     cf.set_defaults(func=cmd_confirm)
+
+    sec = sub.add_parser("security", help="сессии, приватность, сроки")
+    sec_sub = sec.add_subparsers(dest="seccmd", required=True)
+    sec.set_defaults(func=cmd_security)
+
+    for name, help_text in (("sessions", "устройства, вошедшие в аккаунт"),
+                            ("websites", "сайты, куда входили через Telegram")):
+        parser = sec_sub.add_parser(name, help=help_text)
+        parser.add_argument("--jsonl", action="store_true")
+
+    e_pr = sec_sub.add_parser("privacy", help="кто что о вас видит")
+    e_pr.add_argument("topic", nargs="?", choices=sorted(tgx_security.TOPICS),
+                      help="без предмета — сводка по всем")
+    e_pr.add_argument("--jsonl", action="store_true")
+
+    e_sp = sec_sub.add_parser("set-privacy", help="изменить приватность предмета")
+    e_sp.add_argument("topic", choices=sorted(tgx_security.TOPICS))
+    e_sp.add_argument("audience", choices=list(tgx_security.AUDIENCES))
+    e_sp.add_argument("--allow", action="append", help="плюс эти люди")
+    e_sp.add_argument("--deny", action="append", help="кроме этих")
+
+    e_gp = sec_sub.add_parser("global-privacy", help="настройки на весь аккаунт")
+    e_gp.add_argument("--archive", help="архивировать новые чаты: on|off")
+    e_gp.add_argument("--hide-read", help="скрывать статус прочтения: on|off")
+    e_gp.add_argument("--premium-only", help="писать могут только Premium и контакты: on|off")
+
+    e_st = sec_sub.add_parser("session-ttl", help="дней бездействия до выхода")
+    e_st.add_argument("days", nargs="?", type=int, help="без числа — показать текущее")
+
+    e_at = sec_sub.add_parser("account-ttl", help="дней бездействия до удаления аккаунта")
+    e_at.add_argument("days", nargs="?", type=int)
+
+    e_ss = sec_sub.add_parser("session-settings", help="что разрешено сессии")
+    e_ss.add_argument("hash", type=int)
+    e_ss.add_argument("--calls", help="разрешить звонки: on|off")
+    e_ss.add_argument("--secret", help="разрешить секретные чаты: on|off")
+
+    e_ne = sec_sub.add_parser("notify-exceptions", help="чаты с отдельными уведомлениями")
+    e_ne.add_argument("--limit", type=int, default=30)
+    e_ne.add_argument("--jsonl", action="store_true")
+
+    def sec_gate(name: str, help_text: str) -> Any:
+        parser = sec_sub.add_parser(name, help=help_text + " (требует подтверждения)")
+        parser.add_argument("--confirm-to")
+        parser.add_argument("--as", dest="bot")
+        parser.add_argument("--timeout", type=float, default=300.0)
+        return parser
+
+    e_cs = sec_gate("close-session", "завершить сессию")
+    e_cs.add_argument("hash", type=int)
+    e_cw = sec_gate("close-website", "отозвать доступ у сайта")
+    e_cw.add_argument("hash", type=int)
+    sec_gate("close-all-websites", "отозвать доступ у всех сайтов")
 
     pd = sub.add_parser("pending", help="черновики, отложенные, заготовки, закладки")
     pd_sub = pd.add_subparsers(dest="pendcmd", required=True)
@@ -4542,7 +4666,7 @@ async def amain() -> None:
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_pending.PendingError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
-                 tgx_rich.RichError, tgx_stats.StatsError, tgx_stickers.StickerError,
+                 tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
                  tgx_stories.StoryError,
                  tgx_transcribe.TranscribeError)
 
