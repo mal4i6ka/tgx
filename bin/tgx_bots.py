@@ -345,6 +345,14 @@ BOT_HINTS = {
     "PEER_ID_INVALID": "бот не знает этого чата — добавьте его туда",
     "CHAT_WRITE_FORBIDDEN": "боту здесь запрещено писать",
     "CHAT_ADMIN_REQUIRED": "боту нужны права администратора в этом чате",
+    "USERNAME_INVALID": "такой адрес Telegram не принимает; он должен заканчиваться на bot",
+    "USERNAME_OCCUPIED": "этот адрес занят — придумайте другой",
+    "USERNAME_PURCHASE_AVAILABLE": "адрес свободен, но продаётся на Fragment — бесплатно его не занять",
+    "BOTS_TOO_MUCH": "у вас уже предельное число ботов; удалите ненужного через BotFather",
+    "BOT_INVALID": "это не ваш бот — токен выдают только владельцу",
+    "USER_ID_INVALID": "такого пользователя нет",
+    "PASSWORD_HASH_INVALID": "неверный пароль двухфакторной защиты",
+    "BOT_NOT_FOUND": "бот не найден",
 }
 
 
@@ -353,6 +361,114 @@ def explain_bot_error(exc: Exception) -> Exception:
     import tgx_net
 
     return tgx_net.explain(exc, BOT_HINTS, BotError)
+
+
+class Direct:
+    """Боты без разговора с BotFather — насколько это вообще возможно.
+
+    Слой 227 даёт часть операций обычными вызовами, но не все и не всем:
+
+    * `createBot` создаёт бота **от имени бота-управляющего**, а не от вашего
+      имени; управляющему нужно право «управлять ботами» от BotFather. Без него
+      сервер отвечает MANAGER_PERMISSION_MISSING.
+    * `exportBotToken`, `getBotCommands`, `getBotMenuButton` — вызовы для бота:
+      из пользовательского аккаунта приходит USER_BOT_REQUIRED. Им нужна сессия
+      самого бота.
+    * `getAdminedBots` и `getPreviewMedias` работают из вашего аккаунта.
+
+    Поэтому разговорный путь остаётся основным для создания и токенов.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    async def _call(self, request: Any) -> Any:
+        try:
+            return await self.client(request)
+        except Exception as exc:
+            raise explain_bot_error(exc) from exc
+
+    async def create(self, name: str, username: str, manager: Any) -> Bot:
+        """Создать бота через бота-управляющего."""
+        from telethon.tl import functions
+
+        handle = username.lstrip("@")
+        if not handle.lower().endswith("bot"):
+            raise BotError("имя бота должно заканчиваться на bot, этого требует Telegram")
+        owner = await self.client.get_input_entity(manager)
+        user = await self._call(functions.bots.CreateBotRequest(
+            name=name.strip(), username=handle, manager_id=owner, via_deeplink=None))
+        return Bot(username=getattr(user, "username", handle) or handle,
+                   name=name.strip(), token="",
+                   added=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+
+    async def mine(self) -> list[dict[str, Any]]:
+        """Боты, которыми вы распоряжаетесь. Работает из вашего аккаунта."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.bots.GetAdminedBotsRequest())
+        return [{"username": getattr(u, "username", None), "имя": getattr(u, "first_name", None),
+                 "id": getattr(u, "id", None)} for u in (result or [])]
+
+    async def previews(self, bot: Any) -> list[dict[str, Any]]:
+        """Картинки-превью, которые бот показывает до запуска."""
+        from telethon.tl import functions
+
+        entity = await self.client.get_input_entity(bot)
+        result = await self._call(functions.bots.GetPreviewMediasRequest(bot=entity))
+        return [{"язык": getattr(m, "lang_code", None) or "по умолчанию",
+                 "вид": type(getattr(m, "media", None)).__name__.replace("MessageMedia", "")}
+                for m in (result or [])]
+
+    # --- ниже то, что требует сессии самого бота ---
+
+    async def token(self, bot: Any, *, revoke: bool = False) -> str:
+        """Токен управляемого бота. Вызывать из сессии бота-управляющего."""
+        from telethon.tl import functions
+
+        entity = await self.client.get_input_entity(bot)
+        result = await self._call(functions.bots.ExportBotTokenRequest(
+            bot=entity, revoke=revoke or None))
+        token = getattr(result, "token", None)
+        if not token:
+            raise BotError("сервер не вернул токен")
+        return token
+
+    async def commands(self, lang: str = "") -> list[dict[str, Any]]:
+        """Свои команды глазами пользователя. Из сессии бота."""
+        from telethon.tl import functions, types
+
+        result = await self._call(functions.bots.GetBotCommandsRequest(
+            scope=types.BotCommandScopeDefault(), lang_code=lang))
+        return [{"команда": c.command, "описание": c.description} for c in (result or [])]
+
+    async def menu_button(self, user: Any = None) -> dict[str, Any]:
+        """Какая сейчас кнопка-меню. Из сессии бота."""
+        from telethon.tl import functions, types
+
+        target = await self.client.get_input_entity(user) if user else types.InputUserSelf()
+        result = await self._call(functions.bots.GetBotMenuButtonRequest(user_id=target))
+        return {"вид": type(result).__name__.replace("BotMenuButton", "") or "по умолчанию",
+                "текст": getattr(result, "text", None), "адрес": getattr(result, "url", None)}
+
+    async def group_rights(self, *, invite: bool = False, pin: bool = False,
+                           delete: bool = False, ban: bool = False,
+                           info: bool = False, channel: bool = False) -> dict[str, Any]:
+        """Права, которые бот просит при добавлении. Из сессии бота."""
+        from telethon.tl import functions, types
+
+        rights = types.ChatAdminRights(
+            change_info=info, post_messages=channel, edit_messages=channel,
+            delete_messages=delete, ban_users=ban, invite_users=invite,
+            pin_messages=pin, add_admins=False, anonymous=False, manage_call=False,
+            other=True, manage_topics=False)
+        request = (functions.bots.SetBotBroadcastDefaultAdminRightsRequest
+                   if channel else functions.bots.SetBotGroupDefaultAdminRightsRequest)
+        await self._call(request(admin_rights=rights))
+        asked = [n for n, v in (("приглашать", invite), ("закреплять", pin),
+                                ("удалять", delete), ("банить", ban),
+                                ("менять описание", info)) if v]
+        return {"где": "канал" if channel else "группа", "просит": asked or ["базовые"]}
 
 
 class BotSession:

@@ -1724,6 +1724,104 @@ def calls_regression() -> None:
         board.stop()
 
 
+def ai_compose_regression() -> None:
+    """Правку от сервера показываем целиком: результат и что именно изменилось.
+    Разметка правок приходит поверх слитого текста, и разобрать её надо ровно
+    один раз — иначе в глазах пользователя окажется каша из старого и нового."""
+    import tgx_ai as A
+    from telethon.tl import types
+
+    diff = types.TextWithEntities(
+        text="Привет, как дела?",
+        entities=[types.MessageEntityDiffReplace(offset=0, length=7, old_text="превет"),
+                  types.MessageEntityDiffInsert(offset=13, length=4),
+                  types.MessageEntityDiffDelete(offset=7, length=1)])
+    marked, rows = A._edits(diff)
+    check("замена показана обеими сторонами", "[-превет-]{+Привет,+}" in marked)
+    check("вставка помечена плюсами", "{+" in marked and "+}" in marked)
+    check("правки разобраны по одной", len(rows) == 3)
+    kinds = {r["правка"] for r in rows}
+    check("виды правок названы по-русски", kinds == {"замена", "добавлено", "убрано"})
+    check("у замены видно, что было", rows[0]["было"] == "превет")
+
+    empty, none_rows = A._edits(types.TextWithEntities(text="без правок", entities=[]))
+    check("без правок остаётся исходный текст", empty == "без правок")
+    check("и пустой список", none_rows == [])
+    check("пустую разметку не роняем", A._edits(None) == ("", []))
+
+    # тоны: встроенные по имени, свои по слагу, чужие по паре чисел
+    check("встроенный тон узнаётся", type(A._tone("viking")).__name__ == "InputAiComposeToneDefault")
+    check("свой тон идёт слагом", type(A._tone("my-voice")).__name__ == "InputAiComposeToneSlug")
+    check("собачка в слаге не мешает", A._tone("@my-voice").slug == "my-voice")
+    pair = A._tone("42:99")
+    check("пара чисел — это ссылка на тон", (pair.id, pair.access_hash) == (42, 99))
+    check("без тона возвращаем пустоту", A._tone("") is None)
+
+
+def takeout_regression() -> None:
+    """Выгрузка спотыкается о пустой признак в сессии: b'' — это не None, и
+    Telethon считает, что выгрузка идёт, а сервер такое даже не упакует.
+    Проверяем, что метку снимаем и настоящий признак не трогаем."""
+    import tgx_takeout as T
+
+    class Session:
+        def __init__(self, value):
+            self.takeout_id = value
+
+    class Client:
+        def __init__(self, value):
+            self.session = Session(value)
+
+    empty = T.Takeout(Client(b""))
+    check("пустые байты не считаются выгрузкой", empty._tidy() is None)
+    check("и метка снимается", empty.client.session.takeout_id is None)
+
+    blank = T.Takeout(Client(""))
+    check("пустая строка тоже", blank._tidy() is None)
+
+    real = T.Takeout(Client(12345))
+    check("настоящий признак остаётся", real._tidy() == 12345)
+    check("и в сессии не меняется", real.client.session.takeout_id == 12345)
+
+    clean = T.Takeout(Client(None))
+    check("отсутствие признака — это отсутствие", clean._tidy() is None)
+
+    # подсказка про паузу должна объяснять, что это защита, а не поломка
+    hint = T.HINTS["TAKEOUT_INIT_DELAY"]
+    check("подсказка про паузу говорит, что делать", "подтвердите" in hint.lower())
+
+
+def chatx_regression() -> None:
+    """Даты приходят то числом, то датой — в вывод должны попадать одинаково."""
+    import tgx_chatx as X
+    from datetime import datetime, timezone
+
+    check("число разворачивается в дату",
+          X._when(1786542005) == "2026-08-12T13:40:05+00:00")
+    check("дата приводится к UTC",
+          X._when(datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)) == "2026-01-02T03:04:05+00:00")
+    check("нуля не бывает", X._when(0) is None)
+    check("пустоту не выдумываем", X._when(None) is None)
+    check("сутки названы сутками", X.TTL_NAMES[86400] == "сутки")
+
+
+def direct_bot_regression() -> None:
+    """createBot — не замена BotFather: бота заводит бот-управляющий, и без
+    выданного ему права сервер отвечает MANAGER_PERMISSION_MISSING. А токен и
+    команды вообще спрашивает только сам бот. Это должно быть видно в коде."""
+    import tgx_bots as B
+
+    check("имя без bot на конце не проходит",
+          "bot" in B.BOT_HINTS.get("USERNAME_INVALID", ""))
+    check("занятый адрес объяснён", "занят" in B.BOT_HINTS["USERNAME_OCCUPIED"])
+    check("продажу на Fragment называем", "Fragment" in B.BOT_HINTS["USERNAME_PURCHASE_AVAILABLE"])
+    check("предел числа ботов объяснён", "BOTS_TOO_MUCH" in B.BOT_HINTS)
+
+    doc = B.Direct.__doc__ or ""
+    check("в описании сказано про управляющего", "управляющ" in doc)
+    check("и про то, что часть вызовов — для бота", "USER_BOT_REQUIRED" in doc)
+
+
 def rich_render_regression() -> None:
     """A received rich message is an Instant-View block tree — it has to become
     readable terminal text, not a bare "unsupported media" chip."""
@@ -1996,6 +2094,10 @@ async def main() -> int:
     await pending_regression()
     security_regression()
     calls_regression()
+    ai_compose_regression()
+    takeout_regression()
+    chatx_regression()
+    direct_bot_regression()
     multipart_regression()
     rich_blocks_regression()
     poll_regression()

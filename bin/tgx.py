@@ -25,6 +25,8 @@ from telethon.tl.types import Channel, Chat, User
 
 import tgx_article
 import tgx_banner
+import tgx_ai
+import tgx_chatx
 import tgx_bots
 import tgx_business
 import tgx_calls
@@ -46,6 +48,7 @@ import tgx_render as render
 import tgx_security
 import tgx_splash
 import tgx_stats
+import tgx_takeout
 import tgx_stickers
 import tgx_stories
 
@@ -2740,6 +2743,117 @@ async def _with_bot(username: str, action: Any) -> Any:
         return await action(session)
 
 
+async def cmd_ai(args: argparse.Namespace) -> None:
+    command = args.aicmd
+
+    if command == "compose":
+        text = args.text
+        if Path(text).expanduser().is_file():
+            text = Path(text).expanduser().read_text()
+        result = await _with_user(lambda c: tgx_ai.Compose(c).run(
+            text, proofread=args.proofread, emojify=args.emojify,
+            translate=args.translate or "", tone=args.tone or ""))
+        if args.apply:
+            # правку сразу в дело: отправляем то, что вернул сервер
+            sent = await _with_user(lambda c: c.send_message(
+                args.apply, result["стало"]))
+            result["отправлено"] = {"чат": args.apply, "id": sent.id}
+        render.emit(result)
+        return
+
+    if command == "tones":
+        render.emit({"тоны": await _with_user(lambda c: tgx_ai.Tones(c).listing())})
+        return
+
+    if command == "tone":
+        render.emit(await _with_user(lambda c: tgx_ai.Tones(c).show(args.tone)))
+        return
+
+    if command == "tone-example":
+        render.emit(await _with_user(lambda c: tgx_ai.Tones(c).example(args.tone, args.num)))
+        return
+
+    if command == "tone-new":
+        render.emit(await _with_user(lambda c: tgx_ai.Tones(c).create(
+            args.title, args.prompt, emoji_id=args.emoji_id, credit=args.credit)))
+        return
+
+    if command == "tone-edit":
+        render.emit(await _with_user(lambda c: tgx_ai.Tones(c).update(
+            args.tone, title=args.title or "", prompt=args.prompt or "",
+            emoji_id=args.emoji_id, credit=args.credit)))
+        return
+
+    if command in {"tone-save", "tone-forget"}:
+        render.emit(await _with_user(lambda c: tgx_ai.Tones(c).save(
+            args.tone, unsave=command == "tone-forget")))
+        return
+
+    if command == "tone-delete":
+        await gated_or_die(None, args, f"удалить свой тон «{args.tone}»",
+                           "тон исчезнет у всех, кто его установил", danger=True)
+        render.emit(await _with_user(lambda c: tgx_ai.Tones(c).delete(args.tone)))
+        return
+
+
+async def cmd_takeout(args: argparse.Namespace) -> None:
+    """Выгрузить аккаунт на диск."""
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        render.note("Telegram может попросить подтвердить выгрузку в другом устройстве")
+        summary = await tgx_takeout.Takeout(client).run(
+            Path(args.out), chats=args.chat or None, limit=args.limit,
+            files=args.files, max_file_mb=args.max_file_mb,
+            contacts=not args.no_contacts,
+            progress=lambda step: render.note(f"выгружаю: {step}"))
+        render.emit(summary)
+    finally:
+        await client.disconnect()
+
+
+async def cmd_takeout_finish(args: argparse.Namespace) -> None:
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        render.emit(await tgx_takeout.Takeout(client).finish(success=args.success))
+    finally:
+        await client.disconnect()
+
+
+async def cmd_chatx(args: argparse.Namespace) -> None:
+    """Мелочи по чатам и каналам, которых не хватало поодиночке."""
+    command = args.func_name
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        extras = tgx_chatx.Extras(client)
+        peer = await resolve_peer(client, args.peer) if getattr(args, "peer", None) else None
+
+        if command == "message-link":
+            render.emit(await extras.message_link(
+                peer, args.id, album=args.album, thread=args.thread))
+        elif command == "common-chats":
+            who = await resolve_peer(client, args.user)
+            render.emit({"общие чаты": await extras.common_chats(who, args.limit)})
+        elif command == "my-public":
+            render.emit({"публичные": await extras.my_public(
+                for_location=args.by_location, check_limit=args.check_limit)})
+        elif command == "similar":
+            render.emit({"похожие": await extras.similar(peer)})
+        elif command == "inactive":
+            render.emit({"затихшие": await extras.inactive()})
+        elif command == "who-is":
+            who = await resolve_peer(client, args.who)
+            render.emit(await extras.participant(peer, who))
+        elif command == "antispam":
+            render.emit(await extras.antispam(peer, args.state == "on"))
+        elif command == "default-ttl":
+            render.emit(await extras.default_ttl(args.seconds))
+    finally:
+        await client.disconnect()
+
+
 async def cmd_bot(args: argparse.Namespace) -> None:
     registry = tgx_bots.Registry()
     command = args.botcmd
@@ -2765,11 +2879,19 @@ async def cmd_bot(args: argparse.Namespace) -> None:
         return
 
     if command == "create":
-        bot = await _with_user(lambda c: tgx_bots.BotFather(c).create(args.name, args.username))
+        # BotFather — путь по умолчанию: он единственный выдаёт токен владельцу.
+        # --manager включает createBot, но там бота заводит бот-управляющий,
+        # и токен приходится забирать отдельно, из его же сессии.
+        async def make(client):
+            if args.manager:
+                bot = await tgx_bots.Direct(client).create(args.name, args.username, args.manager)
+                return bot, f"управляющий {args.manager.lstrip('@')}"
+            return await tgx_bots.BotFather(client).create(args.name, args.username), "botfather"
+        bot, path = await _with_user(make)
         registry.add(bot)
         render.emit({"ok": True, "username": bot.username, "name": bot.name,
                      "token": bot.token if args.reveal else tgx_bots.mask(bot.token),
-                     "saved_to": str(registry.path)})
+                     "путь": path, "saved_to": str(registry.path)})
         return
 
     if command == "secretary":
@@ -2780,9 +2902,16 @@ async def cmd_bot(args: argparse.Namespace) -> None:
         return
 
     if command in {"token", "revoke"}:
-        getter = (lambda c: tgx_bots.BotFather(c).token(args.username)) if command == "token" \
-            else (lambda c: tgx_bots.BotFather(c).revoke(args.username))
-        token = await _with_user(getter)
+        revoke = command == "revoke"
+        if args.via_manager:
+            # exportBotToken — вызов бота: его делает управляющий за подопечного
+            token = await _with_bot(args.via_manager, lambda s: tgx_bots.Direct(
+                s.client).token(args.username, revoke=revoke))
+        else:
+            async def fetch(client):
+                father = tgx_bots.BotFather(client)
+                return await (father.revoke(args.username) if revoke else father.token(args.username))
+            token = await _with_user(fetch)
         stored = registry.load().get(args.username.lstrip("@"))
         bot = tgx_bots.Bot(username=args.username.lstrip("@"),
                            name=stored.name if stored else "", token=token)
@@ -2792,8 +2921,36 @@ async def cmd_bot(args: argparse.Namespace) -> None:
         return
 
     if command == "mine":
-        names = await _with_user(lambda c: tgx_bots.BotFather(c).mine())
-        render.emit({"bots": names})
+        async def listing(client):
+            try:
+                rows = await tgx_bots.Direct(client).mine()
+                if rows:
+                    return rows
+            except tgx_bots.BotError:
+                pass
+            return [{"username": name} for name in await tgx_bots.BotFather(client).mine()]
+        render.emit({"боты": await _with_user(listing)})
+        return
+
+    if command == "commands":
+        render.emit({"команды": await _with_bot(
+            args.username, lambda s: tgx_bots.Direct(s.client).commands(args.lang))})
+        return
+
+    if command == "menu-get":
+        render.emit(await _with_bot(
+            args.username, lambda s: tgx_bots.Direct(s.client).menu_button(args.user)))
+        return
+
+    if command == "previews":
+        render.emit({"превью": await _with_user(
+            lambda c: tgx_bots.Direct(c).previews(args.username))})
+        return
+
+    if command == "group-rights":
+        render.emit(await _with_bot(args.username, lambda s: tgx_bots.Direct(
+            s.client).group_rights(invite=args.invite, pin=args.pin, delete=args.delete,
+                                   ban=args.ban, info=args.info, channel=args.channel)))
         return
 
     if command in {"setname", "setabout", "setdescription", "setcommands"}:
@@ -3260,6 +3417,52 @@ def build_parser() -> argparse.ArgumentParser:
                     help="как рисовать превью: auto (по возможностям терминала), протокол явно, либо off")
     ui.set_defaults(func=cmd_ui)
 
+    ai = sub.add_parser("ai", help="правка текста руками Telegram: вычитка, эмодзи, перевод, тон")
+    ai_sub = ai.add_subparsers(dest="aicmd", required=True)
+    ai.set_defaults(func=cmd_ai)
+
+    a_comp = ai_sub.add_parser("compose", help="поправить текст и показать, что изменилось")
+    a_comp.add_argument("text", help="текст или путь к файлу")
+    a_comp.add_argument("--proofread", action="store_true", help="вычитать (по умолчанию)")
+    a_comp.add_argument("--emojify", action="store_true", help="расставить эмодзи")
+    a_comp.add_argument("--translate", help="перевести: код языка, например en")
+    a_comp.add_argument("--tone", help=f"тон: {', '.join(tgx_ai.BUILT_IN)} или свой")
+    a_comp.add_argument("--apply", help="сразу отправить готовый текст в этот чат")
+
+    ai_sub.add_parser("tones", help="какие тоны доступны")
+
+    a_tone = ai_sub.add_parser("tone", help="что за тон")
+    a_tone.add_argument("tone")
+
+    a_ex = ai_sub.add_parser("tone-example", help="образец: как этот тон звучит")
+    a_ex.add_argument("tone")
+    a_ex.add_argument("--num", type=int, default=0, help="какой из образцов")
+
+    a_new = ai_sub.add_parser("tone-new", help="завести свой тон письма")
+    a_new.add_argument("title", help="название")
+    a_new.add_argument("prompt", help="как писать: указание для сервера")
+    a_new.add_argument("--emoji-id", type=int, default=0, help="премиальное эмодзи для значка")
+    a_new.add_argument("--credit", action="store_true", help="показывать вас автором")
+
+    a_ted = ai_sub.add_parser("tone-edit", help="поправить свой тон")
+    a_ted.add_argument("tone")
+    a_ted.add_argument("--title")
+    a_ted.add_argument("--prompt")
+    a_ted.add_argument("--emoji-id", type=int)
+    a_ted.add_argument("--credit", action=argparse.BooleanOptionalAction)
+
+    for name, help_text in (("tone-save", "поставить себе чужой тон"),
+                            ("tone-forget", "убрать тон из своих")):
+        parser = ai_sub.add_parser(name, help=help_text)
+        parser.add_argument("tone")
+
+    a_del = ai_sub.add_parser("tone-delete",
+                              help="удалить свой тон насовсем (требует подтверждения)")
+    a_del.add_argument("tone")
+    a_del.add_argument("--confirm-to", help="кто подтверждает")
+    a_del.add_argument("--as", dest="bot", help="бот, который спросит")
+    a_del.add_argument("--timeout", type=float, default=300.0)
+
     bot = sub.add_parser("bot", help="боты: создание через BotFather, токены, посты от их имени")
     bot_sub = bot.add_subparsers(dest="botcmd", required=True)
     bot.set_defaults(func=cmd_bot)
@@ -3268,6 +3471,8 @@ def build_parser() -> argparse.ArgumentParser:
     b_create.add_argument("name", help="человеческое имя")
     b_create.add_argument("username", help="адрес, обязан заканчиваться на bot")
     b_create.add_argument("--reveal", action="store_true", help="показать токен целиком")
+    b_create.add_argument("--manager", help="бот-управляющий: заведёт нового бота вместо "
+                                            "BotFather; нужно право «управлять ботами»")
 
     b_list = bot_sub.add_parser("list", help="сохранённые боты (токены скрыты)")
     b_list.add_argument("--reveal", action="store_true")
@@ -3278,6 +3483,27 @@ def build_parser() -> argparse.ArgumentParser:
         parser = bot_sub.add_parser(name, help=help_text)
         parser.add_argument("username")
         parser.add_argument("--reveal", action="store_true")
+        parser.add_argument("--via-manager", help="забрать токен из сессии бота-управляющего")
+
+    b_cmds = bot_sub.add_parser("commands", help="команды бота, как их видит пользователь")
+    b_cmds.add_argument("username")
+    b_cmds.add_argument("--lang", default="", help="код языка, например ru")
+
+    b_mget = bot_sub.add_parser("menu-get", help="какая сейчас кнопка-меню")
+    b_mget.add_argument("username")
+    b_mget.add_argument("--user", help="для кого смотреть; по умолчанию общая")
+
+    b_prev = bot_sub.add_parser("previews", help="картинки-превью бота до запуска")
+    b_prev.add_argument("username")
+
+    b_rights = bot_sub.add_parser(
+        "group-rights", help="какие права бот просит при добавлении в группу")
+    b_rights.add_argument("username")
+    b_rights.add_argument("--channel", action="store_true", help="права для канала, не группы")
+    for flag, help_text in (("invite", "приглашать"), ("pin", "закреплять"),
+                            ("delete", "удалять сообщения"), ("ban", "банить"),
+                            ("info", "менять описание")):
+        b_rights.add_argument(f"--{flag}", action="store_true", help=help_text)
 
     b_secr = bot_sub.add_parser(
         "secretary", help="секретарский режим — без него бота не подключить к личным чатам")
@@ -4570,6 +4796,60 @@ def build_parser() -> argparse.ArgumentParser:
     cl.add_argument("--yes", action="store_true")
     cl.set_defaults(func=cmd_chat_leave)
 
+    tk = sub.add_parser("takeout", help="выгрузить аккаунт на диск: контакты, чаты, история")
+    tk.add_argument("out", help="папка для выгрузки")
+    tk.add_argument("--chat", action="append",
+                    help="выгрузить историю этого чата; можно несколько раз")
+    tk.add_argument("--limit", type=int, default=0, help="сколько сообщений на чат; 0 — все")
+    tk.add_argument("--files", action="store_true", help="скачивать вложения")
+    tk.add_argument("--max-file-mb", type=int, default=20, help="крупнее — пропускать")
+    tk.add_argument("--no-contacts", action="store_true")
+    tk.set_defaults(func=cmd_takeout)
+
+    tkf = sub.add_parser("takeout-finish", help="закрыть висящую выгрузку")
+    tkf.add_argument("--success", action="store_true", help="пометить как удавшуюся")
+    tkf.set_defaults(func=cmd_takeout_finish)
+
+    x_link = sub.add_parser("message-link", help="постоянная ссылка на сообщение")
+    x_link.add_argument("peer")
+    x_link.add_argument("id", type=int)
+    x_link.add_argument("--album", action="store_true", help="ссылка на весь альбом")
+    x_link.add_argument("--thread", action="store_true", help="ссылка внутрь обсуждения")
+    x_link.set_defaults(func=cmd_chatx, func_name="message-link")
+
+    x_com = sub.add_parser("common-chats", help="где вы состоите вместе с человеком")
+    x_com.add_argument("user")
+    x_com.add_argument("--limit", type=int, default=100)
+    x_com.set_defaults(func=cmd_chatx, func_name="common-chats")
+
+    x_pub = sub.add_parser("my-public", help="ваши публичные каналы и группы")
+    x_pub.add_argument("--by-location", action="store_true", help="привязанные к месту")
+    x_pub.add_argument("--check-limit", action="store_true",
+                       help="только проверить, не упёрлись ли в предел")
+    x_pub.set_defaults(func=cmd_chatx, func_name="my-public")
+
+    x_sim = sub.add_parser("similar", help="похожие каналы")
+    x_sim.add_argument("peer", nargs="?", help="без него — что Telegram советует вам")
+    x_sim.set_defaults(func=cmd_chatx, func_name="similar")
+
+    x_ina = sub.add_parser("inactive", help="чаты, где давно тихо — кандидаты на уборку")
+    x_ina.set_defaults(func=cmd_chatx, func_name="inactive")
+
+    x_who = sub.add_parser("who-is", help="кто этот человек в этом чате")
+    x_who.add_argument("peer")
+    x_who.add_argument("who")
+    x_who.set_defaults(func=cmd_chatx, func_name="who-is")
+
+    x_spam = sub.add_parser("antispam", help="жёсткий антиспам в супергруппе (нужны бусты)")
+    x_spam.add_argument("peer")
+    x_spam.add_argument("state", choices=["on", "off"])
+    x_spam.set_defaults(func=cmd_chatx, func_name="antispam")
+
+    x_ttl = sub.add_parser("default-ttl", help="через сколько сообщения исчезают в новых чатах")
+    x_ttl.add_argument("seconds", nargs="?", type=int,
+                       help="0, 86400 (сутки), 604800 (неделя), 2678400 (месяц); без него — показать")
+    x_ttl.set_defaults(func=cmd_chatx, func_name="default-ttl")
+
     ci = sub.add_parser("channel-info", help="show channel/supergroup profile/admin metadata")
     ci.add_argument("peer")
     ci.add_argument("--raw", action="store_true")
@@ -4819,7 +5099,7 @@ async def amain() -> None:
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_calls.CallError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_pending.PendingError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
-                 tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
+                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
                  tgx_stories.StoryError,
                  tgx_transcribe.TranscribeError)
 
