@@ -1187,8 +1187,77 @@ def pay_regression() -> None:
         refused = str(exc)
     check("подписка — только за звёзды", "только за звёзды" in refused)
 
-    check("оплаты в модуле нет", not hasattr(Y.Pay, "send_payment_form")
-          and "нет оплаты" in (Y.__doc__ or ""))
+    # Оплата есть, но только за воротами подтверждения — это и проверяем.
+    check("оплата звёздами реализована", hasattr(Y.Pay, "pay_stars"))
+    check("модуль требует согласия человека", "нажал «Разрешить»" in (Y.__doc__ or ""))
+
+
+def confirm_regression() -> None:
+    """Человек в контуре: подтверждение бессмысленно, если нажать может любой
+    или если оно срабатывает дважды."""
+    import tgx_confirm as C
+
+    text = C.card("Удалить сообщения?", "Чат: тест\nСообщений: 3", "удаление необратимо")
+    check("в карточке есть заголовок", "Удалить сообщения?" in text)
+    check("в карточке есть подробности", "Сообщений: 3" in text)
+    check("в карточке есть предупреждение", "⚠️" in text and "необратимо" in text)
+    check("карточка обещает бездействие до нажатия", "не выполнится" in text)
+
+    sent = []
+
+    class Server:
+        """Отвечает как Bot API: сначала чужое нажатие, потом нужное."""
+        def __init__(self, presses):
+            self.presses, self.step = presses, 0
+
+        def __call__(self, token, method, payload):
+            sent.append((method, payload))
+            if method == "sendMessage":
+                return {"message_id": 11}
+            if method == "getUpdates":
+                if self.step >= len(self.presses):
+                    return []
+                who, data = self.presses[self.step]
+                self.step += 1
+                return [{"update_id": 100 + self.step,
+                         "callback_query": {"id": "q", "from": {"id": who}, "data": data}}]
+            return True
+
+    nonce_holder = {}
+    original = C.call
+    try:
+        server = Server([])
+        C.call = server
+        approval = C.Approval("123:AA")
+        # ключ запроса читаем из отправленной клавиатуры
+        approval.ask(1, "Проба", timeout=0.2)
+        keyboard = sent[0][1]["reply_markup"]
+        nonce_holder["n"] = keyboard.split("ok:")[1].split('"')[0]
+        check("кнопки уходят вместе с запросом", "Разрешить" in keyboard and "Отклонить" in keyboard)
+        check("без ответа — время вышло", sent[-1][0] == "editMessageText"
+              and "время вышло" in sent[-1][1]["text"])
+
+        # чужой нажал, потом свой
+        sent.clear()
+        approval2 = C.Approval("123:AA")
+        holder = {}
+
+        class Two(Server):
+            def __call__(self, token, method, payload):
+                if method == "sendMessage":
+                    holder["n"] = payload["reply_markup"].split("ok:")[1].split('"')[0]
+                    self.presses = [(999, f"ok:{holder['n']}"), (7, f"ok:{holder['n']}")]
+                return Server.__call__(self, token, method, payload)
+
+        C.call = Two([])
+        verdict = approval2.ask(1, "Проба", approver_id=7, timeout=5)
+        check("чужое нажатие не считается решением", verdict["strangers"] == [999])
+        check("решение принимает только адресат", verdict["decision"] == "approved"
+              and verdict["by"] == 7)
+        alerts = [p for m, p in sent if m == "answerCallbackQuery" and p.get("show_alert")]
+        check("чужому объясняют, почему не сработало", len(alerts) == 1)
+    finally:
+        C.call = original
 
 
 def rich_render_regression() -> None:
@@ -1463,6 +1532,7 @@ async def main() -> int:
     command_surface_regression()
     collapsed_quote_regression()
     pay_regression()
+    confirm_regression()
     await resolve_peer_regression()
     autotools_regression()
     rich_render_regression()

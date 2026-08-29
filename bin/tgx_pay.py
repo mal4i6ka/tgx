@@ -7,9 +7,11 @@
 провайдера) идут отдельным путём: инвойс со списком цен в минимальных единицах
 валюты, форма оплаты и чек.
 
-Здесь нарочно нет оплаты. Читать баланс, историю, чеки и выписывать счета —
-безопасно; нажать «заплатить» за человека нельзя, и подтверждение суммы должно
-происходить у него на экране, а не в скрипте.
+Оплата есть, но не сама по себе: `pay_stars` списывает звёзды, и вызывать её
+полагается только после того, как человек нажал «Разрешить» в Telegram — этим
+занимается `tgx_confirm`. Форма перед списанием запрашивается заново: между
+показом суммы и согласием проходит время, а платить надо ровно за то, что
+человек видел.
 """
 from __future__ import annotations
 
@@ -239,6 +241,26 @@ class Pay:
         except Exception as exc:
             raise self._explain(exc) from exc
         return exported.url
+
+    async def pay_stars(self, slug_or_link: str) -> dict[str, Any]:
+        """Оплатить счёт звёздами. Списывает деньги — вызывать только после согласия.
+
+        Форма запрашивается заново перед оплатой: между показом суммы и нажатием
+        могло пройти время, а платить надо ровно за то, что человек увидел.
+        """
+        from telethon.tl import functions, types
+
+        slug = slug_or_link.rstrip("/").split("/")[-1].lstrip("$")
+        invoice = types.InputInvoiceSlug(slug=slug)
+        try:
+            form = await self.client(functions.payments.GetPaymentFormRequest(
+                invoice=invoice, theme_params=None))
+            result = await self.client(functions.payments.SendStarsFormRequest(
+                form_id=form.form_id, invoice=invoice))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        return {"оплачено": True, "форма": form.form_id,
+                "результат": type(result).__name__}
 
     async def gift_options(self, user: Any) -> list[dict[str, Any]]:
         """Во что обойдётся подарить звёзды этому человеку."""

@@ -27,6 +27,7 @@ import tgx_article
 import tgx_banner
 import tgx_bots
 import tgx_business
+import tgx_confirm
 import tgx_format
 import tgx_forum
 import tgx_guard
@@ -492,6 +493,39 @@ async def uploaded_chat_photo(client: TelegramClient, file_path: str) -> Any:
     return types.InputChatUploadedPhoto(file=uploaded)
 
 
+async def ask_human(client: Any, bot_name: str, who: str, title: str,
+                    details: str = "", danger: str = "", timeout: float = 300.0) -> dict[str, Any]:
+    """Спросить человека кнопкой в Telegram и дождаться ответа.
+
+    Общая дверь для всего опасного: команда описывает, что собирается сделать,
+    и не делает этого, пока не придёт разрешение от нужного человека.
+    """
+    bot = tgx_bots.Registry().get(bot_name)
+    if not bot.token:
+        raise tgx_confirm.ConfirmError(f"у @{bot.username} нет токена — "
+                                       f"`tgx bot token @{bot.username}`")
+    target = await resolve_peer(client, who)
+    approver = getattr(target, "id", None)
+    approval = tgx_confirm.Approval(bot.token)
+    return await asyncio.to_thread(
+        lambda: approval.ask(approver, title, details, danger=danger,
+                             approver_id=approver, timeout=timeout))
+
+
+async def cmd_confirm(args: argparse.Namespace) -> None:
+    """Спросить человека кнопкой и вернуть его решение."""
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        result = await ask_human(client, args.bot, args.to, args.title,
+                                 args.details or "", args.danger or "", args.timeout)
+        render.emit(result)
+        if result["decision"] != "approved":
+            raise SystemExit(2)          # чтобы сценарий мог остановиться сам
+    finally:
+        await client.disconnect()
+
+
 async def cmd_pay(args: argparse.Namespace) -> None:
     """Звёзды, TON и обычные счета. Оплаты здесь нет — только чтение и выписка."""
     client = await make_client()
@@ -552,6 +586,26 @@ async def cmd_pay(args: argparse.Namespace) -> None:
                     subscription_period=args.subscription))
             render.emit({"ok": True, "ссылка": url, "валюта": args.currency.upper(),
                          "итого": sum(v for _, v in prices)})
+            return
+
+        if args.paycmd == "send":
+            form = await pay.form(args.link)
+            total, currency = form.get("итого"), form.get("валюта")
+            if currency != "XTR":
+                raise tgx_pay.PayError(
+                    f"оплатить отсюда можно только звёздами, а счёт в {currency}. "
+                    f"Карты требуют платёжных данных — их вводят на своём экране")
+            details = (f"{form.get('название') or 'счёт'}\n"
+                       f"Сумма: {total} ⭐\n"
+                       f"Кому: {args.link}")
+            verdict = await ask_human(
+                client, args.bot, args.confirm_to, "Оплатить счёт?",
+                details, danger=f"со счёта спишется {total} звёзд, вернуть их нельзя",
+                timeout=args.timeout)
+            if verdict["decision"] != "approved":
+                render.emit({"ok": False, "оплата": "не выполнена", **verdict})
+                raise SystemExit(2)
+            render.emit({"ok": True, **await pay.pay_stars(args.link), "подтвердил": verdict["by"]})
             return
 
         if args.paycmd == "gift-options":
@@ -650,6 +704,14 @@ async def cmd_guard(args: argparse.Namespace) -> None:
             return
 
         if args.guardcmd == "check":
+            if args.confirm_to and not args.no_kick:
+                verdict = await ask_human(
+                    client, args.bot, args.confirm_to, "Удалить чужих из чата?",
+                    f"Чат: {entity_title(peer)}\nБудут удалены те, кто вошёл не по своей ссылке",
+                    danger="удаление участника необратимо", timeout=args.timeout)
+                if verdict["decision"] != "approved":
+                    render.emit({"ok": False, "проверка": "отменена", **verdict})
+                    raise SystemExit(2)
             report = await guard.check(peer, kick=not args.no_kick)
             trouble = [r for r in report if r["status"] == "нарушена"]
             if args.jsonl:
@@ -1822,6 +1884,16 @@ async def cmd_delete(args: argparse.Namespace) -> None:
     client = await make_client()
     try:
         await ensure_login(client)
+        if args.confirm_to:
+            peer_name = args.peer
+            verdict = await ask_human(
+                client, args.bot, args.confirm_to, "Удалить сообщения?",
+                f"Чат: {peer_name}\nСообщений: {len(args.id)}",
+                danger="удаление необратимо" + (" и затронет всех" if not args.only_me else ""),
+                timeout=args.timeout)
+            if verdict["decision"] != "approved":
+                render.emit({"ok": False, "удаление": "отменено", **verdict})
+                raise SystemExit(2)
         peer = await resolve_peer(client, args.peer)
         if not args.yes:
             raise SystemExit("удаление необратимо: добавьте --yes, если уверены")
@@ -2277,7 +2349,7 @@ GROUPS = [
     ("интерфейс", ["ui", "banner"]),
     ("боты и статьи", ["bot", "article", "business"]),
     ("форумы", ["forum", "guard", "poll", "boosts"]),
-    ("платежи", ["pay"]),
+    ("платежи", ["pay", "confirm"]),
     ("голос", ["transcribe"]),
     ("аккаунт", ["auth", "me", "profile", "profile-get", "profile-edit", "profile-photo-set", "profile-photos", "profile-photo-delete"]),
     ("чаты и папки", ["dialogs", "folders", "folder-upsert"]),
@@ -2591,7 +2663,17 @@ def build_parser() -> argparse.ArgumentParser:
     fu.add_argument("--exclude", action="append", help="id, username, or exact title to exclude from --match-regex; can be repeated")
     fu.set_defaults(func=cmd_folder_upsert)
 
-    pay = sub.add_parser("pay", help="звёзды, TON и счета — чтение и выписка, без оплаты")
+    cf = sub.add_parser("confirm", help="спросить человека кнопкой в Telegram и дождаться ответа")
+    cf.add_argument("title", help="что собираемся сделать")
+    cf.add_argument("--details", help="подробности: суммы, имена, количество")
+    cf.add_argument("--danger", help="чем это необратимо")
+    cf.add_argument("--to", required=True, help="кого спрашиваем")
+    cf.add_argument("--as", dest="bot", required=True, help="бот, который спросит")
+    cf.add_argument("--timeout", type=float, default=tgx_confirm.DEFAULT_TIMEOUT,
+                    help="сколько ждать ответа, секунд")
+    cf.set_defaults(func=cmd_confirm)
+
+    pay = sub.add_parser("pay", help="звёзды, TON и счета; оплата — только с подтверждением")
     pay_sub = pay.add_subparsers(dest="paycmd", required=True)
     pay.set_defaults(func=cmd_pay)
 
@@ -2628,6 +2710,12 @@ def build_parser() -> argparse.ArgumentParser:
     y_inv.add_argument("--need-phone", action="store_true")
     y_inv.add_argument("--need-email", action="store_true")
     y_inv.add_argument("--need-address", action="store_true")
+
+    y_send = pay_sub.add_parser("send", help="оплатить счёт звёздами — только с подтверждением")
+    y_send.add_argument("link", help="ссылка-счёт")
+    y_send.add_argument("--as", dest="bot", required=True, help="бот, который спросит разрешение")
+    y_send.add_argument("--confirm-to", required=True, help="кто подтверждает списание")
+    y_send.add_argument("--timeout", type=float, default=300.0, help="сколько ждать согласия")
 
     y_gift = pay_sub.add_parser("gift-options", help="во что обойдётся подарить звёзды")
     y_gift.add_argument("user")
@@ -2692,6 +2780,9 @@ def build_parser() -> argparse.ArgumentParser:
     g_chk.add_argument("chat")
     g_chk.add_argument("--no-kick", action="store_true", help="только показать, никого не трогать")
     g_chk.add_argument("--jsonl", action="store_true")
+    g_chk.add_argument("--confirm-to", help="спросить человека перед удалением")
+    g_chk.add_argument("--as", dest="bot", help="бот, который спросит")
+    g_chk.add_argument("--timeout", type=float, default=300.0)
 
     g_rev = gd_sub.add_parser("revoke", help="отозвать ссылку")
     g_rev.add_argument("chat")
@@ -3107,6 +3198,9 @@ def build_parser() -> argparse.ArgumentParser:
     dl.add_argument("id", type=int, nargs="+")
     dl.add_argument("--yes", action="store_true", help="подтвердить удаление")
     dl.add_argument("--only-me", action="store_true", help="удалить только у себя")
+    dl.add_argument("--confirm-to", help="спросить человека кнопкой перед удалением")
+    dl.add_argument("--as", dest="bot", help="бот, который спросит")
+    dl.add_argument("--timeout", type=float, default=300.0)
     dl.set_defaults(func=cmd_delete)
 
     h = sub.add_parser("history", help="show messages from a peer")
@@ -3211,7 +3305,7 @@ async def amain() -> None:
 
 # Errors these modules raise are already written for a person to read; a stack
 # trace on top of them only hides the sentence that explains what to do.
-SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError,
+SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_confirm.ConfirmError,
                  tgx_banner.BannerError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
                  tgx_rich.RichError, tgx_transcribe.TranscribeError)
