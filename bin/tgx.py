@@ -56,6 +56,8 @@ import tgx_triage
 import tgx_stickers
 import tgx_stories
 
+VERSION = "1.0.0"
+
 BASE = Path(os.environ.get("TGX_HOME", Path.home() / "telegram-cli-tools"))
 DATA = BASE / "data"
 SESSION = DATA / "tgx.session"
@@ -3751,6 +3753,7 @@ def parse_search_date(value: str) -> datetime | None:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Telethon-based Telegram CLI + TUI")
+    p.add_argument("--version", action="version", version=f"tgx {VERSION}")
     p.add_argument("--plain", action="store_true", help="disable colour/boxes; emit machine-readable output")
     sub = p.add_subparsers(dest="cmd")
 
