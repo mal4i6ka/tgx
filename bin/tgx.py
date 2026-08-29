@@ -27,6 +27,8 @@ import tgx_article
 import tgx_banner
 import tgx_bots
 import tgx_business
+import tgx_calls
+import tgx_callweb
 import tgx_confirm
 import tgx_contacts
 import tgx_folders
@@ -568,6 +570,89 @@ def read_secret(prompt: str, env: str = "") -> str:
             f"нужен ввод секрета, а терминала нет. Запустите команду в терминале "
             f"или передайте значение через переменную {env or 'окружения'}")
     return getpass.getpass(prompt)
+
+
+async def cmd_call(args: argparse.Namespace) -> None:
+    """Групповые звонки: управление из терминала, звук — в приложении."""
+    client = await make_client()
+    board = None
+    try:
+        await ensure_login(client)
+        calls = tgx_calls.Calls(client)
+        chat = await resolve_peer(client, args.chat)
+        cmd = args.callcmd
+
+        if cmd == "participants":
+            rows = await calls.participants(chat, args.limit)
+            print_jsonl(rows) if args.jsonl else print_table(
+                rows, ["кто", "заглушён", "рука поднята", "видео", "громкость"],
+                title="в звонке")
+            return
+
+        if cmd == "join-as":
+            rows = await calls.join_as(chat)
+            print_jsonl(rows) if args.jsonl else print_table(rows, ["имя", "id"],
+                                                            title="войти можно как")
+            return
+
+        if cmd == "watch":
+            # Живая картина участников: терминалу такое перерисовывать нечем.
+            # Ссылка есть не у всякого звонка — у приватного чата её не бывает,
+            # и это не повод не показывать участников.
+            try:
+                link = (await calls.link(chat)).get("ссылка") or ""
+            except tgx_calls.CallError:
+                link = "звонок приватный — зовите по одному"
+            board = tgx_callweb.Dashboard(
+                title=f"Звонок · {entity_title(chat)}", link=link,
+                source=lambda: getattr(cmd_call, "_people", []))
+            url = board.start()
+            render.emit({"страница": url, "звук": link or "ссылку выдаёт админ",
+                         "остановить": "Ctrl+C"})
+            render.flush()
+            if args.open:
+                import webbrowser
+
+                webbrowser.open(url)
+            while True:
+                cmd_call._people = await calls.participants(chat, 100)
+                await asyncio.sleep(args.every)
+
+        simple = {
+            "info": lambda: calls.info(chat),
+            "start": lambda: calls.start(chat, title=args.title or "", rtmp=args.rtmp),
+            "link": lambda: calls.link(chat, speaker=args.speaker),
+            "invite": lambda: calls.invite(chat, args.user),
+            "mute": lambda: calls.mute(chat, args.user, not args.unmute, volume=args.volume),
+            "hand": lambda: calls.raise_hand(chat, not args.down),
+            "title": lambda: calls.title(chat, args.text),
+            "record": lambda: calls.record(chat, start=not args.stop, title=args.title or "",
+                                           video=args.video, portrait=args.portrait),
+            "settings": lambda: calls.settings(
+                chat, join_muted=bool_from_arg(args.join_muted) if args.join_muted else None,
+                messages=bool_from_arg(args.messages) if args.messages else None,
+                reset_link=args.reset_link),
+            "say": lambda: calls.say(chat, args.text),
+            "stream-url": lambda: calls.stream_url(chat, revoke=args.revoke),
+            "start-scheduled": lambda: calls.start_scheduled(chat),
+            "stars": lambda: calls.stars(chat),
+        }
+        if cmd in simple:
+            render.emit({"ok": True, **await simple[cmd]()})
+            return
+
+        if cmd == "end":
+            v = await gated_or_die(client, args, "Завершить звонок?",
+                                   f"Чат: {entity_title(chat)}",
+                                   "звонок закончится у всех участников")
+            render.emit({"ok": True, **await calls.end(chat), "подтвердил": v["by"]})
+            return
+    except KeyboardInterrupt:
+        render.emit({"наблюдение": "остановлено"})
+    finally:
+        if board is not None:
+            board.stop()
+        await client.disconnect()
 
 
 async def cmd_security(args: argparse.Namespace) -> None:
@@ -3086,6 +3171,7 @@ GROUPS = [
     ("платежи", ["pay", "confirm"]),
     ("голос", ["transcribe"]),
     ("люди", ["contacts", "stories"]),
+    ("звонки", ["call"]),
     ("безопасность", ["security"]),
     ("аккаунт", ["auth", "me", "profile", "profile-get", "profile-edit", "profile-photo-set", "profile-photos", "profile-photo-delete"]),
     ("чаты и папки", ["dialogs", "folders", "folder-upsert"]),
@@ -3409,6 +3495,73 @@ def build_parser() -> argparse.ArgumentParser:
     cf.add_argument("--timeout", type=float, default=tgx_confirm.DEFAULT_TIMEOUT,
                     help="сколько ждать ответа, секунд")
     cf.set_defaults(func=cmd_confirm)
+
+    cl = sub.add_parser("call", help="групповые звонки: управление и живая страница")
+    cl_sub = cl.add_subparsers(dest="callcmd", required=True)
+    cl.set_defaults(func=cmd_call)
+
+    def call_cmd(name: str, help_text: str) -> Any:
+        parser = cl_sub.add_parser(name, help=help_text)
+        parser.add_argument("chat")
+        return parser
+
+    c_st = call_cmd("start", "начать голосовой чат")
+    c_st.add_argument("--title")
+    c_st.add_argument("--rtmp", action="store_true", help="под трансляцию")
+
+    call_cmd("info", "что происходит в звонке")
+    call_cmd("start-scheduled", "начать назначенный звонок")
+    call_cmd("stars", "сколько звёзд собрал звонок")
+
+    c_pt = call_cmd("participants", "кто сейчас в звонке")
+    c_pt.add_argument("--limit", type=int, default=50)
+    c_pt.add_argument("--jsonl", action="store_true")
+
+    c_ja = call_cmd("join-as", "от чьего имени можно войти")
+    c_ja.add_argument("--jsonl", action="store_true")
+
+    c_ln = call_cmd("link", "ссылка на звонок")
+    c_ln.add_argument("--speaker", action="store_true", help="с правом говорить")
+
+    c_iv = call_cmd("invite", "позвать в звонок")
+    c_iv.add_argument("user", nargs="+")
+
+    c_mt = call_cmd("mute", "заглушить участника")
+    c_mt.add_argument("user")
+    c_mt.add_argument("--unmute", action="store_true", help="вернуть слово")
+    c_mt.add_argument("--volume", type=int, help="громкость, 0–200")
+
+    c_hd = call_cmd("hand", "поднять руку")
+    c_hd.add_argument("--down", action="store_true", help="опустить")
+
+    c_ti = call_cmd("title", "переименовать звонок")
+    c_ti.add_argument("text")
+
+    c_rc = call_cmd("record", "запись звонка")
+    c_rc.add_argument("--stop", action="store_true", help="остановить запись")
+    c_rc.add_argument("--title")
+    c_rc.add_argument("--video", action="store_true")
+    c_rc.add_argument("--portrait", action="store_true", help="вертикальное видео")
+
+    c_se = call_cmd("settings", "настройки звонка")
+    c_se.add_argument("--join-muted", help="входят заглушёнными: on|off")
+    c_se.add_argument("--messages", help="чат внутри звонка: on|off")
+    c_se.add_argument("--reset-link", action="store_true", help="обновить ссылку")
+
+    c_sy = call_cmd("say", "написать в чат звонка")
+    c_sy.add_argument("text")
+
+    c_su = call_cmd("stream-url", "адрес и ключ для трансляции")
+    c_su.add_argument("--revoke", action="store_true", help="сменить ключ")
+
+    c_wt = call_cmd("watch", "живая страница участников (Ctrl+C — остановить)")
+    c_wt.add_argument("--every", type=float, default=2.0, help="как часто опрашивать, секунд")
+    c_wt.add_argument("--open", action="store_true", help="открыть в браузере сразу")
+
+    c_en = call_cmd("end", "завершить звонок (требует подтверждения)")
+    c_en.add_argument("--confirm-to")
+    c_en.add_argument("--as", dest="bot")
+    c_en.add_argument("--timeout", type=float, default=300.0)
 
     sec = sub.add_parser("security", help="сессии, приватность, сроки")
     sec_sub = sec.add_subparsers(dest="seccmd", required=True)
@@ -4663,7 +4816,7 @@ async def amain() -> None:
 
 # Errors these modules raise are already written for a person to read; a stack
 # trace on top of them only hides the sentence that explains what to do.
-SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
+SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_calls.CallError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_pending.PendingError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
                  tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,

@@ -1681,6 +1681,49 @@ def security_regression() -> None:
     check("основа идёт первой", len(S.rules("nobody", deny=[1])) == 2)
 
 
+def calls_regression() -> None:
+    """Звук в звонке идёт по WebRTC, и его из терминала не сыграть. Проверяем то,
+    что вокруг: разбор участников и страницу, которая их показывает."""
+    import tgx_calls as C
+    import tgx_callweb as W
+
+    class Thing:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    names = {7: "Роман"}
+    speaking = C.participant_row(Thing(peer=Thing(user_id=7), muted=False, video=None,
+                                       volume=15000, raise_hand_rating=None), names)
+    check("имя подставляется из справочника", speaking["кто"] == "Роман")
+    check("говорящий не заглушён", speaking["заглушён"] is False)
+    check("громкость приводится к процентам", speaking["громкость"] == 150)
+
+    hand = C.participant_row(Thing(peer=Thing(user_id=7), muted=True,
+                                   raise_hand_rating=5, volume=None), names)
+    check("поднятая рука видна", hand["рука поднята"] is True)
+    check("громкость по умолчанию — сто процентов", hand["громкость"] == 100)
+    unknown = C.participant_row(Thing(peer=Thing(user_id=999), muted=True), {})
+    check("незнакомый участник показывается номером", unknown["кто"] == 999)
+
+    # Страница: сервер отдаёт и разметку, и данные, и живёт только на 127.0.0.1
+    people = [{"кто": "Роман", "заглушён": False, "рука поднята": True, "видео": False}]
+    board = W.Dashboard("Проверка", "ссылка", lambda: people)
+    url = board.start()
+    try:
+        check("страница поднялась на локальном адресе", url.startswith("http://127.0.0.1:"))
+        import urllib.request
+
+        page = urllib.request.urlopen(url, timeout=5).read().decode()
+        check("в разметке есть заголовок звонка", "Проверка" in page)
+        check("и объяснение про звук", "Telegram" in page)
+        data = json.loads(urllib.request.urlopen(url + "data", timeout=5).read().decode())
+        check("данные отдаются страницей", data["count"] == 1)
+        check("участник переведён для страницы", data["people"][0]["who"] == "Роман")
+        check("поднятая рука доезжает", data["people"][0]["hand"] is True)
+    finally:
+        board.stop()
+
+
 def rich_render_regression() -> None:
     """A received rich message is an Instant-View block tree — it has to become
     readable terminal text, not a bare "unsupported media" chip."""
@@ -1952,6 +1995,7 @@ async def main() -> int:
     stickers_stats_regression()
     await pending_regression()
     security_regression()
+    calls_regression()
     multipart_regression()
     rich_blocks_regression()
     poll_regression()
