@@ -1758,6 +1758,70 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+async def digest_regression() -> None:
+    """Сводка по чату: длинное пересказать, короткое взять как есть. Лишний
+    вызов к серверу за пересказом двух слов — это время и лимит частоты."""
+    import tgx_ai as A
+
+    class Msg:
+        def __init__(self, mid, text):
+            self.id, self.text, self.sender_id, self.sender = mid, text, 7, None
+
+    calls = []
+
+    class FakeReader(A.Reader):
+        def __init__(self):
+            pass
+
+        async def summarize(self, peer, message_id, *, lang="", tone=""):
+            calls.append(message_id)
+            return {"пересказ": f"кратко про {message_id}"}
+
+    long_text = "слово " * 100
+    messages = [Msg(1, long_text), Msg(2, "ага"), Msg(3, ""), Msg(4, long_text)]
+    out = await FakeReader().digest(None, messages, long_at=400)
+
+    check("пустое сообщение в сводку не идёт", out["сообщений"] == 3)
+    check("пересказаны только длинные", out["пересказано"] == 2)
+    check("к серверу ходили только за длинными", calls == [1, 4])
+    check("короткое осталось текстом", out["лента"][1]["текст"] == "ага")
+    check("длинное стало пересказом", "кратко про 1" in out["лента"][0]["пересказ"])
+
+    # если сервер не смог — это видно в ленте, а не роняет всю сводку
+    class Broken(FakeReader):
+        async def summarize(self, peer, message_id, *, lang="", tone=""):
+            raise A.AIError("сервер отказался")
+
+    hurt = await Broken().digest(None, [Msg(1, long_text)], long_at=400)
+    check("отказ сервера не роняет сводку", hurt["сообщений"] == 1)
+    check("и виден на своём месте", "сервер отказался" in hurt["лента"][0]["пересказ"])
+
+
+def triage_regression() -> None:
+    """Непрочитанное разбираем числами: в терминале нет бокового зрения."""
+    import tgx_triage as T
+
+    class Thing:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    long_body = "а" * 300
+    brief = T.Triage._brief(Thing(id=5, message=long_body, date=1786542005,
+                                  from_id=Thing(user_id=7)))
+    check("длинный текст обрезается", len(brief["текст"]) == 161)
+    check("и обрыв помечен многоточием", brief["текст"].endswith("…"))
+    check("отправитель вынут из вложенного поля", brief["от"] == 7)
+    check("число разворачивается в дату", brief["когда"].startswith("2026-08-12"))
+
+    short = T.Triage._brief(Thing(id=6, message="  две\nстроки  ", date=None, from_id=None))
+    check("перевод строки не ломает строку ленты", short["текст"] == "две строки")
+    check("отсутствие даты — это отсутствие", short["когда"] is None)
+
+    check("считаем десять видов вложений", len(T.COUNTED) == 10)
+    check("скрытое время прочтения объяснено как взаимное",
+          "взаимно" in T.HINTS["USER_PRIVACY_RESTRICTED"])
+
+
 def takeout_regression() -> None:
     """Выгрузка спотыкается о пустой признак в сессии: b'' — это не None, и
     Telethon считает, что выгрузка идёт, а сервер такое даже не упакует.
@@ -2095,6 +2159,8 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    await digest_regression()
+    triage_regression()
     takeout_regression()
     chatx_regression()
     direct_bot_regression()

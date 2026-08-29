@@ -22,6 +22,9 @@ class AIError(RuntimeError):
 
 
 HINTS = {
+    "MSG_ID_INVALID": "такого сообщения в этом чате нет",
+    "INPUT_TEXT_EMPTY": "нечего переводить",
+    "TRANSLATE_REQ_INVALID": "перевод здесь недоступен",
     "AI_COMPOSE_UNAVAILABLE": "правка текста недоступна на этом аккаунте",
     "PREMIUM_ACCOUNT_REQUIRED": "нужен Telegram Premium",
     "MESSAGE_EMPTY": "нечего править — текст пустой",
@@ -120,6 +123,82 @@ class Compose:
             answer["правки"] = marked
             answer["подробно"] = rows
         return answer
+
+
+class Reader:
+    """Пересказ и перевод — то, чем сервер помогает разгребать чужие тексты."""
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    async def _call(self, request: Any) -> Any:
+        try:
+            return await self.client(request)
+        except Exception as exc:
+            raise _explain(exc) from exc
+
+    async def summarize(self, peer: Any, message_id: int, *, lang: str = "",
+                        tone: str = "") -> dict[str, Any]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.SummarizeTextRequest(
+            peer=peer, id=message_id, to_lang=lang or None, tone=tone or None))
+        return {"сообщение": message_id, "пересказ": getattr(result, "text", "") or ""}
+
+    async def translate(self, to_lang: str, *, peer: Any = None,
+                        ids: list[int] | None = None, text: str = "",
+                        tone: str = "") -> list[dict[str, Any]]:
+        """Перевести свой текст или чужие сообщения — сервер умеет и так, и так."""
+        from telethon.tl import functions, types
+
+        pieces = [types.TextWithEntities(text=text, entities=[])] if text else None
+        result = await self._call(functions.messages.TranslateTextRequest(
+            to_lang=to_lang, peer=peer if ids else None, id=ids or None,
+            text=pieces, tone=tone or None))
+        out = getattr(result, "result", None) or []
+        rows = [{"перевод": getattr(t, "text", "") or ""} for t in out]
+        for index, row in enumerate(rows):
+            if ids and index < len(ids):
+                row["сообщение"] = ids[index]
+        return rows
+
+    async def auto_translate(self, peer: Any, on: bool) -> dict[str, Any]:
+        """Полоска «перевести» в этом чате."""
+        from telethon.tl import functions
+
+        await self._call(functions.messages.TogglePeerTranslationsRequest(
+            peer=peer, disabled=None if on else True))
+        return {"перевод в чате": "включён" if on else "выключен"}
+
+    async def digest(self, peer: Any, messages: list[Any], *, lang: str = "",
+                     long_at: int = 400) -> dict[str, Any]:
+        """Сводка по чату: длинное пересказать, короткое взять как есть.
+
+        Сервер пересказывает по одному сообщению, поэтому сводку собираем сами.
+        Короткие сообщения пересказывать незачем — они и так короткие, а лишний
+        вызов стоит времени и попадает под ограничение частоты.
+        """
+        rows: list[dict[str, Any]] = []
+        for message in messages:
+            body = (getattr(message, "text", "") or "").strip()
+            if not body:
+                continue
+            row: dict[str, Any] = {
+                "id": message.id,
+                "от": getattr(getattr(message, "sender", None), "username", None)
+                     or getattr(message, "sender_id", None)}
+            if len(body) >= long_at:
+                try:
+                    told = await self.summarize(peer, message.id, lang=lang)
+                    row["пересказ"] = told["пересказ"]
+                except AIError as exc:
+                    row["пересказ"] = f"не вышло: {exc}"
+            else:
+                row["текст"] = body
+            rows.append(row)
+        return {"сообщений": len(rows),
+                "пересказано": sum(1 for r in rows if "пересказ" in r),
+                "лента": rows}
 
 
 class Tones:

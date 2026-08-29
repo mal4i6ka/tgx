@@ -49,6 +49,7 @@ import tgx_security
 import tgx_splash
 import tgx_stats
 import tgx_takeout
+import tgx_triage
 import tgx_stickers
 import tgx_stories
 
@@ -2746,6 +2747,33 @@ async def _with_bot(username: str, action: Any) -> Any:
 async def cmd_ai(args: argparse.Namespace) -> None:
     command = args.aicmd
 
+    if command in {"summarize", "translate", "auto-translate", "digest"}:
+        client = await make_client()
+        try:
+            await ensure_login(client)
+            reader = tgx_ai.Reader(client)
+            peer = await resolve_peer(client, args.peer) if getattr(args, "peer", None) else None
+
+            if command == "summarize":
+                render.emit(await reader.summarize(
+                    peer, args.id, lang=args.lang or "", tone=args.tone or ""))
+            elif command == "translate":
+                render.emit({"переводы": await reader.translate(
+                    args.lang, peer=peer, ids=args.id or None,
+                    text=args.text or "", tone=args.tone or "")})
+            elif command == "auto-translate":
+                render.emit(await reader.auto_translate(peer, args.state == "on"))
+            else:
+                messages = []
+                async for message in client.iter_messages(peer, limit=args.limit):
+                    messages.append(message)
+                messages.reverse()  # читаем сверху вниз, как человек
+                render.emit(await reader.digest(
+                    peer, messages, lang=args.lang or "", long_at=args.long_at))
+        finally:
+            await client.disconnect()
+        return
+
     if command == "compose":
         text = args.text
         if Path(text).expanduser().is_file():
@@ -2794,6 +2822,46 @@ async def cmd_ai(args: argparse.Namespace) -> None:
                            "тон исчезнет у всех, кто его установил", danger=True)
         render.emit(await _with_user(lambda c: tgx_ai.Tones(c).delete(args.tone)))
         return
+
+
+async def cmd_triage(args: argparse.Namespace) -> None:
+    """Что ждёт вашего внимания в чате."""
+    command = args.func_name
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        triage = tgx_triage.Triage(client)
+        peer = await resolve_peer(client, args.peer) if getattr(args, "peer", None) else None
+        topic = getattr(args, "topic", 0) or 0
+
+        if command == "mentions":
+            render.emit({"упоминания": await triage.mentions(
+                peer, limit=args.limit, topic=topic)})
+        elif command == "my-reactions":
+            render.emit({"реакции": await triage.reactions(
+                peer, limit=args.limit, topic=topic)})
+        elif command == "triage-clear":
+            render.emit(await triage.clear(peer, what=args.what, topic=topic))
+        elif command == "read-by":
+            render.emit(await triage.read_by(peer, args.id))
+        elif command == "read-at":
+            render.emit(await triage.read_at(peer, args.id))
+        elif command == "views":
+            render.emit({"просмотры": await triage.views(peer, args.id)})
+        elif command == "chat-counts":
+            render.emit(await triage.counts(peer, topic=topic))
+        elif command == "online":
+            render.emit(await triage.online(peer))
+        elif command == "mark-unread":
+            render.emit(await triage.mark_unread(peer, args.state == "on"))
+        elif command == "marked-unread":
+            render.emit({"помечены": await triage.marked()})
+        elif command == "pin-chat":
+            render.emit(await triage.pin_dialog(peer, args.state == "on"))
+        elif command == "no-forwards":
+            render.emit(await triage.no_forwards(peer, args.state == "on"))
+    finally:
+        await client.disconnect()
 
 
 async def cmd_takeout(args: argparse.Namespace) -> None:
@@ -3428,6 +3496,30 @@ def build_parser() -> argparse.ArgumentParser:
     a_comp.add_argument("--translate", help="перевести: код языка, например en")
     a_comp.add_argument("--tone", help=f"тон: {', '.join(tgx_ai.BUILT_IN)} или свой")
     a_comp.add_argument("--apply", help="сразу отправить готовый текст в этот чат")
+
+    a_sum = ai_sub.add_parser("summarize", help="пересказать длинное сообщение")
+    a_sum.add_argument("peer")
+    a_sum.add_argument("id", type=int)
+    a_sum.add_argument("--lang", help="пересказать на этом языке")
+    a_sum.add_argument("--tone", help="каким тоном пересказывать")
+
+    a_tr = ai_sub.add_parser("translate", help="перевести свой текст или чужие сообщения")
+    a_tr.add_argument("lang", help="на какой язык: en, ru, de…")
+    a_tr.add_argument("--text", help="свой текст")
+    a_tr.add_argument("--peer", help="чат, если переводим сообщения")
+    a_tr.add_argument("--id", type=int, action="append", help="какие сообщения; можно несколько")
+    a_tr.add_argument("--tone", help="каким тоном переводить")
+
+    a_at = ai_sub.add_parser("auto-translate", help="полоска «перевести» в чате")
+    a_at.add_argument("peer")
+    a_at.add_argument("state", choices=["on", "off"])
+
+    a_dg = ai_sub.add_parser("digest", help="сводка по чату: что там было, коротко")
+    a_dg.add_argument("peer")
+    a_dg.add_argument("--limit", type=int, default=20, help="сколько сообщений просмотреть")
+    a_dg.add_argument("--lang", help="сводку на этом языке")
+    a_dg.add_argument("--long-at", type=int, default=400,
+                      help="с какой длины сообщение считается длинным")
 
     ai_sub.add_parser("tones", help="какие тоны доступны")
 
@@ -4796,6 +4888,62 @@ def build_parser() -> argparse.ArgumentParser:
     cl.add_argument("--yes", action="store_true")
     cl.set_defaults(func=cmd_chat_leave)
 
+    for name, help_text in (("mentions", "где вас звали и вы ещё не видели"),
+                            ("my-reactions", "на что вам отреагировали")):
+        parser = sub.add_parser(name, help=help_text)
+        parser.add_argument("peer")
+        parser.add_argument("--limit", type=int, default=30)
+        parser.add_argument("--topic", type=int, help="только в этой теме форума")
+        parser.set_defaults(func=cmd_triage, func_name=name)
+
+    g_clr = sub.add_parser("triage-clear", help="пометить упоминания и реакции просмотренными")
+    g_clr.add_argument("peer")
+    g_clr.add_argument("--what", default="both", choices=["both", "mentions", "reactions"])
+    g_clr.add_argument("--topic", type=int)
+    g_clr.set_defaults(func=cmd_triage, func_name="triage-clear")
+
+    g_rb = sub.add_parser("read-by", help="кто прочитал сообщение в группе")
+    g_rb.add_argument("peer")
+    g_rb.add_argument("id", type=int)
+    g_rb.set_defaults(func=cmd_triage, func_name="read-by")
+
+    g_ra = sub.add_parser("read-at", help="когда прочитали ваше сообщение в личке")
+    g_ra.add_argument("peer")
+    g_ra.add_argument("id", type=int)
+    g_ra.set_defaults(func=cmd_triage, func_name="read-at")
+
+    g_vw = sub.add_parser("views", help="просмотры и пересылки постов")
+    g_vw.add_argument("peer")
+    g_vw.add_argument("id", type=int, nargs="+")
+    g_vw.set_defaults(func=cmd_triage, func_name="views")
+
+    g_cc = sub.add_parser("chat-counts", help="чем набит чат: фото, видео, ссылки, файлы")
+    g_cc.add_argument("peer")
+    g_cc.add_argument("--topic", type=int)
+    g_cc.set_defaults(func=cmd_triage, func_name="chat-counts")
+
+    g_on = sub.add_parser("online", help="сколько человек сейчас в чате")
+    g_on.add_argument("peer")
+    g_on.set_defaults(func=cmd_triage, func_name="online")
+
+    g_mu = sub.add_parser("mark-unread", help="вернуть чату жирную точку")
+    g_mu.add_argument("peer")
+    g_mu.add_argument("state", nargs="?", default="on", choices=["on", "off"])
+    g_mu.set_defaults(func=cmd_triage, func_name="mark-unread")
+
+    g_mk = sub.add_parser("marked-unread", help="какие чаты помечены непрочитанными")
+    g_mk.set_defaults(func=cmd_triage, func_name="marked-unread")
+
+    g_pc = sub.add_parser("pin-chat", help="закрепить чат в списке (не сообщение)")
+    g_pc.add_argument("peer")
+    g_pc.add_argument("state", nargs="?", default="on", choices=["on", "off"])
+    g_pc.set_defaults(func=cmd_triage, func_name="pin-chat")
+
+    g_nf = sub.add_parser("no-forwards", help="запретить пересылку и копирование из чата")
+    g_nf.add_argument("peer")
+    g_nf.add_argument("state", choices=["on", "off"])
+    g_nf.set_defaults(func=cmd_triage, func_name="no-forwards")
+
     tk = sub.add_parser("takeout", help="выгрузить аккаунт на диск: контакты, чаты, история")
     tk.add_argument("out", help="папка для выгрузки")
     tk.add_argument("--chat", action="append",
@@ -5099,7 +5247,7 @@ async def amain() -> None:
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_calls.CallError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_pending.PendingError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
-                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
+                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
                  tgx_stories.StoryError,
                  tgx_transcribe.TranscribeError)
 
