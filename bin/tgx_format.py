@@ -132,6 +132,32 @@ def unparse(text: str, entities: Sequence[Any] | None, mode: str = "md") -> str:
 
 
 # ── rendering ────────────────────────────────────────────────────────────────
+def describe_date(entity: Any) -> str:
+    """`MessageEntityFormattedDate` → строка по флагам, которые выбрал автор.
+
+    Флаги независимы: можно попросить и дату, и время, и день недели сразу.
+    Если не выбрано ничего, показываем дату и короткое время.
+    """
+    moment = getattr(entity, "date", None)
+    if moment is None:
+        return ""
+    if getattr(entity, "relative", False):
+        return moment.strftime("%d.%m.%Y %H:%M")      # относительное считает клиент
+    parts = []
+    if getattr(entity, "day_of_week", False):
+        parts.append(("пн", "вт", "ср", "чт", "пт", "сб", "вс")[moment.weekday()])
+    if getattr(entity, "long_date", False):
+        parts.append(moment.strftime("%d %B %Y"))
+    elif getattr(entity, "short_date", False):
+        parts.append(moment.strftime("%d.%m.%Y"))
+    if getattr(entity, "long_time", False):
+        parts.append(moment.strftime("%H:%M:%S"))
+    elif getattr(entity, "short_time", False):
+        parts.append(moment.strftime("%H:%M"))
+    return " ".join(parts) or moment.strftime("%d.%m.%Y %H:%M")
+
+
+
 STYLES = {
     "MessageEntityBold": "bold",
     "MessageEntityItalic": "italic",
@@ -195,6 +221,15 @@ def render(
         elif name == "MessageEntityBlockquote":
             spans.append((start, end, Style(color=muted, italic=True)))
             quotes.append((start, end))
+        elif name == "MessageEntityFormattedDate":
+            # Bot API зовёт это date_time: сервер хранит момент времени, а клиент
+            # показывает его по-своему. В терминале подставляем сам момент —
+            # иначе на месте даты остаётся текст, написанный автором когда-то.
+            shown = describe_date(entity)
+            if shown:
+                chars[start:end] = list(shown.ljust(end - start)[: end - start]) \
+                    if len(shown) <= end - start else list(shown)
+            spans.append((start, min(end, len(chars)), Style(color=accent)))
 
     rendered = Text("".join(chars), style=body)
     for start, end, style in spans:

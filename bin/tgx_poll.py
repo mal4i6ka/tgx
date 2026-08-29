@@ -18,6 +18,8 @@ from typing import Any, Sequence
 MAX_OPTIONS = 12
 MAX_QUESTION = 300
 MAX_OPTION = 100
+# Bot API 9.6 поднял предел автозакрытия с суток до месяца.
+MAX_CLOSE_PERIOD = 2628000
 
 
 class PollError(RuntimeError):
@@ -40,25 +42,35 @@ QUIZ_NEEDS_BOT = ("викторину нельзя отправить от св�
 
 
 def send_quiz(token: str, chat_id: str, question: str, options: Sequence[str], *,
-              correct: int, explanation: str = "", topic: int | None = None,
-              multiple: bool = False, anonymous: bool = True,
-              close_in: int | None = None, silent: bool = False) -> dict[str, Any]:
-    """Викторина через Bot API — там правильный ответ задаётся номером."""
+              correct: Sequence[int] | int, explanation: str = "", topic: int | None = None,
+              multiple: bool = False, anonymous: bool = True, revoting: bool = False,
+              shuffle: bool = False, close_in: int | None = None,
+              silent: bool = False) -> dict[str, Any]:
+    """Викторина через Bot API — там правильные ответы задаются номерами.
+
+    С Bot API 9.6 правильных ответов может быть несколько, поэтому поле
+    называется `correct_option_ids`, а не `correct_option_id`.
+    """
     import json
 
     import tgx_net
 
-    check(question, options, quiz_answer=correct)
+    answers = list(correct) if isinstance(correct, (list, tuple)) else [correct]
+    check(question, options, quiz_answer=answers, close_in=close_in)
     payload: dict[str, Any] = {
         "chat_id": chat_id,
         "question": question.strip(),
         "options": json.dumps([{"text": o.strip()} for o in options if o.strip()],
                               ensure_ascii=False),
         "type": "quiz",
-        "correct_option_id": int(correct),
+        "correct_option_ids": json.dumps([int(a) for a in answers]),
         "is_anonymous": "true" if anonymous else "false",
-        "allows_multiple_answers": "true" if multiple else "false",
+        "allows_multiple_answers": "true" if (multiple or len(answers) > 1) else "false",
     }
+    if revoting:
+        payload["allows_revoting"] = "true"
+    if shuffle:
+        payload["shuffle_options"] = "true"
     if explanation:
         payload["explanation"] = explanation
     if topic:
@@ -78,7 +90,8 @@ def send_quiz(token: str, chat_id: str, question: str, options: Sequence[str], *
             "question": question.strip(), "options": len([o for o in options if o.strip()])}
 
 
-def check(question: str, options: Sequence[str], *, quiz_answer: int | None = None) -> None:
+def check(question: str, options: Sequence[str], *, quiz_answer: Any = None,
+          close_in: int | None = None) -> None:
     """Всё, что сервер проверит сам, но объяснит скупо."""
     if not (question or "").strip():
         raise PollError("у опроса должен быть вопрос")
@@ -92,8 +105,14 @@ def check(question: str, options: Sequence[str], *, quiz_answer: int | None = No
     for option in clean:
         if len(option) > MAX_OPTION:
             raise PollError(f"вариант «{option[:30]}…» длиннее {MAX_OPTION} знаков")
-    if quiz_answer is not None and not 0 <= quiz_answer < len(clean):
-        raise PollError(f"правильный ответ {quiz_answer} вне списка из {len(clean)} вариантов")
+    # С 9.6 правильных ответов может быть несколько — принимаем и число, и список.
+    for answer in ([] if quiz_answer is None else
+                   (quiz_answer if isinstance(quiz_answer, (list, tuple)) else [quiz_answer])):
+        if not 0 <= int(answer) < len(clean):
+            raise PollError(f"правильный ответ {answer} вне списка из {len(clean)} вариантов")
+    if close_in is not None and not 0 < int(close_in) <= MAX_CLOSE_PERIOD:
+        raise PollError(f"автозакрытие — от 1 до {MAX_CLOSE_PERIOD} секунд "
+                        f"(это месяц), а указано {close_in}")
 
 
 def parse_countries(spec: str | None) -> list[str] | None:
@@ -149,6 +168,7 @@ class Polls:
                      quiz_answer: int | None = None, multiple: bool = False,
                      public: bool = False, shuffle: bool = False,
                      hide_until_close: bool = False, members_only: bool = False,
+                     allow_revoting: bool = False,
                      countries: str | None = None, close_in: int | None = None,
                      explanation: str = "", topic: int | None = None,
                      silent: bool = False) -> dict[str, Any]:
@@ -156,7 +176,7 @@ class Polls:
         from telethon.tl import functions, types
 
         clean = [o.strip() for o in options if (o or "").strip()]
-        check(question, clean, quiz_answer=quiz_answer)
+        check(question, clean, quiz_answer=quiz_answer, close_in=close_in)
         if quiz_answer is not None:
             raise PollError(QUIZ_NEEDS_BOT)
         if explanation and quiz_answer is None:
@@ -175,6 +195,7 @@ class Polls:
             shuffle_answers=bool(shuffle),
             hide_results_until_close=bool(hide_until_close),
             subscribers_only=bool(members_only) or None,
+            revoting_disabled=None if allow_revoting else True,
             countries_iso2=parse_countries(countries),
             close_period=int(close_in) if close_in else None,
         )

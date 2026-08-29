@@ -510,16 +510,21 @@ async def cmd_poll(args: argparse.Namespace) -> None:
                 username = getattr(peer, "username", None)
                 chat_id = f"@{username}" if username else (
                     f"-100{peer.id}" if entity_kind(peer) in {"channel", "group"} else str(peer.id))
-                render.emit({"ok": True, "as": bot.username, **await asyncio.to_thread(
-                    tgx_poll.send_quiz, bot.token, chat_id, args.question, args.option,
-                    correct=args.quiz, explanation=args.explanation or "", topic=args.topic,
-                    multiple=args.multiple, anonymous=not args.public,
-                    close_in=args.close_in, silent=args.silent)})
+                def ask() -> Any:
+                    return tgx_poll.send_quiz(
+                        bot.token, chat_id, args.question, args.option, correct=args.quiz,
+                        explanation=args.explanation or "", topic=args.topic,
+                        multiple=args.multiple, anonymous=not args.public,
+                        revoting=args.allow_revoting, shuffle=args.shuffle,
+                        close_in=args.close_in, silent=args.silent)
+
+                render.emit({"ok": True, "as": bot.username, **await asyncio.to_thread(ask)})
                 return
             render.emit({"ok": True, **await polls.create(
                 peer, args.question, args.option, quiz_answer=args.quiz,
                 multiple=args.multiple, public=args.public, shuffle=args.shuffle,
                 hide_until_close=args.hide_results, members_only=args.members_only,
+                allow_revoting=args.allow_revoting,
                 countries=args.countries, close_in=args.close_in,
                 explanation=args.explanation or "", topic=args.topic, silent=args.silent)})
             return
@@ -2374,8 +2379,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("chat")
     p_new.add_argument("question")
     p_new.add_argument("option", nargs="+", help="варианты ответа; с 10.0 хватает одного")
-    p_new.add_argument("--quiz", type=int, metavar="N",
-                       help="викторина: номер правильного ответа с 0; требует --as")
+    p_new.add_argument("--quiz", type=int, nargs="+", metavar="N",
+                       help="викторина: номера правильных ответов с 0; требует --as. "
+                            "С Bot API 9.6 их может быть несколько")
+    p_new.add_argument("--allow-revoting", action="store_true", help="разрешить переголосовать")
     p_new.add_argument("--as", dest="bot", help="бот, от имени которого уйдёт викторина")
     p_new.add_argument("--explanation", help="пояснение к правильному ответу (только викторина)")
     p_new.add_argument("--multiple", action="store_true", help="можно выбрать несколько")

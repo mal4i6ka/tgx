@@ -1050,6 +1050,45 @@ def poll_regression() -> None:
     check("викторина от своего имени отклоняется с объяснением",
           "Telethon" in P.QUIZ_NEEDS_BOT and "--as" in P.QUIZ_NEEDS_BOT)
 
+    # Bot API 9.6: правильных ответов может быть несколько, срок автозакрытия — до месяца
+    P.check("Q", ["А", "Б", "В"], quiz_answer=[0, 2])
+    refused = False
+    try:
+        P.check("Q", ["А", "Б"], quiz_answer=[0, 5])
+    except P.PollError:
+        refused = True
+    check("отвергает список, где один ответ вне диапазона", refused)
+    P.check("Q", ["А"], close_in=P.MAX_CLOSE_PERIOD)
+    refused = False
+    try:
+        P.check("Q", ["А"], close_in=P.MAX_CLOSE_PERIOD + 1)
+    except P.PollError:
+        refused = True
+    check("отвергает срок автозакрытия больше месяца", refused)
+
+
+def date_entity_regression() -> None:
+    """Сущность «дата и время» (Bot API 9.5, в слое — MessageEntityFormattedDate):
+    сервер хранит момент, клиент решает, как его показать."""
+    from datetime import datetime, timezone
+
+    from telethon.tl.types import MessageEntityFormattedDate as D
+
+    import tgx_format as F
+
+    when = datetime(2026, 8, 29, 14, 30, 5, tzinfo=timezone.utc)
+    check("короткая дата", F.describe_date(D(0, 4, when, short_date=True)) == "29.08.2026")
+    check("короткое время", F.describe_date(D(0, 4, when, short_time=True)) == "14:30")
+    check("длинное время", F.describe_date(D(0, 4, when, long_time=True)) == "14:30:05")
+    check("день недели впереди",
+          F.describe_date(D(0, 4, when, day_of_week=True, short_date=True)).startswith("сб"))
+    check("без флагов — дата и время",
+          F.describe_date(D(0, 4, when)) == "29.08.2026 14:30")
+    check("без даты — пусто", F.describe_date(D(0, 4, None)) == "")
+
+    rendered = F.render("дата: XXXX", [D(offset=6, length=4, date=when, short_date=True)])
+    check("дата подставляется в текст вместо заглушки", "29.08.2026" in rendered.plain)
+
 
 def rich_render_regression() -> None:
     """A received rich message is an Instant-View block tree — it has to become
@@ -1319,6 +1358,7 @@ async def main() -> int:
     multipart_regression()
     rich_blocks_regression()
     poll_regression()
+    date_entity_regression()
     await resolve_peer_regression()
     autotools_regression()
     rich_render_regression()
