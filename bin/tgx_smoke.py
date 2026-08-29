@@ -1220,8 +1220,40 @@ def pay_regression() -> None:
                       ("topup_options", "пакеты звёзд"), ("refund", "возврат"),
                       ("referral_bots", "партнёрские программы"), ("auctions", "аукционы"),
                       ("unique_gift", "уникальный подарок"), ("gift_details", "подробности"),
-                      ("can_send_gift", "можно ли дарить")):
+                      ("can_send_gift", "можно ли дарить"),
+                      ("auction_state", "состояние аукциона"), ("auction_won", "выигранные"),
+                      ("craftable", "из чего собрать"), ("craft", "сборка подарка"),
+                      ("offer_gift", "предложение выкупа"), ("answer_offer", "ответ на предложение"),
+                      ("suggested_referrals", "предложенные программы"),
+                      ("connect_referral", "подключение программы"),
+                      ("revoke_referral", "отзыв ссылки"), ("referral_bot", "одна программа"),
+                      ("edit_collection", "правка коллекции"),
+                      ("delete_collection", "удаление коллекции"),
+                      ("reorder_collections", "порядок коллекций"),
+                      ("transaction", "операции по id"),
+                      ("gift_notifications", "уведомления о подарках"),
+                      ("ads_account", "рекламный кабинет"),
+                      ("premium_options", "цены на Premium"),
+                      ("giveaway_options", "варианты розыгрышей"),
+                      ("unique_value", "оценка уникального"),
+                      ("upgrade_attributes", "варианты оформления"),
+                      ("fulfil_subscription", "доплата за подписку"),
+                      ("bot_cancel_subscription", "отмена ботом"),
+                      ("launch_giveaway", "запуск розыгрыша"),
+                      ("gift_to_blockchain", "вывод подарка"),
+                      ("pay_card", "оплата сохранённой картой"),
+                      ("validate_info", "проверка данных")):
         check(f"ветка на месте: {why}", hasattr(Y.Pay, name))
+
+    # Покрытие поверхности: сколько методов payments задействовано.
+    import re
+    from telethon.tl import functions as TF
+    source = Path("bin/tgx_pay.py").read_text()
+    used = set(re.findall(r"payments\.(\w+)Request", source))
+    total = [n[:-7] for n in dir(TF.payments) if n.endswith("Request") and n != "TLRequest"]
+    covered = [n for n in total if n in used]
+    check(f"покрыто методов payments: {len(covered)} из {len(total)}",
+          len(covered) >= 60)
 
     # Цена приходит списком: одна вещь стоит и звёзд, и TON.
     class Stars:

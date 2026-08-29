@@ -158,6 +158,10 @@ tgx pay send "https://t.me/$…" --as @мой_бот --confirm-to me
 
 ## Платежи: звёзды, TON и счета
 
+Покрыто **62 метода `payments` из 66**. Не взяты четыре: покупки через
+App Store и Play Market (нужен чек от магазина, с настольного клиента их
+не сделать) и служебный `TL`.
+
 ```bash
 tgx pay balance                 # баланс звёзд
 tgx pay balance --ton           # он же в TON
@@ -230,6 +234,32 @@ tgx pay auctions / referrals / can-send-gift ID
 это `5.07 TON`. При этом у TON нет поля `nanos`: вся сумма записана в `amount`
 в нанотонах, и если поделить её как звёзды, `4.68 TON` превращаются в
 `4 680 000 000`.
+
+Аукционы, крафт, партнёрские программы и прочее:
+
+```bash
+tgx pay auction-state ID / auction-won ID
+tgx pay craftable ID                  # из чего собрать подарок
+tgx pay suggested-referrals           # какие боты предлагают партнёрство
+tgx pay referral @бот                 # условия и заработок по одной программе
+tgx pay premium-options               # почём подарить Premium
+tgx pay giveaway-options              # варианты розыгрышей звёзд
+tgx pay unique-value СЛАГ             # во что оценивается уникальный подарок
+tgx pay upgrade-attributes ID         # варианты оформления и их редкость
+tgx pay transaction ID…               # операции по идентификаторам
+tgx pay ads-account @канал
+tgx pay validate-info ССЫЛКА --name … # проверить данные ДО списания
+```
+
+За воротами: `craft`, `offer`, `answer-offer`, `connect-referral`,
+`revoke-referral`, `delete-collection`, `fulfil-subscription`,
+`gift-to-blockchain`, `pay-card`.
+
+**Оплата картой — без ввода карты.** Telegram хранит способ оплаты у себя;
+`tgx pay pay-card` берёт временный пароль в обмен на пароль от аккаунта (по SRP)
+и платит сохранённым способом. Номер карты не проходит ни через аргументы, ни
+через этот процесс. Первый платёж картой всё равно делается в приложении — там
+способ и сохраняется.
 
 Секреты — скрытым вводом, не аргументом:
 

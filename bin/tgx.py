@@ -756,6 +756,134 @@ async def cmd_pay(args: argparse.Namespace) -> None:
                          "подтвердил": v["by"]})
             return
 
+        # ── читающее без ворот ───────────────────────────────────────────────
+        plain = {
+            "auction-state": (lambda: pay.auction_state(args.id), None),
+            "auction-won": (lambda: pay.auction_won(args.gift_id), ["название", "номер"]),
+            "craftable": (lambda: pay.craftable(args.gift_id, args.limit),
+                          ["название", "номер", "цена"]),
+            "suggested-referrals": (lambda: pay.suggested_referrals(args.chat, args.limit),
+                                    ["бот", "доля", "срок дней"]),
+            "premium-options": (lambda: pay.premium_options(args.chat),
+                                ["месяцев", "получателей", "цена", "валюта"]),
+            "giveaway-options": (lambda: pay.giveaway_options(),
+                                 ["звёзд", "победителей", "цена", "валюта"]),
+            "unique-value": (lambda: pay.unique_value(args.slug), None),
+            "upgrade-attributes": (lambda: pay.upgrade_attributes(args.gift_id), None),
+            "ads-account": (lambda: pay.ads_account(args.chat), None),
+        }
+        if args.paycmd in plain:
+            getter, fields = plain[args.paycmd]
+            data = await getter()
+            if fields and isinstance(data, list):
+                print_jsonl(data) if getattr(args, "jsonl", False) else print_table(
+                    data, fields, title=args.paycmd)
+            else:
+                render.emit(data)
+            return
+
+        if args.paycmd == "referral":
+            render.emit(await pay.referral_bot(args.bot_name, args.chat))
+            return
+
+        if args.paycmd == "transaction":
+            rows = await pay.transaction(args.id, ton=args.ton)
+            print_jsonl(rows) if args.jsonl else print_table(
+                rows, ["дата", "сумма", "направление", "за что"], title="операции")
+            return
+
+        if args.paycmd == "gift-notifications":
+            render.emit({"ok": True, **await pay.gift_notifications(
+                await resolve_peer(client, args.chat), not args.off)})
+            return
+
+        if args.paycmd == "edit-collection":
+            render.emit({"ok": True, **await pay.edit_collection(
+                args.id, title=args.title or "", add=args.add or [], remove=args.remove or [])})
+            return
+
+        if args.paycmd == "reorder-collections":
+            render.emit({"ok": True, **await pay.reorder_collections(args.id)})
+            return
+
+        if args.paycmd == "validate-info":
+            render.emit(await pay.validate_info(args.link, name=args.name or "",
+                                                phone=args.phone or "", email=args.email or "",
+                                                save=args.save))
+            return
+
+        # ── тратящее и необратимое ───────────────────────────────────────────
+        if args.paycmd == "craft":
+            v = await gated_or_die(client, args, "Собрать новый подарок?",
+                                   f"Из подарков: {', '.join(map(str, args.id))}",
+                                   "исходные подарки исчезнут")
+            render.emit({"ok": True, **await pay.craft(args.id), "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "offer":
+            v = await gated_or_die(client, args, "Предложить выкуп подарка?",
+                                   f"{args.slug} за {args.stars} ⭐",
+                                   "предложение увидит владелец")
+            render.emit({"ok": True, **await pay.offer_gift(
+                await resolve_peer(client, args.chat), args.slug, args.stars, args.days),
+                "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "answer-offer":
+            v = await gated_or_die(
+                client, args, "Принять предложение?" if not args.decline else "Отклонить?",
+                f"Предложение {args.id}", "решение окончательно")
+            render.emit({"ok": True, **await pay.answer_offer(args.id, not args.decline),
+                         "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "delete-collection":
+            v = await gated_or_die(client, args, "Удалить коллекцию?",
+                                   f"Коллекция {args.id}", "восстановить нельзя")
+            render.emit({"ok": True, **await pay.delete_collection(args.id),
+                         "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "connect-referral":
+            v = await gated_or_die(client, args, "Подключить партнёрскую программу?",
+                                   f"Бот {args.bot_name}", "условия задаёт бот")
+            render.emit({"ok": True, **await pay.connect_referral(args.bot_name),
+                         "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "revoke-referral":
+            v = await gated_or_die(client, args, "Отозвать партнёрскую ссылку?",
+                                   args.link, "начисления по ней прекратятся")
+            render.emit({"ok": True, **await pay.revoke_referral(args.link),
+                         "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "fulfil-subscription":
+            v = await gated_or_die(client, args, "Доплатить за подписку?",
+                                   f"Подписка {args.id}", "звёзды спишутся сразу")
+            render.emit({"ok": True, **await pay.fulfil_subscription(
+                await resolve_peer(client, args.chat), args.id), "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "gift-to-blockchain":
+            v = await gated_or_die(client, args, "Вывести подарок в блокчейн?",
+                                   f"Подарок {args.id}", "подарок покинет Telegram")
+            secret = read_secret("пароль от аккаунта (не отображается): ", "TGX_PASSWORD")
+            render.emit({"ok": True, **await pay.gift_to_blockchain(args.id, secret),
+                         "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "pay-card":
+            form = await pay.form(args.link)
+            v = await gated_or_die(client, args, "Оплатить счёт сохранённой картой?",
+                                   f"{form.get('название') or 'счёт'}\n"
+                                   f"Сумма: {form.get('итого')} {form.get('валюта')}",
+                                   "списание пройдёт сразу")
+            secret = read_secret("пароль от аккаунта (не отображается): ", "TGX_PASSWORD")
+            render.emit({"ok": True, **await pay.pay_card(args.link, secret, tip=args.tip or 0),
+                         "подтвердил": v["by"]})
+            return
+
         if args.paycmd == "card-bank":
             number = read_secret("номер карты (не отображается): ", "TGX_CARD_NUMBER")
             render.emit(await pay.card_bank(number))
@@ -3054,6 +3182,102 @@ def build_parser() -> argparse.ArgumentParser:
     y_rf = gated_parser("refund", "вернуть звёзды за покупку")
     y_rf.add_argument("user")
     y_rf.add_argument("charge", help="идентификатор платежа")
+
+    # ── аукционы, крафт, партнёрские программы ──────────────────────────────
+    y_as = pay_sub.add_parser("auction-state", help="состояние аукциона")
+    y_as.add_argument("id", type=int)
+
+    y_aw = pay_sub.add_parser("auction-won", help="выигранные на аукционе подарки")
+    y_aw.add_argument("gift_id", type=int)
+    y_aw.add_argument("--jsonl", action="store_true")
+
+    y_cr = pay_sub.add_parser("craftable", help="из чего можно собрать подарок")
+    y_cr.add_argument("gift_id", type=int)
+    y_cr.add_argument("--limit", type=int, default=20)
+    y_cr.add_argument("--jsonl", action="store_true")
+
+    y_sr = pay_sub.add_parser("suggested-referrals", help="какие боты предлагают партнёрство")
+    y_sr.add_argument("chat", nargs="?")
+    y_sr.add_argument("--limit", type=int, default=20)
+    y_sr.add_argument("--jsonl", action="store_true")
+
+    y_r1 = pay_sub.add_parser("referral", help="одна партнёрская программа")
+    y_r1.add_argument("bot_name", metavar="бот")
+    y_r1.add_argument("chat", nargs="?")
+
+    y_po = pay_sub.add_parser("premium-options", help="почём подарить Premium")
+    y_po.add_argument("chat", nargs="?")
+    y_po.add_argument("--jsonl", action="store_true")
+
+    y_go = pay_sub.add_parser("giveaway-options", help="варианты розыгрышей звёзд")
+    y_go.add_argument("--jsonl", action="store_true")
+
+    y_uv = pay_sub.add_parser("unique-value", help="во что оценивается уникальный подарок")
+    y_uv.add_argument("slug")
+
+    y_ua = pay_sub.add_parser("upgrade-attributes", help="варианты оформления и их редкость")
+    y_ua.add_argument("gift_id", type=int)
+
+    y_ads = pay_sub.add_parser("ads-account", help="ссылка на рекламный кабинет")
+    y_ads.add_argument("chat")
+
+    y_tx = pay_sub.add_parser("transaction", help="операции по их идентификаторам")
+    y_tx.add_argument("id", nargs="+")
+    y_tx.add_argument("--ton", action="store_true")
+    y_tx.add_argument("--jsonl", action="store_true")
+
+    y_gn = pay_sub.add_parser("gift-notifications", help="уведомления о подарках в чате")
+    y_gn.add_argument("chat")
+    y_gn.add_argument("--off", action="store_true")
+
+    y_ec = pay_sub.add_parser("edit-collection", help="править коллекцию подарков")
+    y_ec.add_argument("id", type=int)
+    y_ec.add_argument("--title")
+    y_ec.add_argument("--add", action="append", type=int)
+    y_ec.add_argument("--remove", action="append", type=int)
+
+    y_rc = pay_sub.add_parser("reorder-collections", help="порядок коллекций")
+    y_rc.add_argument("id", nargs="+", type=int)
+
+    y_vi = pay_sub.add_parser("validate-info", help="проверить контактные данные до оплаты")
+    y_vi.add_argument("link")
+    y_vi.add_argument("--name")
+    y_vi.add_argument("--phone")
+    y_vi.add_argument("--email")
+    y_vi.add_argument("--save", action="store_true")
+
+    y_cf = gated_parser("craft", "собрать новый подарок из имеющихся")
+    y_cf.add_argument("id", nargs="+", type=int)
+
+    y_of = gated_parser("offer", "предложить владельцу выкуп подарка")
+    y_of.add_argument("chat")
+    y_of.add_argument("slug")
+    y_of.add_argument("stars", type=int)
+    y_of.add_argument("--days", type=int, help="срок предложения")
+
+    y_ao = gated_parser("answer-offer", "принять или отклонить предложение")
+    y_ao.add_argument("id", type=int)
+    y_ao.add_argument("--decline", action="store_true")
+
+    y_dc = gated_parser("delete-collection", "удалить коллекцию")
+    y_dc.add_argument("id", type=int)
+
+    y_cn = gated_parser("connect-referral", "подключить партнёрскую программу")
+    y_cn.add_argument("bot_name", metavar="бот")
+
+    y_rv = gated_parser("revoke-referral", "отозвать партнёрскую ссылку")
+    y_rv.add_argument("link")
+
+    y_fs = gated_parser("fulfil-subscription", "доплатить за подписку")
+    y_fs.add_argument("chat")
+    y_fs.add_argument("id")
+
+    y_gb = gated_parser("gift-to-blockchain", "вывести подарок в блокчейн")
+    y_gb.add_argument("id", type=int)
+
+    y_pc = gated_parser("pay-card", "оплатить счёт сохранённой картой")
+    y_pc.add_argument("link")
+    y_pc.add_argument("--tip", type=int, help="чаевые")
 
     y_gift = pay_sub.add_parser("gift-options", help="во что обойдётся подарить звёзды")
     y_gift.add_argument("user")
