@@ -859,6 +859,77 @@ def multipart_regression() -> None:
     check("форма закрыта хвостовой границей", body.rstrip().endswith(f"--{boundary}--".encode()))
 
 
+async def resolve_peer_regression() -> None:
+    """«Чат не найден» — самый частый ответ CLI, и он врал: любая ошибка Telegram
+    выглядела так же. Из-за этого переименованный чат и обрыв связи неотличимы."""
+    import tgx
+
+    class Dialog:
+        def __init__(self, name):
+            self.name, self.entity = name, f"entity:{name}"
+
+    class Client:
+        """Ищет только по точному значению — как Telethon: строка ≠ число."""
+        def __init__(self, known=None, boom=None):
+            self.known, self.boom, self.asked = known or {}, boom, []
+
+        async def get_entity(self, value):
+            self.asked.append(value)
+            if self.boom:
+                raise self.boom
+            if value in self.known:
+                return self.known[value]
+            raise ValueError(f'Cannot find any entity corresponding to "{value}"')
+
+        async def iter_dialogs(self, limit=None):
+            for name in ("AllCrew Cockpit", "Заметки", "Playgama Bridge"):
+                yield Dialog(name)
+
+        def __aiter__(self):
+            return self
+
+    # числовой id надо отдать числом — строку Telethon ищет как имя
+    client = Client(known={4330416518: "чат"})
+    check("числовой id разрешается", await tgx.resolve_peer(client, "4330416518") == "чат")
+    check("и передаётся именно числом", client.asked[0] == 4330416518)
+
+    # поиск по названию среди диалогов
+    found = await tgx.resolve_peer(Client(), "cockpit")
+    check("находит чат по куску названия", found == "entity:AllCrew Cockpit")
+
+    # не найдено — сообщение объясняет и подсказывает
+    refused = ""
+    try:
+        await tgx.resolve_peer(Client(), "AllCrew Bridge")
+    except tgx.PeerError as exc:
+        refused = str(exc)
+    check("говорит, что именно искали", "AllCrew Bridge" in refused)
+    check("подсказывает похожее название", "AllCrew Cockpit" in refused)
+    check("приводит ответ Telegram", "Cannot find any entity" in refused)
+    check("называет, сколько диалогов просмотрено", "3 диалог" in refused)
+
+    # чужая ошибка не маскируется под «не найдено»
+    class Flood(Exception):
+        pass
+
+    leaked = None
+    try:
+        await tgx.resolve_peer(Client(boom=Flood("FLOOD_WAIT_420")), "что угодно")
+    except Flood as exc:
+        leaked = str(exc)
+    except tgx.PeerError:
+        leaked = "проглочено"
+    check("ошибка Telegram доходит как есть, а не как «чат не найден»",
+          leaked == "FLOOD_WAIT_420")
+
+    refused = ""
+    try:
+        await tgx.resolve_peer(Client(), "   ")
+    except tgx.PeerError as exc:
+        refused = str(exc)
+    check("пустой чат отвергается сразу", "не указан чат" in refused)
+
+
 def rich_render_regression() -> None:
     """A received rich message is an Instant-View block tree — it has to become
     readable terminal text, not a bare "unsupported media" chip."""
@@ -1125,6 +1196,7 @@ async def main() -> int:
     await transcribe_regression()
     await guard_regression()
     multipart_regression()
+    await resolve_peer_regression()
     autotools_regression()
     rich_render_regression()
     article_regression()

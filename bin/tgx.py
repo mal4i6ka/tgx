@@ -190,16 +190,48 @@ async def cmd_dialogs(args: argparse.Namespace) -> None:
         await client.disconnect()
 
 
+class PeerError(RuntimeError):
+    """Чат не найден — с тем, что искали, и на что это похоже."""
+
+
 async def resolve_peer(client: TelegramClient, peer: str) -> Any:
-    # Accept @username, phone, numeric id, or dialog title.
-    try:
-        return await client.get_entity(peer)
-    except Exception:
-        needle = peer.lower()
-        async for dialog in client.iter_dialogs(limit=None):
-            if dialog.name and needle in dialog.name.lower():
-                return dialog.entity
-        raise SystemExit(f"Could not resolve peer: {peer!r}")
+    """@имя, телефон, числовой id или название чата.
+
+    Чужую ошибку не прячем. Обрыв связи, FloodWait и отозванная сессия выглядят
+    как «чат не найден», только если их проглотить, — и тогда сообщение уводит
+    от настоящей причины. «Не найдено» Telethon сообщает через ValueError, всё
+    остальное отдаём как есть.
+    """
+    query = (peer or "").strip()
+    if not query:
+        raise PeerError("не указан чат")
+
+    # Числовой id надо передать числом: строку Telethon ищет как имя и не находит.
+    attempts: list[Any] = [int(query)] if query.lstrip("-").isdigit() else []
+    attempts.append(query)
+
+    missing: Exception | None = None
+    for value in attempts:
+        try:
+            return await client.get_entity(value)
+        except (ValueError, TypeError) as exc:
+            missing = missing or exc
+
+    needle = query.lower()
+    titles: list[str] = []
+    async for dialog in client.iter_dialogs(limit=None):
+        name = dialog.name or ""
+        if name and needle in name.lower():
+            return dialog.entity
+        if name:
+            titles.append(name)
+
+    import difflib
+
+    close = difflib.get_close_matches(query, titles, n=3, cutoff=0.45)
+    hint = f"; похоже на: {', '.join(close)}" if close else ""
+    raise PeerError(f"чат «{peer}» не найден среди {len(titles)} диалогов{hint}. "
+                    f"Telegram ответил: {missing}")
 
 
 def filter_title_text(title: Any) -> str:
@@ -2711,7 +2743,7 @@ async def amain() -> None:
 
 # Errors these modules raise are already written for a person to read; a stack
 # trace on top of them only hides the sentence that explains what to do.
-SPOKEN_ERRORS = (tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError,
+SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError,
                  tgx_banner.BannerError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError,
                  tgx_profile.ProfileError,
                  tgx_rich.RichError, tgx_transcribe.TranscribeError)
