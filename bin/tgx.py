@@ -3145,7 +3145,7 @@ async def cmd_ai(args: argparse.Namespace) -> None:
 
 async def _open_window(title: str, url: str, args: argparse.Namespace) -> dict[str, Any]:
     """Поднять окно вокруг уже полученного адреса приложения."""
-    host = tgx_webapp.Host(title, url,
+    host = tgx_webapp.Host(title, url, phone=getattr(args, "phone", False),
                            on_data=lambda body: render.note(f"приложение прислало: {body}"))
     where = host.start()
     if not getattr(args, "no_open", False):
@@ -3207,7 +3207,7 @@ async def cmd_inline(args: argparse.Namespace) -> None:
             render.emit(got)
         elif command == "web-app":
             answer = await inline.web_app(args.bot, peer=peer, url=args.url or "",
-                                          param=args.param or "")
+                                          param=args.param or "", platform=args.as_ or "")
             if args.open and answer.get("адрес"):
                 import webbrowser
 
@@ -3221,11 +3221,11 @@ async def cmd_inline(args: argparse.Namespace) -> None:
             # Приложению нужен хозяин, отвечающий по протоколу Telegram; голая
             # вкладка им не является, поэтому поднимаем своё окно вокруг него.
             answer = await inline.web_app(args.bot, peer=peer, url=args.url or "",
-                                          param=args.param or "")
+                                          param=args.param or "", platform=args.as_ or "")
             address = answer.get("адрес")
             if not address:
                 raise SystemExit("сервер не дал адреса приложения")
-            host = tgx_webapp.Host(f"{args.bot}", address,
+            host = tgx_webapp.Host(f"{args.bot}", address, phone=args.phone,
                                    on_data=lambda body: render.note(f"приложение прислало: {body}"))
             where = host.start()
             render.emit({"окно": where, "приложение": args.bot,
@@ -4471,6 +4471,8 @@ def build_parser() -> argparse.ArgumentParser:
     i_pa.add_argument("--run", action="store_true", help="сразу открыть в своём окне")
     i_pa.add_argument("--seconds", type=float, default=900.0)
     i_pa.add_argument("--no-open", action="store_true")
+    i_pa.add_argument("--phone", action="store_true",
+                          help="представиться телефоном: касания и альбомный угол экрана")
 
     i_mb = il_sub.add_parser("menu-button",
                              help="нажать главную кнопку-меню бота (слева от поля ввода)")
@@ -4479,6 +4481,8 @@ def build_parser() -> argparse.ArgumentParser:
     i_mb.add_argument("--run", action="store_true", help="сразу открыть в своём окне")
     i_mb.add_argument("--seconds", type=float, default=900.0)
     i_mb.add_argument("--no-open", action="store_true")
+    i_mb.add_argument("--phone", action="store_true",
+                          help="представиться телефоном: касания и альбомный угол экрана")
 
     i_run = il_sub.add_parser("run", help="запустить мини-приложение бота в своём окне")
     i_run.add_argument("bot")
@@ -4487,6 +4491,10 @@ def build_parser() -> argparse.ArgumentParser:
     i_run.add_argument("--param", help="параметр запуска")
     i_run.add_argument("--seconds", type=float, default=900.0, help="сколько держать окно")
     i_run.add_argument("--no-open", action="store_true", help="не открывать браузер самому")
+    i_run.add_argument("--phone", action="store_true",
+                       help="представиться телефоном: касания и альбомный угол экрана")
+    i_run.add_argument("--as", dest="as_", choices=list(tgx_inline.PLATFORMS),
+                       help="какой платформой представиться приложению")
 
     i_wa = il_sub.add_parser("web-app", help="подписанный адрес мини-приложения бота")
     i_wa.add_argument("bot")
@@ -4494,6 +4502,8 @@ def build_parser() -> argparse.ArgumentParser:
     i_wa.add_argument("--url", help="конкретная страница приложения")
     i_wa.add_argument("--param", help="параметр запуска")
     i_wa.add_argument("--open", action="store_true", help="сразу открыть в браузере")
+    i_wa.add_argument("--as", dest="as_", choices=list(tgx_inline.PLATFORMS),
+                      help="какой платформой представиться")
 
     sf = sub.add_parser("safety", help="блокировки, жалобы, уборка переписки")
     sf_sub = sf.add_subparsers(dest="safetycmd", required=True)

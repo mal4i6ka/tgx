@@ -47,6 +47,13 @@ WHERE = {"SameBotPM": "в переписке с собой", "BotPM": "в пер
 
 PLATFORM = "tdesktop"  # ближе всего к обычному оконному клиенту
 
+# Чем можно представиться приложению. Многие мини-приложения рисуют себя
+# по-разному на телефоне и на настольном клиенте, а иные показывают на
+# настольном заглушку. Смена платформы — не обман ради обмана: это то же
+# самое, что выбор устройства в отладчике браузера, и без неё половину
+# приложений в терминале не посмотреть.
+PLATFORMS = ("tdesktop", "android", "ios", "web", "macos", "weba")
+
 
 def _explain(exc: Exception) -> Exception:
     return tgx_net.explain(exc, HINTS, InlineError)
@@ -159,24 +166,27 @@ class Inline:
         return type(button).__name__ in {"KeyboardButtonWebView",
                                          "KeyboardButtonSimpleWebView"}
 
-    async def web_button_url(self, peer: Any, message: Any, button: Any) -> str:
+    async def web_button_url(self, peer: Any, message: Any, button: Any, *,
+                             platform: str = "") -> str:
         """Подписанный адрес приложения из уже найденной кнопки."""
         from telethon.tl import functions, types
 
         bot = await self.client.get_input_entity(
             getattr(message, "sender_id", None) or getattr(message, "via_bot_id", None))
         params = types.DataJSON(data=json.dumps({"bg_color": "#121212"}))
+        platform = platform or PLATFORM
         if type(button).__name__ == "KeyboardButtonSimpleWebView":
             result = await self._call(functions.messages.RequestSimpleWebViewRequest(
-                bot=bot, platform=PLATFORM, url=button.url, theme_params=params))
+                bot=bot, platform=platform, url=button.url, theme_params=params))
         else:
             result = await self._call(functions.messages.RequestWebViewRequest(
-                peer=peer, bot=bot, platform=PLATFORM, url=button.url,
+                peer=peer, bot=bot, platform=platform, url=button.url,
                 theme_params=params))
         return getattr(result, "url", "")
 
     async def press_web_button(self, peer: Any, message_id: int, *, text: str = "",
-                               row: int = 0, col: int = 0) -> dict[str, Any]:
+                               row: int = 0, col: int = 0,
+                               platform: str = "") -> dict[str, Any]:
         """Нажать кнопку, которая открывает мини-приложение.
 
         Такие кнопки — не callback: у Telethon для них нет ветки в `click()`, и
@@ -216,10 +226,12 @@ class Inline:
                 f"{type(button).__name__}, а не запуск приложения; "
                 f"обычные кнопки жмёт `tgx message-click`")
         return {"кнопка": getattr(button, "text", None),
-                "адрес": await self.web_button_url(peer, message, button),
+                "адрес": await self.web_button_url(peer, message, button,
+                                                   platform=platform),
                 "осторожно": "адрес подписан вашей сессией — не передавайте его никому"}
 
-    async def press_menu_button(self, bot: Any, *, peer: Any = None) -> dict[str, Any]:
+    async def press_menu_button(self, bot: Any, *, peer: Any = None,
+                                platform: str = "") -> dict[str, Any]:
         """Нажать главную кнопку-меню бота — ту, что слева от поля ввода.
 
         Это отдельная сущность: не кнопка под сообщением, а свойство самого
@@ -245,7 +257,7 @@ class Inline:
                 f"Приложение может открываться иначе: `tgx inline run`")
         params = types.DataJSON(data=json.dumps({"bg_color": "#121212"}))
         result = await self._call(functions.messages.RequestWebViewRequest(
-            peer=peer or who, bot=who, platform=PLATFORM, url=url,
+            peer=peer or who, bot=who, platform=platform or PLATFORM, url=url,
             from_bot_menu=True, theme_params=params))
         return {"кнопка-меню": getattr(menu, "text", None) or "Открыть",
                 "адрес": getattr(result, "url", None),
@@ -280,7 +292,8 @@ class Inline:
                 "может писать вам": allow_write}
 
     async def web_app(self, bot: Any, *, peer: Any = None, url: str = "",
-                      param: str = "", theme: dict[str, Any] | None = None) -> dict[str, Any]:
+                      param: str = "", theme: dict[str, Any] | None = None,
+                      platform: str = "") -> dict[str, Any]:
         """Подписанный адрес мини-приложения.
 
         У Telegram три разных вызова под три способа открыть одно и то же
@@ -299,16 +312,19 @@ class Inline:
 
         who = await self.client.get_input_entity(bot)
         params = types.DataJSON(data=json.dumps(theme or {"bg_color": "#121212"}))
+        platform = platform or PLATFORM
+        if platform not in PLATFORMS:
+            raise InlineError(f"платформа «{platform}»; есть: {', '.join(PLATFORMS)}")
 
         async def from_chat(where: Any) -> Any:
             return await self._call(functions.messages.RequestWebViewRequest(
-                peer=where, bot=who, platform=PLATFORM, url=url or None,
+                peer=where, bot=who, platform=platform, url=url or None,
                 start_param=param or None, theme_params=params))
 
         async def main_app(where: Any) -> Any:
             """Главное мини-приложение — то, что открывается кнопкой «Запустить»."""
             return await self._call(functions.messages.RequestMainWebViewRequest(
-                peer=where, bot=who, platform=PLATFORM, start_param=param or None,
+                peer=where, bot=who, platform=platform, start_param=param or None,
                 theme_params=params))
 
         if peer is not None:
@@ -321,7 +337,7 @@ class Inline:
             attempts = (
                 ("из бокового меню", lambda: self._call(
                     functions.messages.RequestSimpleWebViewRequest(
-                        bot=who, platform=PLATFORM, from_side_menu=True, url=url or None,
+                        bot=who, platform=platform, from_side_menu=True, url=url or None,
                         start_param=param or None, theme_params=params))),
                 ("главным приложением", lambda: main_app(types.InputPeerSelf())),
                 ("из чата с собой", lambda: from_chat(types.InputPeerSelf())),

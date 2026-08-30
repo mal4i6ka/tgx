@@ -605,6 +605,31 @@ backBtn.onclick = () => reply('back_button_pressed', {});
 // Ту рисует само приложение, и она уводит на его собственный предыдущий экран,
 // но появляется далеко не всегда. А внутри приложения есть обычная история
 // браузера, и без этих кнопок из него некуда деться: зашёл вглубь — и сиди.
+// Представиться телефоном.
+//
+// Смены платформы в подписанном адресе мало: приложение смотрит и на само
+// устройство — есть ли касания, под каким углом экран. Настоящий телефон в
+// альбомной ориентации сообщает угол 90, настольный — ноль всегда, и по этому
+// признаку приложения отличают одно от другого. Подменяем до того, как
+// приложение успеет спросить: после загрузки уже поздно, оно измеряет себя
+// первым делом.
+const AS_PHONE = %(phone_json)s;
+
+function pretendPhone(win) {
+  if (!AS_PHONE || !win) return;
+  try {
+    Object.defineProperty(win.navigator, 'maxTouchPoints', {configurable: true, value: 5});
+    Object.defineProperty(win.screen, 'orientation', {
+      configurable: true,
+      value: {type: 'landscape-primary', angle: 90,
+              lock: () => Promise.resolve(), unlock() {},
+              addEventListener() {}, removeEventListener() {}},
+    });
+  } catch (e) {
+    note('устройство подменить не вышло: ' + e.message, true);
+  }
+}
+
 function place() {
   const doc = inside();
   if (!doc) { where.textContent = 'приложение недоступно'; return; }
@@ -621,7 +646,9 @@ document.getElementById('nav-reload').onclick = () => {
   try { inside().location.reload(); } catch (e) { frame.src = frame.src; }
 };
 document.getElementById('nav-home').onclick = () => { frame.src = HOME; };
-frame.addEventListener('load', () => { place(); announce(); });
+frame.addEventListener('load', () => { pretendPhone(inside() && inside().defaultView);
+                                       place(); announce(); });
+pretendPhone(inside() && inside().defaultView);
 setInterval(place, 700);   // адрес меняется и без перезагрузки: маршрутизатор внутри
 place();
 new ResizeObserver(() => reply('viewport_changed', viewport())).observe(frame);
@@ -641,7 +668,7 @@ class Host:
 
     def __init__(self, title: str, url: str, port: int = 0,
                  on_data: Callable[[str], None] | None = None,
-                 through: bool = True) -> None:
+                 through: bool = True, phone: bool = False) -> None:
         import tgx_windows
 
         self.title, self.app_url = title, url
@@ -650,6 +677,7 @@ class Host:
         self.closed = threading.Event()
         self.bridge = tgx_windows.Bridge()
         self.through = through
+        self.phone = phone
         self.fetcher = None
         # Происхождение известно заранее — иначе первый же запрос страницы
         # некуда направить: запасной путь узнаёт его лишь из ответа, а ответа
@@ -704,6 +732,7 @@ class Host:
                        "title_json": json.dumps(self.title, ensure_ascii=False),
                        "theme": json.dumps(THEME), "bridge": tgx_windows.BRIDGE_JS,
                        "home_json": json.dumps(self.framed()),
+                       "phone_json": json.dumps(bool(self.phone)),
                        "refused": json.dumps(REFUSED, ensure_ascii=False)}
 
     def _handler(self) -> type:

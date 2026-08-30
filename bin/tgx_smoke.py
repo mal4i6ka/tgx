@@ -2036,6 +2036,18 @@ def webapp_dom_regression() -> None:
                  "web_app_check_home_screen", "web_app_invoke_custom_method"):
         check(f"{kind} получает ответ", kind in page)
     check("полноэкранный отвечает своим событием", "fullscreen_changed" in page)
+
+    # Представиться телефоном. Смены платформы в подписанном адресе мало:
+    # приложение смотрит и на устройство — касания, угол экрана. Подменять надо
+    # до загрузки, иначе поздно: приложение измеряет себя первым делом.
+    phone = W.Host("x", "https://a/b", phone=True).page()
+    plain = W.Host("x", "https://a/b").page()
+    check("по умолчанию ничем не притворяемся", "const AS_PHONE = false" in plain)
+    check("а по просьбе — притворяемся", "const AS_PHONE = true" in phone)
+    check("подменяются касания", "maxTouchPoints" in phone)
+    check("и угол экрана", "angle: 90" in phone)
+    check("подмена ставится до загрузки рамки",
+          phone.index("pretendPhone(inside()") < phone.index("setInterval(place"))
     check("свой метод отвечает с тем же номером",
           "custom_method_invoked" in page and "req_id: data.req_id" in page)
 
@@ -2743,6 +2755,12 @@ async def inline_regression() -> None:
           "протухли" in I.HINTS["INLINE_RESULT_EXPIRED"])
     check("отсутствие приложения отсылает к BotFather",
           "BotFather" in I.HINTS["URL_INVALID"])
+
+    # Платформа выбирается: многие приложения рисуют себя по-разному на
+    # телефоне и на настольном клиенте, а иные показывают заглушку.
+    check("платформ несколько", len(I.PLATFORMS) >= 4)
+    check("настольная среди них", "tdesktop" in I.PLATFORMS)
+    check("телефонные тоже", "android" in I.PLATFORMS and "ios" in I.PLATFORMS)
 
 
 async def safety_regression() -> None:
