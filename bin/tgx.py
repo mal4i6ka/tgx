@@ -13,6 +13,7 @@ import csv
 import getpass
 import json
 import os
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -267,10 +268,25 @@ def print_table(rows: list[dict[str, Any]], fields: list[str], title: str | None
 
 
 async def make_client() -> TelegramClient:
+    """Соединение с Telegram на этой сессии.
+
+    Файл сессии — база SQLite, и держать её открытой может кто-то ещё:
+    MCP-сервер живёт постоянно и берёт её первым. Тогда обычная команда падает
+    на «database is locked» — сообщение верное, но бесполезное: человек не знает
+    ни кто держит, ни что делать. Ждём немного и объясняем.
+    """
     api_id, api_hash = get_credentials()
     DATA.mkdir(parents=True, exist_ok=True)
-    client = TelegramClient(str(SESSION.with_suffix("")), api_id, api_hash)
-    await client.connect()
+    try:
+        client = TelegramClient(str(SESSION.with_suffix("")), api_id, api_hash)
+        await client.connect()
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc):
+            raise
+        raise SystemExit(
+            "файл сессии занят другим процессом tgx — чаще всего это постоянно "
+            "работающий MCP-сервер. Подождите пару секунд и повторите, либо "
+            "остановите его") from exc
     return client
 
 
@@ -3297,6 +3313,40 @@ async def cmd_msgx(args: argparse.Namespace) -> None:
                 peer, args.id, reject=args.reject, comment=args.comment or ""),
             "check-shortcut": lambda: ex.check_shortcut(args.name),
             "order-shortcuts": lambda: ex.order_shortcuts(args.id),
+            "import-check": lambda: ex.import_check(args.head),
+            "import-target": lambda: ex.import_target(peer),
+            "import-start": lambda: ex.import_start(peer, args.file,
+                                                    media_count=args.media_count),
+            "import-media": lambda: ex.import_media(peer, args.import_id, args.file),
+            "import-run": lambda: ex.import_run(peer, args.import_id),
+            "add-answer": lambda: ex.add_answer(peer, args.id, args.text),
+            "drop-answer": lambda: ex.drop_answer(peer, args.id, args.option),
+            "unread-votes": lambda: ex.unread_votes(peer, limit=args.limit),
+            "read-votes": lambda: ex.read_votes(peer),
+            "pin-saved": lambda: ex.pin_saved(args.who, pinned=args.state == "on"),
+            "pinned-saved": lambda: ex.pinned_saved(),
+            "order-pinned": lambda: ex.order_pinned(args.who),
+            "suggested-folders": lambda: ex.suggested_folders(),
+            "folder-tags": lambda: ex.folder_tags(args.state == "on"),
+            "paid-privacy": lambda: ex.paid_privacy(
+                peer, args.id or 0,
+                anonymous=None if args.state == "show-status" else args.state == "on"),
+            "extended-media": lambda: ex.extended_media(peer, args.id),
+            "rich-message": lambda: ex.rich_message(peer, args.id),
+            "drop-call-history": lambda: ex.drop_call_history(both=args.both),
+            "drop-saved": lambda: ex.drop_saved(args.who),
+            "read-saved": lambda: ex.read_saved(args.who),
+            "url-decline": lambda: ex.url_decline(peer, args.id, args.button),
+            "url-match-code": lambda: ex.url_match_code(args.url, args.code),
+            "attach-bot": lambda: ex.attach_bot(args.bot),
+            "bot-app": lambda: ex.bot_app(args.bot, args.short_name),
+            "game-info": lambda: ex.game_info(peer, args.id),
+            "future-owner": lambda: ex.future_owner(peer),
+            "saved-by-id": lambda: ex.saved_by_id(args.who),
+            "order-pinned-saved": lambda: ex.order_pinned_saved(args.who),
+            "order-folders": lambda: ex.order_folders(args.id),
+            "web-page": lambda: ex.web_page(args.url),
+            "app-web-view": lambda: ex.app_web_view(args.bot, args.short_name),
             "drop-shortcut-messages": lambda: ex.drop_shortcut_messages(
                 args.shortcut_id, args.id),
         }
@@ -3359,12 +3409,38 @@ async def cmd_account(args: argparse.Namespace) -> None:
             "theme": lambda: acct.theme(args.slug),
             "save-ringtone": lambda: acct.save_ringtone(args.key, remove=args.remove),
             "save-music": lambda: acct.save_music(args.key, remove=args.remove),
+            "upload-wallpaper": lambda: acct.upload_wallpaper(
+                args.file, dark=args.dark, for_chat=args.for_chat),
+            "upload-ringtone": lambda: acct.upload_ringtone(args.file),
+            "create-theme": lambda: acct.create_theme(args.slug, args.title, args.file),
+            "save-theme": lambda: acct.save_theme(args.slug, remove=args.remove),
+            "save-wallpaper": lambda: acct.save_wallpaper(args.slug, remove=args.remove),
+            "wallpapers-by-slug": lambda: acct.wallpapers_by_slug(args.slug),
+            "forget-autosave-exceptions": lambda: acct.forget_autosave_exceptions(),
+            "edit-business-link": lambda: acct.edit_business_link(
+                args.slug, title=args.title or "", text=args.text or ""),
+            "drop-business-link": lambda: acct.drop_business_link(args.slug),
+            "confirm-bot-connection": lambda: acct.confirm_bot_connection(args.id),
+            "update-theme": lambda: acct.update_theme(
+                args.slug, title=args.title or "", path=args.file),
+            "upload-theme": lambda: acct.upload_theme(args.file, name=args.name or ""),
             "set-autosave": lambda: acct.set_autosave(
                 where=args.where, photos=args.photos, videos=args.videos, max_mb=args.max_mb),
         }
         if command in actions:
             got = await actions[command]()
             render.emit(got if isinstance(got, dict) else {"найдено": got})
+        elif command == "set-password":
+            await gated_or_die(client, args, "сменить пароль двухфакторной защиты",
+                               "потеряете новый — потеряете доступ к аккаунту",
+                               danger=True)
+            render.emit(await acct.set_password(
+                read_secret("нынешний пароль: ", "TGX_PASSWORD"),
+                read_secret("новый пароль (пусто — снять): ", "TGX_NEW_PASSWORD"),
+                hint=args.hint or "", email=args.email or ""))
+        elif command == "password-settings":
+            render.emit(await acct.password_settings(
+                read_secret("пароль двухфакторной защиты: ", "TGX_PASSWORD")))
         elif command == "free-messages-for":
             render.emit(await acct.free_messages_for(
                 args.user, free=args.state == "on", refund=args.refund))
@@ -4556,6 +4632,118 @@ def build_parser() -> argparse.ArgumentParser:
     m_dsm.add_argument("shortcut_id", type=int)
     m_dsm.add_argument("id", type=int, nargs="+")
 
+    m_ic = mx_sub.add_parser("import-check", help="узнаёт ли Telegram формат выгрузки")
+    m_ic.add_argument("head", help="первые строки файла")
+
+    m_it = mx_sub.add_parser("import-target", help="годится ли чат для переноса")
+    m_it.add_argument("peer")
+
+    m_is = mx_sub.add_parser("import-start", help="завести перенос переписки")
+    m_is.add_argument("peer")
+    m_is.add_argument("file", help="файл выгрузки")
+    m_is.add_argument("--media-count", type=int, default=0)
+
+    m_im = mx_sub.add_parser("import-media", help="долить вложение к переносу")
+    m_im.add_argument("peer")
+    m_im.add_argument("import_id", type=int)
+    m_im.add_argument("file")
+
+    m_ir = mx_sub.add_parser("import-run", help="запустить сборку переноса")
+    m_ir.add_argument("peer")
+    m_ir.add_argument("import_id", type=int)
+
+    m_aa = mx_sub.add_parser("add-answer", help="дописать свой вариант в опрос")
+    m_aa.add_argument("peer")
+    m_aa.add_argument("id", type=int)
+    m_aa.add_argument("text")
+
+    m_da = mx_sub.add_parser("drop-answer", help="убрать вариант из опроса")
+    m_da.add_argument("peer")
+    m_da.add_argument("id", type=int)
+    m_da.add_argument("option", type=int)
+
+    m_uv = mx_sub.add_parser("unread-votes", help="голоса, которых вы не видели")
+    m_uv.add_argument("peer")
+    m_uv.add_argument("--limit", type=int, default=30)
+
+    m_rvt = mx_sub.add_parser("read-votes", help="отметить голоса прочитанными")
+    m_rvt.add_argument("peer")
+
+    m_ps = mx_sub.add_parser("pin-saved", help="закрепить под-чат избранного")
+    m_ps.add_argument("who")
+    m_ps.add_argument("state", nargs="?", default="on", choices=["on", "off"])
+
+    mx_sub.add_parser("pinned-saved", help="закреплённые под-чаты избранного")
+    mx_sub.add_parser("suggested-folders", help="какие папки Telegram предлагает")
+
+    m_op = mx_sub.add_parser("order-pinned", help="переставить закреплённые чаты")
+    m_op.add_argument("who", nargs="+")
+
+    m_ft = mx_sub.add_parser("folder-tags", help="цветные метки папок (Premium)")
+    m_ft.add_argument("state", choices=["on", "off"])
+
+    m_pp = mx_sub.add_parser("paid-privacy", help="видно ли имя под платной реакцией")
+    m_pp.add_argument("state", nargs="?", default="show-status",
+                      choices=["on", "off", "show-status"])
+    m_pp.add_argument("--peer")
+    m_pp.add_argument("--id", type=int)
+
+    m_em = mx_sub.add_parser("extended-media", help="что известно о скрытом до оплаты медиа")
+    m_em.add_argument("peer")
+    m_em.add_argument("id", type=int, nargs="+")
+
+    m_rm = mx_sub.add_parser("rich-message", help="разбор богатого сообщения по блокам")
+    m_rm.add_argument("peer")
+    m_rm.add_argument("id", type=int)
+
+    m_dch = mx_sub.add_parser("drop-call-history", help="стереть список звонков")
+    m_dch.add_argument("--both", action="store_true", help="и у собеседников")
+
+    m_ds = mx_sub.add_parser("drop-saved", help="стереть сохранённое от автора")
+    m_ds.add_argument("who")
+
+    m_rs2 = mx_sub.add_parser("read-saved", help="отметить под-чат избранного прочитанным")
+    m_rs2.add_argument("who")
+
+    m_ud = mx_sub.add_parser("url-decline", help="отказаться входить по кнопке")
+    m_ud.add_argument("peer")
+    m_ud.add_argument("id", type=int)
+    m_ud.add_argument("button", type=int)
+
+    m_umc = mx_sub.add_parser("url-match-code", help="сверить код при входе по ссылке")
+    m_umc.add_argument("url")
+    m_umc.add_argument("code")
+
+    m_ab = mx_sub.add_parser("attach-bot", help="что за бот в меню вложений")
+    m_ab.add_argument("bot")
+
+    m_ba = mx_sub.add_parser("bot-app", help="мини-приложение бота по короткому имени")
+    m_ba.add_argument("bot")
+    m_ba.add_argument("short_name")
+
+    m_awv = mx_sub.add_parser("app-web-view", help="адрес приложения по короткому имени")
+    m_awv.add_argument("bot")
+    m_awv.add_argument("short_name")
+
+    m_gi = mx_sub.add_parser("game-info", help="сведения об эмодзи-игре")
+    m_gi.add_argument("peer")
+    m_gi.add_argument("id", type=int)
+
+    m_fo = mx_sub.add_parser("future-owner", help="кому достанется чат, если выйти")
+    m_fo.add_argument("peer")
+
+    m_sbi = mx_sub.add_parser("saved-by-id", help="под-чаты избранного по именам")
+    m_sbi.add_argument("who", nargs="+")
+
+    m_ops = mx_sub.add_parser("order-pinned-saved", help="переставить под-чаты избранного")
+    m_ops.add_argument("who", nargs="+")
+
+    m_of = mx_sub.add_parser("order-folders", help="порядок папок в списке чатов")
+    m_of.add_argument("id", type=int, nargs="+")
+
+    m_wp = mx_sub.add_parser("web-page", help="мгновенный просмотр страницы")
+    m_wp.add_argument("url")
+
     m_fc = mx_sub.add_parser("fact-check", help="приписать проверку факта (подтверждение)")
     m_fc.add_argument("peer")
     m_fc.add_argument("id", type=int)
@@ -4678,6 +4866,61 @@ def build_parser() -> argparse.ArgumentParser:
     a_rph.add_argument("--confirm-to")
     a_rph.add_argument("--as", dest="bot")
     a_rph.add_argument("--timeout", type=float, default=300.0)
+
+    a_uw = ac_sub.add_parser("upload-wallpaper", help="свои обои из файла")
+    a_uw.add_argument("file")
+    a_uw.add_argument("--dark", action="store_true")
+    a_uw.add_argument("--for-chat", action="store_true", help="для отдельного чата")
+
+    a_ur = ac_sub.add_parser("upload-ringtone", help="свой рингтон из файла")
+    a_ur.add_argument("file")
+
+    a_ct = ac_sub.add_parser("create-theme", help="завести свою тему")
+    a_ct.add_argument("slug")
+    a_ct.add_argument("title")
+    a_ct.add_argument("file", nargs="?", help="файл темы; без него — заготовка")
+
+    a_st = ac_sub.add_parser("save-theme", help="сохранить тему себе")
+    a_st.add_argument("slug")
+    a_st.add_argument("--remove", action="store_true")
+
+    a_sw2 = ac_sub.add_parser("save-wallpaper", help="сохранить обои себе")
+    a_sw2.add_argument("slug")
+    a_sw2.add_argument("--remove", action="store_true")
+
+    a_wbs = ac_sub.add_parser("wallpapers-by-slug", help="несколько обоев одним запросом")
+    a_wbs.add_argument("slug", nargs="+")
+
+    ac_sub.add_parser("forget-autosave-exceptions", help="сбросить исключения автосохранения")
+    ac_sub.add_parser("password-settings", help="почта восстановления за паролем")
+
+    a_ebl = ac_sub.add_parser("edit-business-link", help="поправить деловую ссылку")
+    a_ebl.add_argument("slug")
+    a_ebl.add_argument("--title")
+    a_ebl.add_argument("--text", help="заготовленный текст")
+
+    a_dbl = ac_sub.add_parser("drop-business-link", help="удалить деловую ссылку")
+    a_dbl.add_argument("slug")
+
+    a_cbc = ac_sub.add_parser("confirm-bot-connection", help="подтвердить подключение бота")
+    a_cbc.add_argument("id")
+
+    a_ut = ac_sub.add_parser("update-theme", help="поправить свою тему")
+    a_ut.add_argument("slug")
+    a_ut.add_argument("--title")
+    a_ut.add_argument("--file")
+
+    a_upt = ac_sub.add_parser("upload-theme", help="залить файл темы")
+    a_upt.add_argument("file")
+    a_upt.add_argument("--name")
+
+    a_sp = ac_sub.add_parser("set-password",
+                             help="сменить пароль двухфакторной защиты (подтверждение)")
+    a_sp.add_argument("--hint", help="подсказка к паролю")
+    a_sp.add_argument("--email", help="почта восстановления")
+    a_sp.add_argument("--confirm-to")
+    a_sp.add_argument("--as", dest="bot")
+    a_sp.add_argument("--timeout", type=float, default=300.0)
 
     a_pr = ac_sub.add_parser("paid-revenue", help="сколько принесли платные сообщения от человека")
     a_pr.add_argument("user")

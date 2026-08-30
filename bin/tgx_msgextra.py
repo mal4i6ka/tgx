@@ -515,3 +515,332 @@ class Extra:
         await self._call(functions.messages.DeleteQuickReplyMessagesRequest(
             shortcut_id=shortcut_id, id=ids))
         return {"убрано из быстрого ответа": len(ids)}
+
+    # --- перенос переписки из другого мессенджера ---
+    #
+    # Устроено в четыре шага, и порядок неслучаен: сначала сервер по первым
+    # строкам файла узнаёт формат, потом проверяет, годится ли чат, потом
+    # заводит перенос, а медиа доливаются по одному и лишь затем запускается
+    # сборка. Пропустить шаг нельзя — сервер откажет, но объяснит скупо.
+
+    async def import_check(self, head: str) -> dict[str, Any]:
+        """Узнаёт ли Telegram формат по первым строкам выгрузки."""
+        from telethon.tl import functions
+
+        ok = await self._call(functions.messages.CheckHistoryImportRequest(
+            import_head=head[:1000]))
+        return {"формат распознан": bool(ok),
+                "откуда": getattr(ok, "title", None) if not isinstance(ok, bool) else None}
+
+    async def import_target(self, peer: Any) -> dict[str, Any]:
+        """Годится ли этот чат для переноса и что он скажет пользователю."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.CheckHistoryImportPeerRequest(peer=peer))
+        return {"чат годится": True, "предупреждение": getattr(result, "confirm_text", None)}
+
+    async def import_start(self, peer: Any, path: Any, *,
+                           media_count: int = 0) -> dict[str, Any]:
+        """Завести перенос: залить файл выгрузки и получить номер."""
+        from pathlib import Path
+
+        from telethon.tl import functions
+
+        source = Path(path).expanduser()
+        if not source.is_file():
+            raise MsgError(f"файла {source} нет")
+        uploaded = await self.client.upload_file(str(source))
+        result = await self._call(functions.messages.InitHistoryImportRequest(
+            peer=peer, file=uploaded, media_count=media_count))
+        return {"перенос": getattr(result, "id", None),
+                "дальше": "долить медиа и запустить `msgx import-run`"}
+
+    async def import_media(self, peer: Any, import_id: int, path: Any) -> dict[str, Any]:
+        """Долить одно вложение к переносу."""
+        from pathlib import Path
+
+        from telethon.tl import functions, types
+
+        source = Path(path).expanduser()
+        if not source.is_file():
+            raise MsgError(f"файла {source} нет")
+        uploaded = await self.client.upload_file(str(source))
+        await self._call(functions.messages.UploadImportedMediaRequest(
+            peer=peer, import_id=import_id, file_name=source.name,
+            media=types.InputMediaUploadedDocument(
+                file=uploaded, mime_type="application/octet-stream", attributes=[])))
+        return {"долито": source.name}
+
+    async def import_run(self, peer: Any, import_id: int) -> dict[str, Any]:
+        """Запустить сборку перенесённой переписки."""
+        from telethon.tl import functions
+
+        await self._call(functions.messages.StartHistoryImportRequest(
+            peer=peer, import_id=import_id))
+        return {"перенос": import_id, "запущен": True}
+
+    # --- опросы: свои варианты и непрочитанные голоса ---
+
+    async def add_answer(self, peer: Any, message_id: int, text: str) -> dict[str, Any]:
+        """Дописать свой вариант в опрос, где это разрешено."""
+        from telethon.tl import functions, types
+
+        options = await self._poll_options(peer, message_id)
+        answer = types.PollAnswer(
+            text=types.TextWithEntities(text=text, entities=[]),
+            option=bytes([len(options)]))
+        await self._call(functions.messages.AddPollAnswerRequest(
+            peer=peer, msg_id=message_id, answer=answer))
+        return {"вариант добавлен": text}
+
+    async def drop_answer(self, peer: Any, message_id: int, option: int) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        options = await self._poll_options(peer, message_id)
+        if not 1 <= option <= len(options):
+            raise MsgError(f"вариант {option} вне 1–{len(options)}")
+        await self._call(functions.messages.DeletePollAnswerRequest(
+            peer=peer, msg_id=message_id, option=options[option - 1]))
+        return {"вариант убран": option}
+
+    async def unread_votes(self, peer: Any, *, limit: int = 30) -> list[dict[str, Any]]:
+        """Голоса в ваших опросах, которых вы ещё не видели."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetUnreadPollVotesRequest(
+            peer=peer, offset_id=0, add_offset=0, limit=limit, max_id=0, min_id=0))
+        return [{"опрос": m.id, "текст": (getattr(m, "message", "") or "")[:100]}
+                for m in getattr(result, "messages", None) or []]
+
+    async def read_votes(self, peer: Any, *, topic: int = 0) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.messages.ReadPollVotesRequest(
+            peer=peer, top_msg_id=topic or None))
+        return {"голоса": "отмечены прочитанными"}
+
+    # --- закрепления и папки ---
+
+    async def pin_saved(self, who: Any, *, pinned: bool = True) -> dict[str, Any]:
+        """Закрепить под-чат избранного."""
+        from telethon.tl import functions, types
+
+        peer = await self.client.get_input_entity(who)
+        await self._call(functions.messages.ToggleSavedDialogPinRequest(
+            peer=types.InputDialogPeer(peer=peer), pinned=pinned or None))
+        return {"под-чат": str(who), "закреплён": pinned}
+
+    async def pinned_saved(self) -> list[Any]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetPinnedSavedDialogsRequest())
+        return [getattr(getattr(d, "peer", None), "user_id", None)
+                or getattr(getattr(d, "peer", None), "channel_id", None)
+                for d in getattr(result, "dialogs", None) or []]
+
+    async def order_pinned(self, peers: list[Any], *, folder: int = 0) -> dict[str, Any]:
+        """Переставить закреплённые чаты в списке."""
+        from telethon.tl import functions, types
+
+        order = [types.InputDialogPeer(peer=await self.client.get_input_entity(p))
+                 for p in peers]
+        await self._call(functions.messages.ReorderPinnedDialogsRequest(
+            folder_id=folder, order=order, force=True))
+        return {"закреплённых переставлено": len(order)}
+
+    async def suggested_folders(self) -> list[dict[str, Any]]:
+        """Папки, которые Telegram предлагает завести."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetSuggestedDialogFiltersRequest())
+        rows = []
+        for item in result or []:
+            # название лежит внутри самой папки, а не на обёртке с описанием
+            inner = getattr(item, "filter", None)
+            title = getattr(inner, "title", None)
+            rows.append({"папка": getattr(title, "text", None) or title,
+                         "описание": getattr(item, "description", None)})
+        return rows
+
+    async def folder_tags(self, on: bool) -> dict[str, Any]:
+        """Цветные метки папок в списке чатов — возможность Premium."""
+        from telethon.tl import functions
+
+        await self._call(functions.messages.ToggleDialogFilterTagsRequest(enabled=on))
+        return {"метки папок": "включены" if on else "выключены"}
+
+    # --- платные реакции и скрытое медиа ---
+
+    async def paid_privacy(self, peer: Any = None, message_id: int = 0, *,
+                           anonymous: bool | None = None) -> dict[str, Any]:
+        """Видно ли ваше имя под платной реакцией. Без аргументов — узнать."""
+        from telethon.tl import functions, types
+
+        if anonymous is None:
+            result = await self._call(functions.messages.GetPaidReactionPrivacyRequest())
+            kind = type(result).__name__
+            return {"платные реакции": "анонимно" if "Anonymous" in kind else "с именем"}
+        choice = (types.PaidReactionPrivacyAnonymous() if anonymous
+                  else types.PaidReactionPrivacyDefault())
+        await self._call(functions.messages.TogglePaidReactionPrivacyRequest(
+            peer=peer, msg_id=message_id, private=choice))
+        return {"платные реакции": "анонимно" if anonymous else "с именем"}
+
+    async def extended_media(self, peer: Any, ids: list[int]) -> list[dict[str, Any]]:
+        """Медиа, скрытое до оплаты, — что о нём известно заранее."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetExtendedMediaRequest(
+            peer=peer, id=ids))
+        return [{"обновление": type(u).__name__.replace("Update", "")}
+                for u in getattr(result, "updates", None) or []]
+
+    async def rich_message(self, peer: Any, message_id: int) -> dict[str, Any]:
+        """Богатое сообщение целиком — то, что рисует `history`."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetRichMessageRequest(
+            peer=peer, id=message_id))
+        blocks = getattr(getattr(result, "rich_message", None), "blocks", None) or []
+        return {"сообщение": message_id, "блоков": len(blocks),
+                "виды": sorted({type(b).__name__.replace("PageBlock", "") for b in blocks})}
+
+    async def drop_call_history(self, *, both: bool = False) -> dict[str, Any]:
+        """Стереть список звонков."""
+        from telethon.tl import functions
+
+        await self._call(functions.messages.DeletePhoneCallHistoryRequest(
+            revoke=both or None))
+        return {"история звонков": "стёрта", "у обоих": both}
+
+    async def drop_saved(self, who: Any) -> dict[str, Any]:
+        """Стереть сохранённое от одного автора внутри избранного."""
+        from telethon.tl import functions
+
+        peer = await self.client.get_input_entity(who)
+        await self._call(functions.messages.DeleteSavedHistoryRequest(peer=peer, max_id=0))
+        return {"сохранённое от": str(who), "стёрто": True}
+
+    async def read_saved(self, who: Any, *, up_to: int = 0) -> dict[str, Any]:
+        from telethon.tl import functions, types
+
+        peer = await self.client.get_input_entity(who)
+        await self._call(functions.messages.ReadSavedHistoryRequest(
+            parent_peer=types.InputPeerSelf(), peer=peer, max_id=up_to))
+        return {"под-чат": str(who), "прочитан": True}
+
+    # --- последние: вход по коду, скрытые чаты, приложения ботов, порядок папок ---
+
+    async def url_decline(self, peer: Any, message_id: int,
+                          button_id: int) -> dict[str, Any]:
+        """Отказаться входить по кнопке — сайт не узнает о вас ничего."""
+        from telethon.tl import functions
+
+        await self._call(functions.messages.DeclineUrlAuthRequest(
+            peer=peer, msg_id=message_id, button_id=button_id))
+        return {"вход": "отклонён"}
+
+    async def url_match_code(self, url: str, code: str) -> dict[str, Any]:
+        """Сверить код подтверждения при входе по ссылке."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.CheckUrlAuthMatchCodeRequest(
+            url=url, match_code=code))
+        return {"код подходит": bool(result)}
+
+    async def attach_bot(self, bot: Any) -> dict[str, Any]:
+        """Что за бот в меню вложений — до того, как его добавить."""
+        from telethon.tl import functions
+
+        who = await self.client.get_input_entity(bot)
+        result = await self._call(functions.messages.GetAttachMenuBotRequest(bot=who))
+        item = getattr(result, "bot", result)
+        return {"бот": getattr(item, "short_name", None),
+                "добавлен": not getattr(item, "inactive", True),
+                "просит писать вам": bool(getattr(item, "request_write_access", False))}
+
+    async def bot_app(self, bot: Any, short_name: str) -> dict[str, Any]:
+        """Мини-приложение бота по короткому имени — до запуска."""
+        from telethon.tl import functions, types
+
+        who = await self.client.get_input_entity(bot)
+        result = await self._call(functions.messages.GetBotAppRequest(
+            app=types.InputBotAppShortName(bot_id=who, short_name=short_name), hash=0))
+        app = getattr(result, "app", None)
+        return {"приложение": getattr(app, "title", None),
+                "короткое имя": getattr(app, "short_name", short_name),
+                "описание": getattr(app, "description", None),
+                "надо подтвердить запуск": bool(getattr(result, "request_write_access", False))}
+
+    async def game_info(self, peer: Any, message_id: int) -> dict[str, Any]:
+        """Сведения об эмодзи-игре в сообщении."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetEmojiGameInfoRequest(
+            peer=peer, msg_id=message_id))
+        return {"игра": type(result).__name__.replace("EmojiGameInfo", "") or "есть",
+                "сообщение": message_id}
+
+    async def future_owner(self, peer: Any) -> dict[str, Any]:
+        """Кому достанется чат, если вы из него выйдете."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetFutureChatCreatorAfterLeaveRequest(
+            peer=peer))
+        user = getattr(result, "user_id", None) or getattr(result, "id", None)
+        return {"следующий владелец": user or "никто — чат осиротеет"}
+
+    async def saved_by_id(self, peers: list[Any]) -> list[dict[str, Any]]:
+        """Под-чаты избранного по именам — точечно, без листания списка."""
+        from telethon.tl import functions
+
+        entities = [await self.client.get_input_entity(p) for p in peers]
+        result = await self._call(functions.messages.GetSavedDialogsByIDRequest(
+            ids=entities))
+        return [{"сверху": getattr(d, "top_message", None)}
+                for d in getattr(result, "dialogs", None) or []]
+
+    async def order_pinned_saved(self, peers: list[Any]) -> dict[str, Any]:
+        from telethon.tl import functions, types
+
+        order = [types.InputDialogPeer(peer=await self.client.get_input_entity(p))
+                 for p in peers]
+        await self._call(functions.messages.ReorderPinnedSavedDialogsRequest(
+            order=order, force=True))
+        return {"под-чатов переставлено": len(order)}
+
+    async def order_folders(self, ids: list[int]) -> dict[str, Any]:
+        """Порядок папок в списке чатов."""
+        from telethon.tl import functions
+
+        await self._call(functions.messages.UpdateDialogFiltersOrderRequest(order=ids))
+        return {"порядок папок": ids}
+
+    async def web_page(self, url: str) -> dict[str, Any]:
+        """Мгновенный просмотр страницы, если Telegram его умеет для неё."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetWebPageRequest(url=url, hash=0))
+        page = getattr(result, "webpage", result)
+        return {"заголовок": getattr(page, "title", None),
+                "сайт": getattr(page, "site_name", None),
+                "мгновенный просмотр": bool(getattr(page, "cached_page", None))}
+
+    async def app_web_view(self, bot: Any, short_name: str) -> dict[str, Any]:
+        """Подписанный адрес приложения по короткому имени — третий способ.
+
+        Первые два — боковое меню и чат — уже умеет `tgx inline run`; этот нужен
+        ссылкам вида t.me/бот/имя.
+        """
+        import json as _json
+
+        from telethon.tl import functions, types
+
+        who = await self.client.get_input_entity(bot)
+        result = await self._call(functions.messages.RequestAppWebViewRequest(
+            peer=types.InputPeerSelf(),
+            app=types.InputBotAppShortName(bot_id=who, short_name=short_name),
+            platform="tdesktop",
+            theme_params=types.DataJSON(data=_json.dumps({"bg_color": "#121212"}))))
+        return {"адрес": getattr(result, "url", None),
+                "осторожно": "адрес подписан вашей сессией — не передавайте его никому"}

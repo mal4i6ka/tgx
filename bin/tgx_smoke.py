@@ -1841,6 +1841,22 @@ async def msgextra_regression() -> None:
 
     check("протухшее приглашение объяснено", "INVITE_HASH_EXPIRED" in M.HINTS)
 
+    # название предлагаемой папки лежит внутри самой папки, а не на обёртке —
+    # читая с обёртки, получаешь null там, где есть «Unread»
+    class Folders(M.Extra):
+        def __init__(self):
+            pass
+
+        async def _call(self, request):
+            return [Thing(filter=Thing(title=Thing(text="Непрочитанные")),
+                          description="все новые"),
+                    Thing(filter=Thing(title="Простая строка"), description="")]
+
+    rows = await Folders().suggested_folders()
+    check("название берётся изнутри папки", rows[0]["папка"] == "Непрочитанные")
+    check("и простая строка тоже годится", rows[1]["папка"] == "Простая строка")
+    check("описание — с обёртки", rows[0]["описание"] == "все новые")
+
 
 def webapp_dom_regression() -> None:
     """Глаза и руки агента внутри приложения. Ключевое решение — textContent, а

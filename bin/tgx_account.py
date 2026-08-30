@@ -416,3 +416,187 @@ class Account:
         await self._call(functions.account.ReportProfilePhotoRequest(
             peer=peer, photo_id=photo, reason=getattr(types, name)(), message=comment))
         return {"жалоба на аватар": "отправлена", "причина": reason}
+
+    # --- свои обои, темы и рингтоны из файла ---
+
+    async def upload_wallpaper(self, path: Any, *, dark: bool = False,
+                               for_chat: bool = False) -> dict[str, Any]:
+        """Свои обои из файла. Появляются в списке и становятся доступны везде."""
+        import mimetypes
+        from pathlib import Path
+
+        from telethon.tl import functions, types
+
+        source = Path(path).expanduser()
+        if not source.is_file():
+            raise AccountError(f"файла {source} нет")
+        uploaded = await self.client.upload_file(str(source))
+        mime = mimetypes.guess_type(str(source))[0] or "image/jpeg"
+        result = await self._call(functions.account.UploadWallPaperRequest(
+            file=uploaded, mime_type=mime,
+            settings=types.WallPaperSettings(dark=dark or None),
+            for_chat=for_chat or None))
+        return {"обои": source.name, "адрес": getattr(result, "slug", None),
+                "id": getattr(result, "id", None)}
+
+    async def upload_ringtone(self, path: Any) -> dict[str, Any]:
+        """Свой рингтон из файла — только аудио и небольшого размера."""
+        import mimetypes
+        from pathlib import Path
+
+        from telethon.tl import functions
+
+        source = Path(path).expanduser()
+        if not source.is_file():
+            raise AccountError(f"файла {source} нет")
+        uploaded = await self.client.upload_file(str(source))
+        mime = mimetypes.guess_type(str(source))[0] or "audio/mpeg"
+        result = await self._call(functions.account.UploadRingtoneRequest(
+            file=uploaded, file_name=source.name, mime_type=mime))
+        return {"рингтон": source.name, "id": getattr(result, "id", None),
+                "ключ": f"{getattr(result, 'id', 0)}:{getattr(result, 'access_hash', 0)}"}
+
+    async def create_theme(self, slug: str, title: str, path: Any = None) -> dict[str, Any]:
+        """Завести свою тему. Без файла — пустая заготовка под правку."""
+        from pathlib import Path
+
+        from telethon.tl import functions
+
+        document = None
+        if path:
+            source = Path(path).expanduser()
+            if not source.is_file():
+                raise AccountError(f"файла {source} нет")
+            document = await self.client.upload_file(str(source))
+        result = await self._call(functions.account.CreateThemeRequest(
+            slug=slug, title=title, document=document))
+        return {"тема": title, "адрес": getattr(result, "slug", slug),
+                "id": getattr(result, "id", None)}
+
+    async def save_theme(self, slug: str, *, remove: bool = False) -> dict[str, Any]:
+        from telethon.tl import functions, types
+
+        await self._call(functions.account.SaveThemeRequest(
+            theme=types.InputThemeSlug(slug=slug), unsave=remove))
+        return {"тема": slug, "сохранена": not remove}
+
+    async def save_wallpaper(self, slug: str, *, remove: bool = False) -> dict[str, Any]:
+        from telethon.tl import functions, types
+
+        await self._call(functions.account.SaveWallPaperRequest(
+            wallpaper=types.InputWallPaperSlug(slug=slug), unsave=remove,
+            settings=types.WallPaperSettings()))
+        return {"обои": slug, "сохранены": not remove}
+
+    async def wallpapers_by_slug(self, slugs: list[str]) -> list[dict[str, Any]]:
+        """Несколько обоев одним запросом — так делает клиент при листании."""
+        from telethon.tl import functions, types
+
+        result = await self._call(functions.account.GetMultiWallPapersRequest(
+            wallpapers=[types.InputWallPaperSlug(slug=s) for s in slugs]))
+        return [{"адрес": getattr(w, "slug", None), "id": getattr(w, "id", None)}
+                for w in result or []]
+
+    async def forget_autosave_exceptions(self) -> dict[str, Any]:
+        """Сбросить чаты, для которых автосохранение настроено отдельно."""
+        from telethon.tl import functions
+
+        await self._call(functions.account.DeleteAutoSaveExceptionsRequest())
+        return {"исключения автосохранения": "сброшены"}
+
+    async def edit_business_link(self, slug: str, *, title: str = "",
+                                 text: str = "") -> dict[str, Any]:
+        """Поправить деловую ссылку: заголовок и заготовленный текст."""
+        from telethon.tl import functions, types
+
+        link = types.InputBusinessChatLink(
+            message=text, title=title or None, entities=None)
+        result = await self._call(functions.account.EditBusinessChatLinkRequest(
+            slug=slug, link=link))
+        return {"ссылка": getattr(result, "link", slug),
+                "заголовок": getattr(result, "title", title)}
+
+    async def drop_business_link(self, slug: str) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.account.DeleteBusinessChatLinkRequest(slug=slug))
+        return {"деловая ссылка": slug, "удалена": True}
+
+    async def password_settings(self, password: str) -> dict[str, Any]:
+        """Что скрыто за паролем двухфакторной защиты: почта и подсказка.
+
+        Пароль не отправляется — отправляется доказательство знания, как и при
+        выводе средств. Сам он остаётся здесь.
+        """
+        from telethon.password import compute_check
+        from telethon.tl import functions
+
+        state = await self.client(functions.account.GetPasswordRequest())
+        result = await self._call(functions.account.GetPasswordSettingsRequest(
+            password=compute_check(state, password)))
+        return {"почта восстановления": getattr(result, "email", None) or "не задана",
+                "есть скрытые данные": bool(getattr(result, "secure_settings", None))}
+
+    async def confirm_bot_connection(self, connection_id: str) -> dict[str, Any]:
+        """Подтвердить деловое подключение бота, которое он запросил."""
+        from telethon.tl import functions
+
+        await self._call(functions.account.ConfirmBotConnectionRequest(
+            connection_id=connection_id))
+        return {"подключение": connection_id, "подтверждено": True}
+
+    async def update_theme(self, slug: str, *, title: str = "",
+                           path: Any = None) -> dict[str, Any]:
+        """Поправить свою тему: название или файл."""
+        from pathlib import Path
+
+        from telethon.tl import functions, types
+
+        document = None
+        if path:
+            source = Path(path).expanduser()
+            if not source.is_file():
+                raise AccountError(f"файла {source} нет")
+            document = await self.client.upload_file(str(source))
+        result = await self._call(functions.account.UpdateThemeRequest(
+            format="ios", theme=types.InputThemeSlug(slug=slug),
+            title=title or None, document=document))
+        return {"тема": getattr(result, "title", title or slug), "адрес": slug}
+
+    async def upload_theme(self, path: Any, *, name: str = "") -> dict[str, Any]:
+        """Залить файл темы. Отдельный шаг: сначала файл, потом сама тема."""
+        import mimetypes
+        from pathlib import Path
+
+        from telethon.tl import functions
+
+        source = Path(path).expanduser()
+        if not source.is_file():
+            raise AccountError(f"файла {source} нет")
+        uploaded = await self.client.upload_file(str(source))
+        mime = mimetypes.guess_type(str(source))[0] or "application/x-tgtheme-ios"
+        result = await self._call(functions.account.UploadThemeRequest(
+            file=uploaded, file_name=name or source.name, mime_type=mime))
+        return {"файл темы": source.name, "id": getattr(result, "id", None),
+                "дальше": "завести тему командой create-theme"}
+
+    async def set_password(self, current: str, new: str, *, hint: str = "",
+                           email: str = "") -> dict[str, Any]:
+        """Сменить пароль двухфакторной защиты.
+
+        Оба пароля остаются здесь: наружу уходит доказательство знания старого и
+        проверочные данные для нового. Потерять новый пароль — значит потерять
+        доступ, поэтому команда идёт через подтверждение.
+        """
+        from telethon.password import compute_check, compute_digest
+        from telethon.tl import functions, types
+
+        state = await self.client(functions.account.GetPasswordRequest())
+        settings = types.account.PasswordInputSettings(
+            new_algo=state.new_algo,
+            new_password_hash=compute_digest(state.new_algo, new) if new else b"",
+            hint=hint or None, email=email or None)
+        await self._call(functions.account.UpdatePasswordSettingsRequest(
+            password=compute_check(state, current), new_settings=settings))
+        return {"пароль": "сменён" if new else "снят",
+                "подсказка": hint or None, "почта": email or None}
