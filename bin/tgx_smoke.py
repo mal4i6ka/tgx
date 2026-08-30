@@ -18,7 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from textual.widgets import Checkbox, Input, Select, TextArea  # noqa: E402
 
-from tgx_tui import READ_DWELL, ChatList, DemoBackend, MessageList, TgxApp, plain_task_factory  # noqa: E402
+from tgx_tui import (READ_DWELL, ChatList, DemoBackend, MessageList, PaletteScreen,  # noqa: E402
+                     TgxApp, plain_task_factory)
 
 OUT = Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/tgx-shots")
 
@@ -1923,6 +1924,39 @@ async def webapp_button_regression() -> None:
     check("кнопка находится по ряду и месту", by_place["кнопка"] == "Открыть")
 
 
+def palette_regression() -> None:
+    """Список команд окна выведен из дерева разбора — оттуда же, откуда его
+    берёт коннектор. Написанный руками второй список однажды разошёлся бы с
+    первым, и понять это можно было бы только по жалобе."""
+    import tgx_palette
+
+    found = tgx_palette.commands()
+    check("команд больше сотни", len(found) > 100)
+    check("у каждой есть путь", all(c.path for c in found))
+    check("имя начинается с tgx", all(c.name.startswith("tgx ") for c in found))
+
+    names = {" ".join(c.path) for c in found}
+    check("окно себя не предлагает", "ui" not in names)
+    check("вход по коду тоже", not any(n.startswith("auth") for n in names))
+    check("но обычные команды на месте", "dialogs" in names)
+
+    by_name = {c.name: c for c in found}
+    simple = by_name.get("tgx dialogs")
+    check("у простой команды нет обязательных полей",
+          simple is not None and not simple.positional)
+    asking = by_name.get("tgx history")
+    check("у команды с чатом поле есть",
+          asking is not None and any(p["dest"] == "peer" for p in asking.positional))
+
+    # поиск: имя весит больше описания, и совпадение ближе к началу — выше
+    hits = sorted(tgx_palette.search(found, "wallpaper"), key=lambda p: -p[0])
+    check("поиск по имени находит", hits and "wallpaper" in hits[0][1].name)
+    check("несуществующее не находится",
+          list(tgx_palette.search(found, "щщщщ-такого-нет")) == [])
+    check("пустой запрос отдаёт всё",
+          len(list(tgx_palette.search(found, ""))) == len(found))
+
+
 def webapp_dom_regression() -> None:
     """Глаза и руки агента внутри приложения. Ключевое решение — textContent, а
     не innerText: innerText отражает отрисованный текст и в фоновой вкладке
@@ -3164,6 +3198,7 @@ async def main() -> int:
     ai_compose_regression()
     await msgextra_regression()
     await webapp_button_regression()
+    palette_regression()
     webapp_dom_regression()
     await account_regression()
     proxy_regression()
@@ -3778,6 +3813,37 @@ async def main() -> int:
         # the demo backend keeps injecting traffic, so assert the badge survived
         # rather than a fixed number
         check("chat you passed through keeps its badge", skipped.unread > 0)
+
+        # Палитра команд: в окно попадает всё, что умеет командная строка.
+        # Список выводится из дерева разбора, поэтому проверяем не имена, а то,
+        # что он непустой, ищется и открывается настоящим экраном.
+        await pilot.press("ctrl+p")
+        opened = await wait_until(
+            lambda: isinstance(app.screen, PaletteScreen), pilot, timeout=8)
+        check("палитра открывается по ctrl+p", opened)
+        if opened:
+            palette = app.screen
+            check("команд в палитре больше сотни", len(palette.all_commands) > 100)
+            check("показан не весь список разом", len(palette.shown) <= 60)
+            palette.refresh_list("обои")
+            found = [c.name for c in palette.shown]
+            check("поиск находит обои", any("wallpaper" in n for n in found))
+            palette.refresh_list("совершенно-такого-нет")
+            check("несуществующее ничего не находит", palette.shown == [])
+            palette.refresh_list("")
+            check("пустой запрос показывает список", len(palette.shown) > 0)
+            app.save_screenshot(str(OUT / "12-palette.svg"))
+            await pilot.press("escape")
+            await wait_until(lambda: not isinstance(app.screen, PaletteScreen), pilot)
+            check("палитра закрывается по escape",
+                  not isinstance(app.screen, PaletteScreen))
+
+        # Кнопка-меню бота — свойство самого бота, а не сообщения. Из чата её
+        # жмут чаще всего, поэтому у неё своё сочетание, а не поиск по палитре.
+        check("у приложения бота своё сочетание",
+              any(b.action == "menu_button" for b in TgxApp.BINDINGS))
+        check("встроенная палитра Textual отключена",
+              TgxApp.ENABLE_COMMAND_PALETTE is False)
 
         # help
         await pilot.press("ctrl+t")

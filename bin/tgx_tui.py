@@ -3750,10 +3750,172 @@ class LoginScreen(ModalScreen[bool]):
 
 
 # ── application ──────────────────────────────────────────────────────────────
+class PaletteScreen(ModalScreen[Any]):
+    """Все команды tgx, найденные по названию.
+
+    Список не написан руками, а выведен из дерева разбора командной строки —
+    оттуда же, откуда его берёт коннектор для агентов. Новая команда появляется
+    здесь сама; два списка, которые надо помнить обновлять, однажды разошлись бы.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "отмена"),
+        Binding("down", "to_list", "к списку", show=False),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        import tgx_palette
+
+        self.all_commands = tgx_palette.commands()
+        self.shown: list[Any] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog-wide"):
+            yield Static(Text(f"команды tgx · {len(self.all_commands)}",
+                              style=f"bold {pal('primary')}"), classes="dialog-title")
+            yield Input(placeholder="что сделать: подарок, обои, история…", id="palette-query")
+            yield OptionList(id="palette-list")
+            yield Static(Text("enter — выполнить · escape — отмена", style=muted()),
+                         classes="dialog-hint")
+
+    def on_mount(self) -> None:
+        self.refresh_list("")
+        self.query_one("#palette-query", Input).focus()
+
+    def refresh_list(self, query: str) -> None:
+        import tgx_palette
+
+        hits = sorted(tgx_palette.search(self.all_commands, query),
+                      key=lambda pair: -pair[0])[:60]
+        self.shown = [command for _, command in hits]
+        listing = self.query_one("#palette-list", OptionList)
+        listing.clear_options()
+        for command in self.shown:
+            label = Text(command.name, style="bold")
+            if command.hint:
+                label.append("  " + command.hint[:60], style=muted())
+            listing.add_option(Option(label))
+
+    @on(Input.Changed, "#palette-query")
+    def typed(self, event: Input.Changed) -> None:
+        self.refresh_list(event.value)
+
+    @on(Input.Submitted, "#palette-query")
+    def submitted(self) -> None:
+        if self.shown:
+            self.dismiss(self.shown[0])
+
+    @on(OptionList.OptionSelected, "#palette-list")
+    def chosen(self, event: OptionList.OptionSelected) -> None:
+        if 0 <= event.option_index < len(self.shown):
+            self.dismiss(self.shown[event.option_index])
+
+    def action_to_list(self) -> None:
+        self.query_one("#palette-list", OptionList).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ArgsScreen(ModalScreen[dict | None]):
+    """Что команда просит на вход.
+
+    Поля берутся из её же разборщика: обязательные сверху, необязательные ниже,
+    выключатели — галочками. Ничего не выдумываем: если у аргумента есть список
+    допустимых значений, показываем именно его.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "отмена"),
+        Binding("ctrl+s", "run", "выполнить"),
+    ]
+
+    def __init__(self, command: Any) -> None:
+        super().__init__()
+        self.command = command
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog-wide"):
+            yield Static(Text(self.command.name, style=f"bold {pal('primary')}"),
+                         classes="dialog-title")
+            if self.command.hint:
+                yield Static(Text(self.command.hint, style=muted()), classes="dialog-hint")
+            for spec in self.command.positional:
+                yield from self._field(spec, required=True)
+            for spec in self.command.options:
+                yield from self._field(spec, required=False)
+            for spec in self.command.flags:
+                yield Checkbox(spec["help"] or spec["dest"], id=f"arg-{spec['dest']}")
+            yield Static(Text("ctrl+s — выполнить · escape — отмена", style=muted()),
+                         classes="dialog-hint")
+
+    def _field(self, spec: dict, *, required: bool) -> ComposeResult:
+        name = spec["dest"]
+        hint = spec["help"] or name
+        if spec["choices"]:
+            yield Static(Text(hint, style=muted()), classes="dialog-hint")
+            yield Select([(str(c), str(c)) for c in spec["choices"]],
+                         allow_blank=not required, id=f"arg-{name}")
+        else:
+            mark = "" if required else " (необязательно)"
+            if spec["many"]:
+                mark += " — через пробел"
+            yield Input(placeholder=f"{hint}{mark}", id=f"arg-{name}")
+
+    def action_run(self) -> None:
+        values: dict[str, Any] = {}
+        for spec in self.command.positional + self.command.options:
+            name = spec["dest"]
+            try:
+                widget = self.query_one(f"#arg-{name}")
+            except Exception:
+                continue
+            raw = widget.value if not isinstance(widget, Select) else widget.value
+            text = "" if raw in (None, Select.BLANK) else str(raw).strip()
+            if not text:
+                if spec in self.command.positional and spec["required"] is not False:
+                    self.notify(f"нужно заполнить: {name}", severity="warning", timeout=3)
+                    return
+                continue
+            values[name] = text.split() if spec["many"] else text
+        for spec in self.command.flags:
+            box = self.query_one(f"#arg-{spec['dest']}", Checkbox)
+            if box.value:
+                values[spec["dest"]] = True
+        self.dismiss(values)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ResultScreen(ModalScreen[None]):
+    """Что команда ответила. Прокручивается: ответы бывают длинными."""
+
+    BINDINGS = [Binding("escape", "dismiss", "закрыть")]
+
+    def __init__(self, title: str, body: str) -> None:
+        super().__init__()
+        self.head = title
+        self.body = body
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog-wide"):
+            yield Static(Text(self.head, style=f"bold {pal('primary')}"),
+                         classes="dialog-title")
+            with VerticalScroll():
+                yield Static(Text(self.body))
+            yield Static(Text("escape — закрыть", style=muted()), classes="dialog-hint")
+
+
 class TgxApp(App):
     CSS_PATH = "tgx_tui.tcss"
     TITLE = "tgx"
     SUB_TITLE = "telegram in your terminal"
+    # Своя палитра занимает ctrl+p, встроенная в Textual — тоже. Пока обе были
+    # включены, выигрывала её: наша не открывалась, и понять почему по нажатию
+    # было нельзя. Наша знает команды tgx, встроенная — только смену темы.
+    ENABLE_COMMAND_PALETTE = False
 
     BINDINGS = [
         Binding("ctrl+q", "quit", "выход"),
@@ -3761,6 +3923,8 @@ class TgxApp(App):
         Binding("ctrl+f", "search_chat", "поиск"),
         Binding("ctrl+r", "reply", "ответить"),
         Binding("ctrl+t", "cycle_theme", "тема"),
+        Binding("ctrl+p", "palette", "команды"),
+        Binding("ctrl+w", "menu_button", "приложение бота"),
         Binding("f1", "help", "справка"),
         Binding("question_mark", "help", "справка", show=False),
         Binding("ctrl+k", "focus_chats", "список чатов", show=False),
@@ -3879,6 +4043,68 @@ class TgxApp(App):
                 widget.refresh_text()
             self.query_one(TopBar).refresh()
             self._paint_header()
+
+    @work
+    async def action_menu_button(self) -> None:
+        """Открыть мини-приложение бота — то, что живёт под кнопкой-меню.
+
+        Кнопка-меню — свойство самого бота, а не сообщения: в графическом
+        клиенте она слева от поля ввода. Из чата с ботом её нажимают чаще
+        всего, поэтому у неё своё сочетание клавиш, а не поиск по палитре.
+        """
+        import tgx_inline
+
+        chat = self.current
+        if chat is None:
+            self.notify("сначала откройте чат", severity="warning", timeout=3)
+            return
+        inline = tgx_inline.Inline(self.backend.client)
+        try:
+            got = await inline.press_menu_button(chat.entity, peer=chat.entity)
+        except Exception as exc:
+            self.notify(str(exc), severity="warning", timeout=8)
+            return
+        url = got.get("адрес")
+        if not url:
+            self.notify("сервер не дал адреса приложения", severity="warning", timeout=4)
+            return
+        where = await self.backend.open_web_app(
+            got.get("кнопка-меню") or chat.name, url)
+        self.notify(where, timeout=6)
+
+    @work
+    async def action_palette(self) -> None:
+        """Найти команду по названию и выполнить её здесь же."""
+        import json as _json
+
+        import tgx_palette
+
+        command = await self.push_screen_wait(PaletteScreen())
+        if command is None:
+            return
+        values: dict[str, Any] = {}
+        if command.needs_input:
+            asked = await self.push_screen_wait(ArgsScreen(command))
+            if asked is None:
+                return
+            values = asked
+
+        self.notify(f"{command.name}…", timeout=2)
+        try:
+            # У окна свой слой поверх Telethon; команде нужен сам клиент.
+            answer = await tgx_palette.run(command, values, self.backend.client)
+        except Exception as exc:
+            # Ошибки этих модулей уже написаны для человека — трассировка
+            # поверх них только прячет фразу, которая объясняет, что делать.
+            self.push_screen(ResultScreen(command.name, str(exc)))
+            return
+        if answer is None:
+            body = "готово"
+        elif isinstance(answer, str):
+            body = answer
+        else:
+            body = _json.dumps(answer, ensure_ascii=False, indent=2, default=str)
+        self.push_screen(ResultScreen(command.name, body))
 
     def action_cycle_theme(self) -> None:
         known = [t for t in THEMES if t in self.available_themes]
