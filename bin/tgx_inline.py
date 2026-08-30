@@ -148,6 +148,33 @@ class Inline:
 
     # --- кнопки, открывающие мини-приложение ---
 
+    @staticmethod
+    def is_web_button(button: Any) -> bool:
+        """Открывает ли эта кнопка мини-приложение.
+
+        Отдельная проверка нужна всем трём поверхностям — окну, командам и
+        коннектору, — и держать её надо в одном месте: разъедется здесь, и
+        каждая начнёт молчать по-своему.
+        """
+        return type(button).__name__ in {"KeyboardButtonWebView",
+                                         "KeyboardButtonSimpleWebView"}
+
+    async def web_button_url(self, peer: Any, message: Any, button: Any) -> str:
+        """Подписанный адрес приложения из уже найденной кнопки."""
+        from telethon.tl import functions, types
+
+        bot = await self.client.get_input_entity(
+            getattr(message, "sender_id", None) or getattr(message, "via_bot_id", None))
+        params = types.DataJSON(data=json.dumps({"bg_color": "#121212"}))
+        if type(button).__name__ == "KeyboardButtonSimpleWebView":
+            result = await self._call(functions.messages.RequestSimpleWebViewRequest(
+                bot=bot, platform=PLATFORM, url=button.url, theme_params=params))
+        else:
+            result = await self._call(functions.messages.RequestWebViewRequest(
+                peer=peer, bot=bot, platform=PLATFORM, url=button.url,
+                theme_params=params))
+        return getattr(result, "url", "")
+
     async def press_web_button(self, peer: Any, message_id: int, *, text: str = "",
                                row: int = 0, col: int = 0) -> dict[str, Any]:
         """Нажать кнопку, которая открывает мини-приложение.
@@ -183,24 +210,13 @@ class Inline:
                                   f"рядов {len(lines)}")
             button = lines[row].buttons[col]
 
-        kind = type(button).__name__
-        if kind not in {"KeyboardButtonWebView", "KeyboardButtonSimpleWebView"}:
+        if not self.is_web_button(button):
             raise InlineError(
-                f"кнопка «{getattr(button, 'text', '')}» — это {kind}, а не запуск "
-                f"приложения; обычные кнопки жмёт `tgx message-click`")
-
-        bot = await self.client.get_input_entity(
-            getattr(message, "sender_id", None) or getattr(message, "via_bot_id", None))
-        params = types.DataJSON(data=json.dumps({"bg_color": "#121212"}))
-        if kind == "KeyboardButtonSimpleWebView":
-            result = await self._call(functions.messages.RequestSimpleWebViewRequest(
-                bot=bot, platform=PLATFORM, url=button.url, theme_params=params))
-        else:
-            result = await self._call(functions.messages.RequestWebViewRequest(
-                peer=peer, bot=bot, platform=PLATFORM, url=button.url,
-                theme_params=params))
+                f"кнопка «{getattr(button, 'text', '')}» — это "
+                f"{type(button).__name__}, а не запуск приложения; "
+                f"обычные кнопки жмёт `tgx message-click`")
         return {"кнопка": getattr(button, "text", None),
-                "адрес": getattr(result, "url", None),
+                "адрес": await self.web_button_url(peer, message, button),
                 "осторожно": "адрес подписан вашей сессией — не передавайте его никому"}
 
     async def press_menu_button(self, bot: Any, *, peer: Any = None) -> dict[str, Any]:

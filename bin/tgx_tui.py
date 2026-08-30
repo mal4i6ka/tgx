@@ -260,6 +260,9 @@ class TelegramBackend:
         self.me: Any = None
         self._names: dict[int, str] = {}
         self._raw: dict[tuple[int, int], Any] = {}   # (chat id, msg id) -> Telethon message
+        # окна мини-приложений живут, пока живёт клиент: закрыть их сразу нельзя,
+        # человек в них работает
+        self._windows: list[Any] = []
         self._paths: dict[tuple[int, int, bool], Path | None] = {}  # resolved previews; None = nothing to show
 
     async def connect(self) -> bool:
@@ -725,16 +728,50 @@ class TelegramBackend:
         return len(msg_ids)
 
     async def press_button(self, chat: Chat, msg_id: int, row: int, col: int) -> str:
-        """Press an inline button and return whatever the bot answered."""
+        """Нажать кнопку под сообщением и вернуть, что из этого вышло.
+
+        Кнопка, открывающая мини-приложение, — не callback: у Telethon для неё
+        нет ветки в `click()`, и нажатие молча возвращает пустоту. Отсюда
+        «нажимаю — ничего не происходит»: окно отвечало «нажато», хотя запрос
+        никуда не уходил. Такие кнопки открываем сами, своим окном.
+        """
+        import tgx_inline
+
         msg = await self.client.get_messages(chat.entity, ids=int(msg_id))
         if msg is None or not getattr(msg, "buttons", None):
             raise ValueError("в этом сообщении нет кнопок")
+
+        rows = getattr(getattr(msg, "reply_markup", None), "rows", None) or []
+        raw = rows[row].buttons[col] if row < len(rows) and col < len(rows[row].buttons) else None
+        inline = tgx_inline.Inline(self.client)
+        if raw is not None and inline.is_web_button(raw):
+            url = await inline.web_button_url(chat.entity, msg, raw)
+            if not url:
+                raise ValueError("сервер не дал адреса приложения")
+            return await self.open_web_app(getattr(raw, "text", "приложение"), url)
+
         result = await msg.click(row, col)
         for attr in ("message", "text"):
             answer = getattr(result, attr, None)
             if isinstance(answer, str) and answer:
                 return answer
+        if result is None:
+            # Ни ответа, ни ошибки — так ведут себя кнопки, которые Telethon не
+            # умеет нажимать. Молчать об этом нельзя: человек решит, что нажал.
+            return f"кнопка «{getattr(raw, 'text', '')}» этим способом не жмётся"
         return "нажато"
+
+    async def open_web_app(self, title: str, url: str) -> str:
+        """Поднять окно вокруг приложения и сказать, куда смотреть."""
+        import webbrowser
+
+        import tgx_webapp
+
+        host = tgx_webapp.Host(title, url)
+        where = host.start()
+        self._windows.append(host)
+        webbrowser.open(where)
+        return f"приложение открыто: {where}"
 
     # ── channels and groups ──────────────────────────────────────────
     async def create_chat(self, title: str, kind: str = "channel", about: str = "",
@@ -1183,6 +1220,12 @@ class TelegramBackend:
             self.client.add_event_handler(typing_handler, events.UserUpdate())
 
     async def close(self) -> None:
+        for window in self._windows:
+            try:
+                window.stop()      # иначе окно переживёт клиент и займёт порт
+            except Exception:
+                pass
+        self._windows.clear()
         if self.client is not None:
             await self.client.disconnect()
 

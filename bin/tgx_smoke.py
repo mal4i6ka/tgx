@@ -1934,12 +1934,29 @@ def webapp_dom_regression() -> None:
     page = W.Host("x", "https://a/b").page()
 
     # действия внутри приложения объявлены
-    for tool in ("page", "elements", "click", "fill", "scroll", "go", "back", "layout"):
+    for tool in ("page", "elements", "click", "fill", "scroll", "go", "back", "layout",
+                 "forward", "reload", "home"):
         check(f"объявлено действие {tool}", f"registerTool('{tool}'" in page)
 
+    # Навигация окна. Из приложения иначе некуда деться: кнопку «назад» рисует
+    # само приложение и далеко не всегда, а история браузера внутри есть всегда.
+    for control in ("nav-back", "nav-fwd", "nav-reload", "nav-home", "where"):
+        check(f"в шапке есть {control}", f'id="{control}"' in page)
+    check("адрес внутри приложения показывается", "location.pathname" in page)
+    check("начальный адрес запомнен", "const HOME" in page)
+
+    # Ссылки на элементы объявлены до первого использования: snapshot() читает
+    # их сразу, и объявление ниже роняло весь скрипт в мёртвой зоне — молча,
+    # с единственным следом в консоли браузера.
+    body = page[page.index("const frame ="):]
+    for name in ("where", "navBack", "HOME"):
+        first = body.index(name)
+        declared = body.index(f"const {name}") if f"const {name}" in body else 10 ** 9
+        check(f"{name} объявлен до использования", declared <= first)
+
     # не отрисовкозависимые источники
-    check("текст берётся из textContent, а не innerText",
-          "body.textContent" in page and "body.innerText" not in page)
+    check("текст берётся из дерева, а не из отрисовки",
+          "node.textContent" in page and ".innerText" not in page)
     check("надписи тоже из textContent", "el.textContent" in page)
     check("видимость — обходом предков по стилю",
           "parentElement" in page and "getComputedStyle" in page)
@@ -1952,6 +1969,22 @@ def webapp_dom_regression() -> None:
 
     # без проводника внутрь не заглянуть — это надо сказать, а не молчать
     check("отказ объяснён происхождением", "одного происхождения" in page)
+
+    # то, чего человек не видит, в вывод попадать не должно
+    check("невидимые теги перечислены", "UNSEEN" in page)
+    for tag in ("SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"):
+        check(f"{tag} отсеивается", tag in page)
+
+    # приложение подаётся по своему пути, иначе его маршрутизатор не сработает
+    import urllib.parse
+
+    host = W.Host("x", "https://app.example/bot/simcards/7?a=1#tgWebAppData=z")
+    check("рамка идёт по родному пути приложения",
+          host.framed() == "/bot/simcards/7?a=1#tgWebAppData=z")
+    check("происхождение известно заранее", host.fetcher.origin == "https://app.example")
+    check("и закреплено за приложением", host.fetcher.pinned is True)
+    check("без проводника адрес остаётся чужим",
+          W.Host("x", "https://a/b", through=False).framed() == "https://a/b")
 
 
 async def account_regression() -> None:
@@ -2043,6 +2076,15 @@ def proxy_regression() -> None:
 
     # скрипт-перехватчик
     check("подставляется происхождение", "__APP_ORIGIN__" in P.HOOK)
+    check("вебсокеты возвращаются на настоящий сервер", "function back(" in P.HOOK)
+    check("и по верной схеме", "'wss:' : 'ws:'" in P.HOOK)
+
+    # происхождение закрепляется: иначе виджет поддержки внутри приложения
+    # уводит запасной путь к себе, и приложение встаёт белым экраном
+    fetcher = P.Fetcher()
+    check("по умолчанию не закреплено", fetcher.pinned is False)
+    fetcher.origin, fetcher.pinned = "https://app", True
+    check("закреплённое не меняется ответами", fetcher.origin == "https://app")
     for hooked in ("window.fetch", "XMLHttpRequest.prototype.open", "window.Worker"):
         check(f"перехвачен {hooked}", hooked in P.HOOK)
     check("служебный работник обезврежен", "serviceWorker" in P.HOOK)
@@ -2169,7 +2211,7 @@ def webapp_host_regression() -> None:
         check("окно поднялось на локальном адресе", where.startswith("http://127.0.0.1:"))
         page = urllib.request.urlopen(where, timeout=5).read().decode()
 
-        check("адрес приложения попал в рамку", "app.example/x" in page)
+        check("рамка идёт по родному пути приложения", 'src="/x?k=1' in page)
         check("кавычка в адресе экранирована", '&quot;' in page and 't="кавычка"' not in page)
         check("амперсанд тоже", "k=1&amp;t=" in page)
 

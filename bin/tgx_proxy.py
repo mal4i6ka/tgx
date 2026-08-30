@@ -150,12 +150,8 @@ HOOK = """<script>(function () {
     try {
       const full = new URL(url, location.href);
       if (!/^https?:$/.test(full.protocol)) return url;  // data:, blob:, mailto:
-      if (full.origin === own) {
-        // Путь от корня внутри проведённой страницы — это корень нашего окна,
-        // а не приложения. Уводим его туда, откуда страница пришла.
-        if (full.pathname.startsWith('/x/')) return full.href;
-        return own + PREFIX + full.pathname + full.search + full.hash;
-      }
+      // Свой адрес зеркалит адрес приложения: путь от корня уже верный.
+      if (full.origin === own) return full.href;
       return own + '/x/' + full.protocol.slice(0, -1) + '/' + full.host +
              full.pathname + full.search + full.hash;
     } catch (e) { return url; }
@@ -196,13 +192,30 @@ HOOK = """<script>(function () {
     }
   }).observe(document.documentElement, {childList: true, subtree: true});
 
-  // Вебсокеты через себя не ведём: сказать об этом честнее, чем сломаться молча.
+  // Вебсокеты через себя не ведём — их надо вернуть на настоящий сервер.
+  //
+  // Иначе выходит хуже, чем «не поддерживаем»: адрес вида /cable уже переписан
+  // на нас, приложение стучится в ws://наш-адрес/cable, там пусто, и оно просто
+  // не запускается. Приложение на ActionCable так и вставало белым экраном.
   const realWS = window.WebSocket;
+  function back(url) {
+    try {
+      const full = new URL(url, location.href);
+      if (full.host !== location.host) return url;      // уже чужой — не трогаем
+      const app = new URL(APP);
+      const path = full.pathname.startsWith(PREFIX)
+        ? full.pathname.slice(PREFIX.length) : full.pathname;
+      const scheme = app.protocol === 'https:' ? 'wss:' : 'ws:';
+      return scheme + '//' + app.host + path + full.search;
+    } catch (e) { return url; }
+  }
   window.WebSocket = function (url, protocols) {
-    console.warn('tgx: вебсокет идёт напрямую, мимо проводника: ' + url);
-    return new realWS(url, protocols);
+    const real = back(url);
+    if (real !== url) console.info('tgx: вебсокет идёт напрямую: ' + real);
+    return new realWS(real, protocols);
   };
   window.WebSocket.prototype = realWS.prototype;
+  Object.assign(window.WebSocket, {CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3});
   // Служебный работник перехватил бы запросы у нас за спиной.
   if (navigator.serviceWorker) {
     try { Object.defineProperty(navigator, 'serviceWorker', {value: undefined}); }
@@ -217,9 +230,11 @@ class Fetcher:
     def __init__(self, timeout: float = 20.0) -> None:
         self.timeout = timeout
         self.jar: dict[str, str] = {}
-        # откуда пришла последняя страница: по нему достраиваются пути,
-        # которые приложение собирает уже во время работы
+        # откуда пришла страница: по нему достраиваются пути, которые
+        # приложение собирает уже во время работы
         self.origin = ""
+        # закреплено ли происхождение снаружи — тогда ответы его не меняют
+        self.pinned = False
 
     def get(self, path: str, method: str = "GET", headers: dict[str, str] | None = None,
             body: bytes | None = None) -> tuple[int, dict[str, str], bytes]:
@@ -280,12 +295,16 @@ class Fetcher:
 
         parts = urllib.parse.urlsplit(answer.geturl())
         origin = f"{parts.scheme}://{parts.netloc}"
-        if "html" in kind:
-            # Запоминаем только происхождение страницы. Раньше сюда попадал
-            # каждый ответ, включая чужие домены со шрифтами и счётчиками, — и
-            # запасной путь начинал уводить запросы приложения к ним. Ответы
-            # приходят вперемешку из разных потоков, поэтому промах был не
-            # всегда, а через раз: то файл, то 404.
+        if "html" in kind and not self.pinned:
+            # Происхождение запоминаем один раз и больше не меняем.
+            #
+            # Сначала я обновлял его каждым ответом — и запасной путь уводило к
+            # первому попавшемуся домену со шрифтом. Потом сузил до HTML — но
+            # виджет поддержки внутри приложения тоже отдаёт HTML, и после его
+            # загрузки запросы приложения уходили к нему: сервер отвечал
+            # «wrong verify token», а приложение вставало белым экраном. Окно
+            # открывают для одного приложения, его адрес известен заранее —
+            # значит, и меняться ему незачем.
             self.origin = origin
         # Разметку и стили переписываем, код — нет.
         #
@@ -297,8 +316,11 @@ class Fetcher:
         # адреса, а не похожий на них текст, — и запасной путь на сервере.
         code = any(mark in kind for mark in ("javascript", "ecmascript"))
         if any(mark in kind for mark in TEXTUAL) and not code:
+            # Пути от корня не трогаем: наш адрес теперь зеркалит адрес
+            # приложения, и «/assets/x.js» приходит к нам сам, а оттуда его
+            # подхватывает запасной путь. Переписывая их, мы бы ломали
+            # маршрутизатор приложения — он разбирает свой путь сам.
             raw = rewrite(raw, answer.geturl())
-            raw = rewrite_rooted(raw, origin)
             if "html" in kind:
                 raw = _inject(raw, origin)
         return getattr(answer, "status", None) or answer.getcode() or 200, out, raw

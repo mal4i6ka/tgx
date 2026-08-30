@@ -59,6 +59,15 @@ PAGE = r"""<!doctype html>
           border-bottom:1px solid var(--border); background:var(--surface); }
  header b { font-weight:600; }
  header .muted { color:var(--muted); font-size:12px; }
+ header .grow { margin-left:auto; }
+ nav { display:flex; gap:2px; }
+ nav button { background:var(--raised); border:1px solid var(--border); color:var(--text);
+              border-radius:4px; cursor:pointer; font-size:12px; line-height:1;
+              padding:5px 8px; }
+ nav button:hover { border-color:var(--accent); }
+ nav button:disabled { opacity:.35; cursor:default; border-color:var(--border); }
+ #where { font:11px/1 ui-monospace,monospace; max-width:38ch; overflow:hidden;
+          text-overflow:ellipsis; white-space:nowrap; }
  #back { display:none; background:none; border:0; color:var(--text); cursor:pointer;
          font-size:18px; padding:0 4px; }
  #wrap { flex:1; position:relative; }
@@ -79,9 +88,16 @@ PAGE = r"""<!doctype html>
  #log .no { color:var(--accent); }
 </style></head><body>
 <header>
-  <button id="back" title="назад">&larr;</button>
+  <button id="back" title="кнопка «назад» приложения">&larr;</button>
   <b>%(title)s</b>
-  <span class="muted">запущено из терминала · хозяин ненастоящий</span>
+  <nav>
+    <button id="nav-back" title="назад по истории">◀</button>
+    <button id="nav-fwd" title="вперёд">▶</button>
+    <button id="nav-reload" title="перезагрузить">⟳</button>
+    <button id="nav-home" title="в начало приложения">⌂</button>
+  </nav>
+  <span id="where" class="muted" title="где вы внутри приложения"></span>
+  <span class="muted grow">запущено из терминала · хозяин ненастоящий</span>
 </header>
 <div id="wrap"><iframe id="frame" src="%(url)s" allow="clipboard-write; fullscreen"></iframe>
   <div id="blocked">
@@ -101,11 +117,26 @@ PAGE = r"""<!doctype html>
 <script>
 %(bridge)s
 const THEME = %(theme)s;
+// Все ссылки на элементы — здесь, одним списком.
+//
+// Разбросав их по тексту, я дважды получил одну и ту же поломку: snapshot()
+// читал признак, объявленный ниже, скрипт падал в мёртвой зоне, и всё, что
+// определялось дальше, просто не появлялось. Видно это только в консоли
+// браузера, а со стороны выглядит как «кнопки не нарисовались».
 const frame = document.getElementById('frame');
 const mainBtn = document.getElementById('main');
 const backBtn = document.getElementById('back');
 const log = document.getElementById('log');
+const navBack = document.getElementById('nav-back');
+const navFwd = document.getElementById('nav-fwd');
+const where = document.getElementById('where');
+const HOME = %(home_json)s;
 const sent = [];
+// Объявлено здесь нарочно: snapshot() читает этот признак, а snapshot()
+// вызывается сразу при готовности страницы. Объявление ниже по тексту роняло
+// весь скрипт в мёртвой зоне — и вместе с ним всё, что определялось дальше,
+// включая навигацию. Ошибка при этом видна только в консоли браузера.
+let heard = false;
 
 function note(text, bad) {
   const line = document.createElement('div');
@@ -239,7 +270,6 @@ window.addEventListener('message', (event) => {
 // остаётся пустой. Надёжный признак один — тишина: настоящее приложение
 // здоровается первым делом. Молчит дольше нескольких секунд — показываем
 // причину, а не белый прямоугольник.
-let heard = false;
 window.addEventListener('message', () => { heard = true; }, true);
 setTimeout(() => {
   if (heard) return;
@@ -277,6 +307,7 @@ function snapshot() {
     'кнопка назад': shown(backBtn),
     'встраивание запрещено': shown(document.getElementById('blocked')),
     'приложение отозвалось': heard,
+    'где сейчас': where.textContent,
     журнал: [...log.children].map(x => x.textContent),
     'прислано данных': sent.slice(),
   };
@@ -340,6 +371,11 @@ function visible(el) {
 const CLICKABLE = 'a,button,input,select,textarea,[role=button],[role=link],[role=tab],' +
                   '[role=menuitem],[role=checkbox],[role=switch],[onclick],[tabindex]';
 
+// То, чего человек не видит никогда: тела скриптов, стили, запасной текст для
+// выключенного JavaScript. В разметку оно попадать не должно — иначе агент
+// читает исходник вместо страницы.
+const UNSEEN = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'SVG', 'HEAD']);
+
 function scan() {
   const doc = inside();
   if (!doc) return null;
@@ -365,9 +401,22 @@ function pageText() {
   const doc = inside();
   if (!doc) return null;
   // textContent живёт в дереве, а не в отрисовке: фоновая вкладка не красится,
-  // и innerText там пуст, а textContent — нет.
-  const raw = doc.body ? doc.body.textContent : '';
-  return raw.replace(/[ \t]+/g, ' ').replace(/\n\s*\n\s*\n+/g, '\n\n').trim().slice(0, 8000);
+  // и innerText там пуст, а textContent — нет. Но textContent берёт и то, что
+  // человек никогда не увидит: тела скриптов, стили, запасной текст для
+  // выключенного JavaScript. Пройдёмся по узлам и возьмём только видимые.
+  if (!doc.body) return '';
+  const skip = UNSEEN;
+  const parts = [];
+  const walk = (node) => {
+    if (node.nodeType === 3) { parts.push(node.textContent); return; }
+    if (node.nodeType !== 1) return;
+    if (skip.has(node.tagName)) return;
+    if (!visible(node)) return;
+    for (const child of node.childNodes) walk(child);
+  };
+  walk(doc.body);
+  return parts.join(' ').replace(/[ \t]+/g, ' ')
+              .replace(/\n\s*\n\s*\n+/g, '\n\n').trim().slice(0, 8000);
 }
 
 const NO_FRAME = {error: 'внутрь приложения не заглянуть: оно подано не через ' +
@@ -418,6 +467,7 @@ window.tgx.registerTool('layout',
   const walk = (el, depth) => {
     if (depth > 12 || out.length > 200) return;
     for (const child of el.children) {
+      if (UNSEEN.has(child.tagName)) continue;
       if (!visible(child)) continue;
       const box = child.getBoundingClientRect();
       // Не фильтруем по размеру: в невидимой вкладке он обнуляется, а дерево —
@@ -457,6 +507,23 @@ window.tgx.registerTool('go', 'перейти внутри приложения 
   note('агент перешёл: ' + a.url);
   return {переход: a.url};
 });
+window.tgx.registerTool('forward', 'вперёд по истории приложения', {}, () => {
+  const doc = inside();
+  if (!doc) return NO_FRAME;
+  doc.defaultView.history.forward();
+  return {вперёд: true};
+});
+window.tgx.registerTool('reload', 'перезагрузить приложение', {}, () => {
+  const doc = inside();
+  if (!doc) return NO_FRAME;
+  doc.location.reload();
+  return {перезагружено: true};
+});
+window.tgx.registerTool('home', 'вернуться в начало приложения', {}, () => {
+  frame.src = HOME;
+  note('агент вернулся в начало');
+  return {домой: true};
+});
 window.tgx.registerTool('back', 'назад по истории приложения', {}, () => {
   const doc = inside();
   if (!doc) return NO_FRAME;
@@ -477,6 +544,31 @@ announce();
 
 mainBtn.onclick = () => reply('main_button_pressed', {});
 backBtn.onclick = () => reply('back_button_pressed', {});
+
+// Навигация окна — не то же самое, что кнопка «назад» приложения.
+//
+// Ту рисует само приложение, и она уводит на его собственный предыдущий экран,
+// но появляется далеко не всегда. А внутри приложения есть обычная история
+// браузера, и без этих кнопок из него некуда деться: зашёл вглубь — и сиди.
+function place() {
+  const doc = inside();
+  if (!doc) { where.textContent = 'приложение недоступно'; return; }
+  where.textContent = doc.location.pathname + doc.location.search;
+  // Историю рамки со стороны не сосчитать — доступна лишь её длина, и та
+  // общая. Кнопки поэтому не отключаем: лучше нажатие впустую, чем
+  // недоступная кнопка там, где идти есть куда.
+  try { navBack.disabled = doc.defaultView.history.length <= 1; } catch (e) {}
+}
+
+navBack.onclick = () => { try { inside().defaultView.history.back(); } catch (e) {} };
+navFwd.onclick = () => { try { inside().defaultView.history.forward(); } catch (e) {} };
+document.getElementById('nav-reload').onclick = () => {
+  try { inside().location.reload(); } catch (e) { frame.src = frame.src; }
+};
+document.getElementById('nav-home').onclick = () => { frame.src = HOME; };
+frame.addEventListener('load', () => { place(); announce(); });
+setInterval(place, 700);   // адрес меняется и без перезагрузки: маршрутизатор внутри
+place();
 new ResizeObserver(() => reply('viewport_changed', viewport())).observe(frame);
 </script></body></html>"""
 
@@ -504,6 +596,18 @@ class Host:
         self.bridge = tgx_windows.Bridge()
         self.through = through
         self.fetcher = None
+        # Происхождение известно заранее — иначе первый же запрос страницы
+        # некуда направить: запасной путь узнаёт его лишь из ответа, а ответа
+        # ещё нет.
+        if through:
+            import urllib.parse
+
+            import tgx_proxy
+
+            parts = urllib.parse.urlsplit(url)
+            self.fetcher = tgx_proxy.Fetcher()
+            self.fetcher.origin = f"{parts.scheme}://{parts.netloc}"
+            self.fetcher.pinned = True
         # Сервер обязан быть многопоточным: поручение агента ждёт ответа
         # страницы, а страница за ответом ходит сюда же. Один поток —
         # и они заперли бы друг друга насмерть.
@@ -517,15 +621,26 @@ class Host:
     def framed(self) -> str:
         """Адрес для рамки: через проводник, если он включён.
 
-        Без проводника приложение остаётся чужим — его нельзя ни прочитать, ни
-        нажать, а иное ещё и откажется встраиваться. С проводником оно подаётся
-        с нашего адреса и становится обычной страницей внутри своей же.
+        Приложение подаётся **по его же пути**, а не под префиксом. Это важнее,
+        чем кажется: почти всякое приложение — одностраничное, и его
+        маршрутизатор разбирает `location.pathname` сам. Под префиксом
+        `/x/https/хост/bot/…` он видит путь, не начинающийся с ожидаемого
+        `/bot`, и не рисует ничего — белый экран без единой ошибки. Отдавая
+        приложение по родному пути, мы оставляем маршрутизатору привычный вид,
+        а префикс `/x/` остаётся только для чужих доменов.
         """
         if not self.through:
             return self.app_url
-        import tgx_proxy
 
-        return tgx_proxy.to_path(self.app_url)
+        import urllib.parse
+
+        parts = urllib.parse.urlsplit(self.app_url)
+        tail = parts.path or "/"
+        if parts.query:
+            tail += "?" + parts.query
+        if parts.fragment:
+            tail += "#" + parts.fragment
+        return tail
 
     def page(self) -> str:
         import tgx_windows
@@ -533,6 +648,7 @@ class Host:
         return PAGE % {"title": _escape(self.title), "url": _escape(self.framed()),
                        "title_json": json.dumps(self.title, ensure_ascii=False),
                        "theme": json.dumps(THEME), "bridge": tgx_windows.BRIDGE_JS,
+                       "home_json": json.dumps(self.framed()),
                        "refused": json.dumps(REFUSED, ensure_ascii=False)}
 
     def _handler(self) -> type:
@@ -556,6 +672,10 @@ class Host:
 
             OURS = ("/mcp/", "/sent", "/closed", "/x/")
 
+            def _ours_page(self) -> bool:
+                """Наша собственная страница-окно: только голый «/»."""
+                return self.path == "/" or self.path.startswith("/?")
+
             def _stray(self) -> bool:
                 """Запрос приложения, который не попал под переписывание.
 
@@ -563,7 +683,7 @@ class Host:
                 тексте не видно. Отдавать на них нашу разметку — верный способ
                 сломать приложение молча, поэтому уводим их туда же.
                 """
-                if self.path == "/" or self.path.startswith(self.OURS):
+                if self._ours_page() or self.path.startswith(self.OURS):
                     return False
                 return bool(getattr(host.fetcher, "origin", ""))
 

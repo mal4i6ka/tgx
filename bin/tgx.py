@@ -2605,6 +2605,26 @@ async def cmd_message_click(args: argparse.Namespace) -> None:
         msg = await client.get_messages(peer, ids=args.id)
         if not msg:
             raise SystemExit(f"message not found: {args.id}")
+        # Кнопка, открывающая приложение, — не callback: click() для неё молчит.
+        # Раньше здесь получалось «ok: true, click_result: null» — отчёт об
+        # успехе там, где запрос никуда не уходил.
+        inline = tgx_inline.Inline(client)
+        rows = getattr(getattr(msg, "reply_markup", None), "rows", None) or []
+        chosen = None
+        if args.text:
+            chosen = next((b for line in rows for b in line.buttons
+                           if getattr(b, "text", "") == args.text), None)
+        elif args.row is not None and args.col is not None:
+            if args.row < len(rows) and args.col < len(rows[args.row].buttons):
+                chosen = rows[args.row].buttons[args.col]
+        if chosen is not None and inline.is_web_button(chosen):
+            url = await inline.web_button_url(peer, msg, chosen)
+            render.emit({"ok": True, "кнопка": getattr(chosen, "text", None),
+                         "адрес приложения": url,
+                         "открыть окном": "tgx inline press-app … --run",
+                         "осторожно": "адрес подписан вашей сессией"})
+            return
+
         if args.text:
             result = await msg.click(text=args.text)
         elif args.row is not None and args.col is not None:
