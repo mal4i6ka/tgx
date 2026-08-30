@@ -195,10 +195,24 @@ def _http(url: str, body: Any = None, timeout: float = 12.0) -> Any:
         raise WindowError("окно ответило не по-нашему") from exc
 
 
+def _root(url: str) -> str:
+    """Основа адреса окна.
+
+    Точки мостика живут в корне сервера, а адрес окна с некоторых пор содержит
+    путь: страница-окно ушла из корня, чтобы не грузить саму себя в рамку, когда
+    у приложения путь — просто «/». Приклеивая «/mcp/ask» к полному адресу, мы
+    получали «/__tgx/mcp/ask», которого нет.
+    """
+    import urllib.parse
+
+    parts = urllib.parse.urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 def snapshot(name: str = "") -> dict[str, Any]:
     """Что сейчас в окне и что в нём можно сделать."""
     window = find(name)
-    got = _http(window["адрес"].rstrip("/") + "/mcp/snapshot")
+    got = _http(_root(window["адрес"]) + "/mcp/snapshot")
     return {"окно": window.get("имя"), "вид": window.get("вид"), **(got or {})}
 
 
@@ -206,7 +220,7 @@ def call(name: str, tool: str, args: dict[str, Any] | None = None,
          timeout: float = 10.0) -> Any:
     """Поручить окну действие и дождаться, что вышло."""
     window = find(name)
-    got = _http(window["адрес"].rstrip("/") + "/mcp/ask",
+    got = _http(_root(window["адрес"]) + "/mcp/ask",
                 {"tool": tool, "args": args or {}, "timeout": timeout},
                 timeout=timeout + 5)
     if not (got or {}).get("ok"):

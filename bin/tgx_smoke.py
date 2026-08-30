@@ -1986,6 +1986,20 @@ def webapp_dom_regression() -> None:
     check("без проводника адрес остаётся чужим",
           W.Host("x", "https://a/b", through=False).framed() == "https://a/b")
 
+    # У многих приложений путь — просто «/». Оставшись в корне, окно грузило бы
+    # в рамку само себя: шапка рисовалась дважды, приложение не появлялось.
+    check("страница окна живёт не в корне", W.HOST_PATH.strip("/") != "")
+    root_app = W.Host("x", "https://app.example/")
+    check("корень отдан приложению", root_app.framed() == "/")
+    check("а окно ушло на свой путь", W.HOST_PATH in root_app.url)
+
+    # Точки мостика живут в корне, а адрес окна теперь с путём: приклеивать к
+    # нему нельзя, иначе выходит «/__tgx/mcp/ask», которого нет.
+    import tgx_windows as N
+
+    check("основа адреса берётся без пути",
+          N._root("http://127.0.0.1:900/__tgx/") == "http://127.0.0.1:900")
+
 
 async def account_regression() -> None:
     """Оформление аккаунта: вкладки профиля, причины жалоб, автосохранение.
@@ -2210,6 +2224,7 @@ def webapp_host_regression() -> None:
     try:
         check("окно поднялось на локальном адресе", where.startswith("http://127.0.0.1:"))
         page = urllib.request.urlopen(where, timeout=5).read().decode()
+        check("окно отвечает по своему пути", W.HOST_PATH in where)
 
         check("рамка идёт по родному пути приложения", 'src="/x?k=1' in page)
         check("кавычка в адресе экранирована", '&quot;' in page and 't="кавычка"' not in page)
@@ -2230,16 +2245,22 @@ def webapp_host_regression() -> None:
         check("тема тёмная, как окно вокруг", W.THEME["bg_color"] == "#121212")
         check("в теме есть всё, что спрашивают", len(W.THEME) >= 12)
 
+        # Точки мостика живут в корне, а адрес окна — с путём: берём основу,
+        # ровно как это делает `tgx_windows._root`.
+        import tgx_windows as N
+
+        root = N._root(where)
+
         # данные из приложения доходят до терминала
         urllib.request.urlopen(urllib.request.Request(
-            where + "sent", data="привет".encode()), timeout=5)
+            root + "/sent", data="привет".encode()), timeout=5)
         check("присланное сохранено", host.received == ["привет"])
         check("и отдано наружу", got == ["привет"])
 
         # просьба закрыться поднимает флаг, по которому команда заканчивается
         check("до просьбы окно ждёт", not host.closed.is_set())
         urllib.request.urlopen(urllib.request.Request(
-            where + "closed", data=b""), timeout=5)
+            root + "/closed", data=b""), timeout=5)
         check("просьба закрыться услышана", host.closed.is_set())
         check("и ожидание кончается сразу", host.wait(0.1) is True)
 

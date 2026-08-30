@@ -23,6 +23,14 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
+# Своя страница живёт не в корне.
+#
+# Приложение подаётся по его собственному пути, и у многих этот путь — просто
+# «/». Оставшись в корне, окно грузило бы в рамку само себя: шапка рисовалась
+# дважды, а приложение не появлялось вовсе. Уводим себя на путь, которого у
+# приложений не бывает.
+HOST_PATH = "/__tgx/"
+
 # то, на что мы отвечаем по-настоящему
 ANSWERED = ("web_app_ready", "web_app_request_theme", "web_app_request_viewport",
             "web_app_expand", "web_app_close", "web_app_setup_main_button",
@@ -616,7 +624,7 @@ class Host:
 
     @property
     def url(self) -> str:
-        return f"http://127.0.0.1:{self.server.server_port}/"
+        return f"http://127.0.0.1:{self.server.server_port}{HOST_PATH}"
 
     def framed(self) -> str:
         """Адрес для рамки: через проводник, если он включён.
@@ -670,11 +678,12 @@ class Host:
                 self.end_headers()
                 self.wfile.write(body)
 
-            OURS = ("/mcp/", "/sent", "/closed", "/x/")
+            OURS = ("/mcp/", "/sent", "/closed", "/x/", HOST_PATH)
 
             def _ours_page(self) -> bool:
-                """Наша собственная страница-окно: только голый «/»."""
-                return self.path == "/" or self.path.startswith("/?")
+                """Наша собственная страница-окно."""
+                return self.path.rstrip("/") == HOST_PATH.rstrip("/") or \
+                    self.path.startswith(HOST_PATH + "?")
 
             def _stray(self) -> bool:
                 """Запрос приложения, который не попал под переписывание.
