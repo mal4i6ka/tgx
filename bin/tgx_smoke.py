@@ -1758,6 +1758,62 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+async def msgextra_regression() -> None:
+    """Голоса в опросе задаются номерами, а сервер ждёт байты вариантов — их
+    нельзя угадать, надо взять из самого сообщения. Промах здесь означал бы
+    голос не за то."""
+    import tgx_msgextra as M
+
+    class Thing:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    class Poller:
+        """Дублёр клиента: опрос с тремя вариантами."""
+
+        async def get_messages(self, peer, ids=None):
+            answers = [Thing(option=b"\x00"), Thing(option=b"\x01"), Thing(option=b"\x02")]
+            return Thing(media=Thing(poll=Thing(answers=answers)))
+
+    class Fake(M.Extra):
+        def __init__(self):
+            self.sent = []
+            self.client = Poller()
+
+        async def _call(self, request):
+            self.sent.append(request)
+            return Thing(updates=[])
+
+    fake = Fake()
+    got = await fake.vote(None, 5, [2])
+    check("проголосовали за названный номер", got["проголосовано"] == [2])
+    check("а серверу ушёл байт этого варианта", fake.sent[0].options == [b"\x01"])
+
+    try:
+        await Fake().vote(None, 5, [9])
+        check("вариант вне списка должен ругаться", False)
+    except M.MsgError as exc:
+        check("и назвать границы", "вне 1" in str(exc))
+
+    check("отзыв голоса — пустой список",
+          (await Fake().retract_vote(None, 5))["голос"] == "отозван")
+
+    # предпросмотр не роняется на пустой странице
+    class Empty(M.Extra):
+        def __init__(self):
+            pass
+
+        async def _call(self, request):
+            page = Thing()
+            page.__class__.__name__ = "WebPageEmpty"
+            return Thing(media=Thing(webpage=page))
+
+    check("пустой предпросмотр — это «нет»",
+          (await Empty().link_preview("текст"))["предпросмотр"] == "нет")
+
+    check("закрытый опрос объяснён", "MESSAGE_POLL_CLOSED" in M.HINTS)
+
+
 def webapp_dom_regression() -> None:
     """Глаза и руки агента внутри приложения. Ключевое решение — textContent, а
     не innerText: innerText отражает отрисованный текст и в фоновой вкладке
@@ -2934,6 +2990,7 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    await msgextra_regression()
     webapp_dom_regression()
     await account_regression()
     proxy_regression()

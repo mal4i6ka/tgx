@@ -369,6 +369,8 @@ BOT_HINTS = {
     "USER_ID_INVALID": "такого пользователя нет",
     "PASSWORD_HASH_INVALID": "неверный пароль двухфакторной защиты",
     "BOT_NOT_FOUND": "бот не найден",
+    "USER_EMOJI_STATUS_FORBIDDEN": ("человек не разрешал боту менять свой статус — это включает он сам"),
+    "VERIFICATION_FORBIDDEN": "у этого бота нет права ставить значок проверки",
     "BOT_ACCESS_FORBIDDEN": ("у бота выключен ограниченный доступ — его включают в "
                              "BotFather, и только тогда список допущенных имеет смысл"),
     "BOT_APP_INVALID": "у бота нет мини-приложения",
@@ -810,6 +812,40 @@ class Shop:
         await self._call(functions.bots.ToggleUserEmojiStatusPermissionRequest(
             bot=await self._bot(bot), enabled=on))
         return {"бот меняет ваш статус": on}
+
+    async def verify(self, peer: Any, *, bot: Any = None, on: bool = True,
+                     description: str = "") -> dict[str, Any]:
+        """Свой значок проверки на чужом профиле или канале.
+
+        Право выдаётся отдельно и не всем: это не синяя галочка Telegram, а
+        отметка «проверено вот этим ботом» — её ставят площадки своим
+        участникам. Описание видно при нажатии на значок.
+        """
+        from telethon.tl import functions
+
+        who = await self._bot(bot) if bot else None
+        await self._call(functions.bots.SetCustomVerificationRequest(
+            peer=peer, bot=who, enabled=on or None,
+            custom_description=description or None))
+        return {"значок проверки": "поставлен" if on else "снят",
+                "подпись": description or None}
+
+    async def set_user_status(self, user: Any, emoji_id: int, *,
+                              until: int = 0) -> dict[str, Any]:
+        """Поставить эмодзи-статус другому человеку — от имени бота.
+
+        Работает, только если тот сам разрешил это боту: без разрешения сервер
+        отказывает. Разрешение даётся командой `bot emoji-permission`.
+        """
+        from telethon.tl import functions, types
+
+        target = await self.client.get_input_entity(user)
+        status = (types.EmojiStatusEmpty() if not emoji_id
+                  else types.EmojiStatus(document_id=emoji_id, until=until or None))
+        await self._call(functions.bots.UpdateUserEmojiStatusRequest(
+            user_id=target, emoji_status=status))
+        return {"кому": str(user), "статус": emoji_id or "снят",
+                "до": until or "бессрочно"}
 
     async def can_write(self, bot: Any, *, allow: bool = False) -> dict[str, Any]:
         """Может ли бот писать вам первым; `allow` — разрешить."""

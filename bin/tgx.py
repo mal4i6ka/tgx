@@ -39,6 +39,7 @@ import tgx_folders
 import tgx_format
 import tgx_forum
 import tgx_inline
+import tgx_msgextra
 import tgx_groups
 import tgx_guard
 import tgx_net
@@ -3252,6 +3253,49 @@ async def cmd_window(args: argparse.Namespace) -> None:
                                                timeout=args.timeout)})
 
 
+async def cmd_msgx(args: argparse.Namespace) -> None:
+    """Остаток по сообщениям: голоса, факт-чек, предпросмотр, тема чата."""
+    command = args.msgxcmd
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        ex = tgx_msgextra.Extra(client)
+        peer = await resolve_peer(client, args.peer) if getattr(args, "peer", None) else None
+
+        actions = {
+            "vote": lambda: ex.vote(peer, args.id, args.choice),
+            "retract-vote": lambda: ex.retract_vote(peer, args.id),
+            "voters": lambda: ex.voters(peer, args.id, option=args.option or 0, limit=args.limit),
+            "link-preview": lambda: ex.link_preview(args.text),
+            "chat-theme": lambda: ex.chat_theme(peer, args.emoji or ""),
+            "chat-wallpaper": lambda: ex.chat_wallpaper(
+                peer, args.slug or "", both=args.both, revert=args.revert),
+            "recent-locations": lambda: ex.recent_locations(peer, limit=args.limit),
+            "screenshot-notice": lambda: ex.screenshot_notice(peer, args.id or 0),
+            "recent-reactions": lambda: ex.recent_reactions(),
+            "tag-reactions": lambda: ex.tag_reactions(),
+            "clear-recent-reactions": lambda: ex.clear_recent_reactions(),
+            "who-reacted": lambda: ex.who_reacted(peer, args.id),
+            "saved-dialogs": lambda: ex.saved_dialogs(limit=args.limit),
+            "saved-history": lambda: ex.saved_history(args.who, limit=args.limit),
+        }
+        if command in actions:
+            got = await actions[command]()
+            render.emit(got if isinstance(got, dict) else {"найдено": got})
+        elif command == "fact-check":
+            await gated_or_die(client, args, f"приписать факт-чек к {args.peer}/{args.id}",
+                               "он виден всем и правит смысл чужого поста", danger=True)
+            render.emit(await ex.fact_check(peer, args.id, args.text))
+        elif command == "drop-fact-check":
+            render.emit(await ex.drop_fact_check(peer, args.id))
+        elif command == "report-reaction":
+            await gated_or_die(client, args, f"пожаловаться на реакцию в {args.peer}",
+                               "жалобу нельзя отозвать", danger=True)
+            render.emit(await ex.report_reaction(peer, args.id, args.who))
+    finally:
+        await client.disconnect()
+
+
 async def cmd_account(args: argparse.Namespace) -> None:
     """Настройки и оформление аккаунта: адреса, обои, темы, автосохранение."""
     command = args.acctcmd
@@ -3665,6 +3709,18 @@ async def cmd_bot(args: argparse.Namespace) -> None:
     if command == "previews":
         render.emit({"превью": await _with_user(
             lambda c: tgx_bots.Direct(c).previews(args.username))})
+        return
+
+    if command == "verify":
+        peer = await _with_user(lambda c: resolve_peer(c, args.peer))
+        render.emit(await _with_user(lambda c: tgx_bots.Shop(c).verify(
+            peer, bot=args.username, on=args.state == "on",
+            description=args.description or "")))
+        return
+
+    if command == "set-user-status":
+        render.emit(await _with_bot(args.username, lambda s: tgx_bots.Shop(
+            s.client).set_user_status(args.user, args.emoji_id, until=args.until or 0)))
         return
 
     if command == "access":
@@ -4326,6 +4382,81 @@ def build_parser() -> argparse.ArgumentParser:
     w_do.add_argument("--args", help="аргументы действия, JSON-объектом")
     w_do.add_argument("--timeout", type=float, default=10.0)
 
+    mx = sub.add_parser("msgx", help="остаток по сообщениям: голоса, факт-чек, предпросмотр")
+    mx_sub = mx.add_subparsers(dest="msgxcmd", required=True)
+    mx.set_defaults(func=cmd_msgx)
+
+    m_vote = mx_sub.add_parser("vote", help="проголосовать в опросе")
+    m_vote.add_argument("peer")
+    m_vote.add_argument("id", type=int)
+    m_vote.add_argument("choice", type=int, nargs="+", help="номера вариантов с 1")
+
+    m_rv = mx_sub.add_parser("retract-vote", help="забрать свой голос")
+    m_rv.add_argument("peer")
+    m_rv.add_argument("id", type=int)
+
+    m_vs = mx_sub.add_parser("voters", help="кто как проголосовал")
+    m_vs.add_argument("peer")
+    m_vs.add_argument("id", type=int)
+    m_vs.add_argument("--option", type=int, help="только за этот вариант")
+    m_vs.add_argument("--limit", type=int, default=50)
+
+    m_lp = mx_sub.add_parser("link-preview", help="что покажется под ссылкой")
+    m_lp.add_argument("text")
+
+    m_ct = mx_sub.add_parser("chat-theme", help="тема отдельного чата (эмодзи)")
+    m_ct.add_argument("peer")
+    m_ct.add_argument("emoji", nargs="?", default="", help="пусто — сбросить")
+
+    m_cw = mx_sub.add_parser("chat-wallpaper", help="обои отдельного чата")
+    m_cw.add_argument("peer")
+    m_cw.add_argument("slug", nargs="?", default="", help="адрес-слаг; пусто — убрать")
+    m_cw.add_argument("--both", action="store_true", help="и у собеседника")
+    m_cw.add_argument("--revert", action="store_true", help="вернуть прежние")
+
+    m_rl = mx_sub.add_parser("recent-locations", help="недавние геометки в чате")
+    m_rl.add_argument("peer")
+    m_rl.add_argument("--limit", type=int, default=20)
+
+    m_sn = mx_sub.add_parser("screenshot-notice", help="сообщить, что вы сняли экран")
+    m_sn.add_argument("peer")
+    m_sn.add_argument("--id", type=int, help="в ответ на это сообщение")
+
+    mx_sub.add_parser("recent-reactions", help="ваши недавние реакции")
+    mx_sub.add_parser("tag-reactions", help="реакции-теги для избранного")
+    mx_sub.add_parser("clear-recent-reactions", help="очистить недавние реакции")
+
+    m_wr = mx_sub.add_parser("who-reacted", help="сводка реакций на сообщения")
+    m_wr.add_argument("peer")
+    m_wr.add_argument("id", type=int, nargs="+")
+
+    m_sd = mx_sub.add_parser("saved-dialogs", help="под-чаты избранного по автору")
+    m_sd.add_argument("--limit", type=int, default=50)
+
+    m_sh = mx_sub.add_parser("saved-history", help="сохранённое от конкретного автора")
+    m_sh.add_argument("who")
+    m_sh.add_argument("--limit", type=int, default=30)
+
+    m_fc = mx_sub.add_parser("fact-check", help="приписать проверку факта (подтверждение)")
+    m_fc.add_argument("peer")
+    m_fc.add_argument("id", type=int)
+    m_fc.add_argument("text")
+    m_fc.add_argument("--confirm-to")
+    m_fc.add_argument("--as", dest="bot")
+    m_fc.add_argument("--timeout", type=float, default=300.0)
+
+    m_dfc = mx_sub.add_parser("drop-fact-check", help="убрать факт-чек")
+    m_dfc.add_argument("peer")
+    m_dfc.add_argument("id", type=int)
+
+    m_rr = mx_sub.add_parser("report-reaction", help="пожаловаться на чужую реакцию (подтверждение)")
+    m_rr.add_argument("peer")
+    m_rr.add_argument("id", type=int)
+    m_rr.add_argument("who")
+    m_rr.add_argument("--confirm-to")
+    m_rr.add_argument("--as", dest="bot")
+    m_rr.add_argument("--timeout", type=float, default=300.0)
+
     ac = sub.add_parser("account", help="настройки и оформление: адреса, обои, темы, автосейв")
     ac_sub = ac.add_subparsers(dest="acctcmd", required=True)
     ac.set_defaults(func=cmd_account)
@@ -4817,6 +4948,19 @@ def build_parser() -> argparse.ArgumentParser:
     b_ep = bot_sub.add_parser("emoji-permission", help="пускать ли бота к вашему эмодзи-статусу")
     b_ep.add_argument("username")
     b_ep.add_argument("state", choices=["on", "off"])
+
+    b_vf = bot_sub.add_parser("verify", help="свой значок проверки на профиле или канале")
+    b_vf.add_argument("username", help="бот, от имени которого значок")
+    b_vf.add_argument("peer", help="кому ставим")
+    b_vf.add_argument("state", nargs="?", default="on", choices=["on", "off"])
+    b_vf.add_argument("--description", help="подпись, видная при нажатии")
+
+    b_ss = bot_sub.add_parser("set-user-status",
+                              help="поставить человеку эмодзи-статус (он должен разрешить)")
+    b_ss.add_argument("username")
+    b_ss.add_argument("user")
+    b_ss.add_argument("emoji_id", type=int, help="0 — снять")
+    b_ss.add_argument("--until", type=int, help="до какого времени, метка unix")
 
     b_cw = bot_sub.add_parser("can-write", help="может ли бот писать вам первым")
     b_cw.add_argument("username")
@@ -6691,7 +6835,7 @@ async def amain() -> None:
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_calls.CallError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_pending.PendingError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
-                 tgx_account.AccountError, tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_safety.SafetyError, tgx_groups.GroupError, tgx_chanadmin.ChanError, tgx_windows.WindowError, tgx_inline.InlineError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
+                 tgx_account.AccountError, tgx_msgextra.MsgError, tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_safety.SafetyError, tgx_groups.GroupError, tgx_chanadmin.ChanError, tgx_windows.WindowError, tgx_inline.InlineError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
                  tgx_stories.StoryError,
                  tgx_transcribe.TranscribeError)
 
