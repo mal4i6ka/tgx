@@ -1758,6 +1758,105 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+def windows_registry_regression() -> None:
+    """Реестр окон — единственное, что связывает поднявшую окно команду и того,
+    кто про него спрашивает: процессы разные, общей памяти нет. Ошибиться в
+    проверке живости значит вычистить рабочее окно."""
+    import os
+
+    import tgx_windows as W
+
+    check("свой процесс жив", W._alive(os.getpid()))
+    check("нулевой pid — не процесс", not W._alive(0))
+    check("отрицательный тоже", not W._alive(-5))
+    check("не-число не процесс", not W._alive("нет"))
+    # процесс 1 существует и чужой: отказ в праве послать сигнал — это «жив»
+    check("чужой процесс считается живым", W._alive(1))
+
+    saved = W._load()
+    try:
+        W._save([])
+        try:
+            W.find()
+            check("без окон должно ругаться", False)
+        except W.WindowError as exc:
+            check("и подсказывать, чем их поднять", "inline run" in str(exc))
+
+        mine = os.getpid()
+        W._save([{"имя": "а", "вид": "х", "адрес": "http://127.0.0.1:1/", "pid": mine},
+                 {"имя": "а", "вид": "х", "адрес": "http://127.0.0.1:2/", "pid": mine},
+                 {"имя": "б", "вид": "х", "адрес": "http://127.0.0.1:3/", "pid": mine}])
+        check("живые окна видны", len(W.listing()) == 3)
+        try:
+            W.find()
+            check("выбор из нескольких должен ругаться", False)
+        except W.WindowError as exc:
+            check("совпавшие имена показаны с адресами",
+                  "а (http://127.0.0.1:1/)" in str(exc))
+            check("а уникальное — без адреса", "б," in str(exc) or str(exc).endswith("б"))
+        try:
+            W.find("а")
+            check("одинаковые имена должны ругаться", False)
+        except W.WindowError as exc:
+            check("и требовать адрес", "назовите адрес" in str(exc))
+        check("по адресу находится однозначно",
+              W.find("http://127.0.0.1:2/")["адрес"] == "http://127.0.0.1:2/")
+        check("уникальное имя находится", W.find("б")["имя"] == "б")
+
+        W._save([{"имя": "мёртвое", "вид": "х", "адрес": "http://127.0.0.1:9/", "pid": 999999}])
+        check("мёртвая запись выбрасывается", W.listing() == [])
+
+        # наружу ходить нельзя: окна живут только на своей машине
+        try:
+            W._http("https://example.org/mcp/snapshot")
+            check("чужой адрес должен отвергаться", False)
+        except W.WindowError as exc:
+            check("и объяснять почему", "127.0.0.1" in str(exc))
+    finally:
+        W._save(saved)
+
+    check("страница получает голос", "registerTool" in W.BRIDGE_JS)
+    check("и умеет слать состояние", "setState" in W.BRIDGE_JS)
+    check("поручения забираются опросом", "/mcp/pending" in W.BRIDGE_JS)
+
+
+def window_bridge_regression() -> None:
+    """Поручение ждёт ответа, а не отправки: «нажал» без результата — отчёт о
+    намерении, по которому агент не может судить, что вышло."""
+    import threading
+
+    import tgx_windows as W
+
+    bridge = W.Bridge()
+    bridge.push_tools([{"name": "press", "description": "жать"}])
+    check("действия видны", [t["name"] for t in bridge.tools] == ["press"])
+    bridge.push_state({"кнопка": "Отправить"})
+    check("состояние видно", bridge.state["кнопка"] == "Отправить")
+
+    # страница забирает поручение и отвечает — как это делает браузер
+    def page():
+        for _ in range(100):
+            jobs = bridge.take_pending()
+            for job in jobs:
+                bridge.push_result(job["ticket"], {"нажато": job["args"].get("что")})
+            if jobs:
+                return
+            __import__("time").sleep(0.01)
+
+    threading.Thread(target=page, daemon=True).start()
+    got = bridge.ask("press", {"что": "главную"}, timeout=3)
+    check("ответ вернулся, а не подтверждение отправки", got == {"нажато": "главную"})
+    check("выполненное поручение из очереди убрано", bridge.pending == [])
+    check("и результат не копится", bridge.results == {})
+
+    # никто не отвечает — говорим об этом, а не висим молча
+    try:
+        bridge.ask("press", {}, timeout=0.3)
+        check("молчание должно кончаться ошибкой", False)
+    except W.WindowError as exc:
+        check("и называть вероятную причину", "окно закрыли" in str(exc))
+
+
 def webapp_host_regression() -> None:
     """Мини-приложение ждёт вокруг себя хозяина: шлёт «я готов» и ждёт ответов.
     Голая вкладка им не является, поэтому окно рисуем сами. Проверяем, что
@@ -2705,6 +2804,8 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    windows_registry_regression()
+    window_bridge_regression()
     webapp_host_regression()
     await takeout_only_regression()
     contacts_more_regression()

@@ -55,6 +55,7 @@ import tgx_splash
 import tgx_stats
 import tgx_takeout
 import tgx_webapp
+import tgx_windows
 import tgx_triage
 import tgx_stickers
 import tgx_stories
@@ -3232,6 +3233,24 @@ async def cmd_safety(args: argparse.Namespace) -> None:
         await client.disconnect()
 
 
+async def cmd_window(args: argparse.Namespace) -> None:
+    """Окна, открытые tgx, — глазами и руками агента.
+
+    Соединения с Telegram здесь нет: окно уже поднято другой командой, а мы
+    только разговариваем с ним по локальному адресу.
+    """
+    command = args.windowcmd
+    if command == "list":
+        render.emit({"окна": tgx_windows.listing()})
+    elif command == "read":
+        render.emit(tgx_windows.snapshot(args.name or ""))
+    elif command == "do":
+        params = json.loads(args.args) if args.args else {}
+        render.emit({"окно": args.name or "единственное", "действие": args.tool,
+                     "вышло": tgx_windows.call(args.name or "", args.tool, params,
+                                               timeout=args.timeout)})
+
+
 async def cmd_chan(args: argparse.Namespace) -> None:
     """Остаток управления каналами: адреса, вид, уборка, необратимое."""
     command = args.chancmd
@@ -4244,6 +4263,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     s_sp = sf_sub.add_parser("sponsored", help="показывать ли рекламу (скрыть — Premium)")
     s_sp.add_argument("state", choices=["on", "off"])
+
+    wn = sub.add_parser("window", help="окна, открытые tgx: посмотреть и подействовать")
+    wn_sub = wn.add_subparsers(dest="windowcmd", required=True)
+    wn.set_defaults(func=cmd_window)
+
+    wn_sub.add_parser("list", help="какие окна открыты")
+
+    w_rd = wn_sub.add_parser("read", help="что сейчас в окне и что в нём можно сделать")
+    w_rd.add_argument("name", nargs="?", help="имя окна; без него — единственное")
+
+    w_do = wn_sub.add_parser("do", help="поручить окну действие")
+    w_do.add_argument("tool", help="имя действия из `window read`")
+    w_do.add_argument("--name", help="в каком окне")
+    w_do.add_argument("--args", help="аргументы действия, JSON-объектом")
+    w_do.add_argument("--timeout", type=float, default=10.0)
 
     ch = sub.add_parser("chan", help="каналы: адреса, вид, уборка, поиск по всему Telegram")
     ch_sub = ch.add_subparsers(dest="chancmd", required=True)
@@ -6542,7 +6576,7 @@ async def amain() -> None:
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_calls.CallError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_pending.PendingError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
-                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_safety.SafetyError, tgx_groups.GroupError, tgx_chanadmin.ChanError, tgx_inline.InlineError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
+                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_safety.SafetyError, tgx_groups.GroupError, tgx_chanadmin.ChanError, tgx_windows.WindowError, tgx_inline.InlineError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
                  tgx_stories.StoryError,
                  tgx_transcribe.TranscribeError)
 

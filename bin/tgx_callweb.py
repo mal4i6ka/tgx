@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
 # Цвета взяты из системы Altery: тёмный холст, приглушённая терракота.
@@ -71,6 +71,19 @@ PAGE = """<!doctype html>
    }
  }
  tick(); setInterval(tick, 2000);
+
+ // Окно должно быть видно агенту: он не смотрит на пиксели, а спрашивает
+ // состояние. Список участников уже приходит с сервера — объявляем его как
+ // действие, чтобы спрашивающий получал ровно то, что видит человек.
+ %(bridge)s
+ window.tgx.registerTool('snapshot', 'кто сейчас в звонке', {}, async () => {
+   const data = await (await fetch('data')).json();
+   return {звонок: %(title_json)s, участников: data.count, обновлено: data.at,
+           люди: data.people};
+ });
+ window.tgx.registerTool('refresh', 'обновить картину сейчас же', {}, async () => {
+   await tick(); return {обновлено: true};
+ });
 </script></body></html>
 """
 
@@ -80,13 +93,23 @@ class Dashboard:
 
     def __init__(self, title: str, link: str, source: Callable[[], list[dict[str, Any]]],
                  port: int = 0) -> None:
+        import tgx_windows
+
         self.title, self.link, self.source = title, link, source
-        self.server = HTTPServer(("127.0.0.1", port), self._handler())
+        self.bridge = tgx_windows.Bridge()
+        self.server = ThreadingHTTPServer(("127.0.0.1", port), self._handler())
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self.server.server_port}/"
+
+    def page(self) -> str:
+        import tgx_windows
+
+        return PAGE % {"title": self.title, "link": self.link,
+                       "title_json": json.dumps(self.title, ensure_ascii=False),
+                       "bridge": tgx_windows.BRIDGE_JS}
 
     def _handler(self) -> type:
         dashboard = self
@@ -95,7 +118,41 @@ class Dashboard:
             def log_message(self, *args: Any) -> None:
                 pass                     # тишина: это не веб-сервер, а окно
 
+            def _json(self, value: Any) -> None:
+                body = json.dumps(value, ensure_ascii=False).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self) -> None:    # noqa: N802
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length).decode(errors="replace") if length else ""
+                if self.path.startswith("/mcp/state"):
+                    dashboard.bridge.push_state(json.loads(body or "{}"))
+                elif self.path.startswith("/mcp/tools"):
+                    dashboard.bridge.push_tools(json.loads(body or "[]"))
+                elif self.path.startswith("/mcp/result"):
+                    got = json.loads(body or "{}")
+                    dashboard.bridge.push_result(str(got.get("ticket")), got.get("value"))
+                elif self.path.startswith("/mcp/ask"):
+                    got = json.loads(body or "{}")
+                    try:
+                        value = dashboard.bridge.ask(
+                            str(got.get("tool")), got.get("args") or {},
+                            float(got.get("timeout") or 10.0))
+                        return self._json({"ok": True, "результат": value})
+                    except Exception as exc:
+                        return self._json({"ok": False, "error": str(exc)})
+                self._json({})
+
             def do_GET(self) -> None:     # noqa: N802 — имя задаёт библиотека
+                if self.path.startswith("/mcp/pending"):
+                    return self._json(dashboard.bridge.take_pending())
+                if self.path.startswith("/mcp/snapshot"):
+                    return self._json({"состояние": dashboard.bridge.state,
+                                       "действия": dashboard.bridge.tools})
                 if self.path.startswith("/data"):
                     people = dashboard.source()
                     body = json.dumps({
@@ -108,7 +165,7 @@ class Dashboard:
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
                 else:
-                    body = (PAGE % {"title": dashboard.title, "link": dashboard.link}).encode()
+                    body = dashboard.page().encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
@@ -118,9 +175,15 @@ class Dashboard:
         return Handler
 
     def start(self) -> str:
+        import tgx_windows
+
         self.thread.start()
+        tgx_windows.register(self.title, "звонок", self.url)
         return self.url
 
     def stop(self) -> None:
+        import tgx_windows
+
+        tgx_windows.unregister(self.url)
         self.server.shutdown()
         self.server.server_close()

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
 # то, на что мы отвечаем по-настоящему
@@ -99,6 +99,7 @@ PAGE = """<!doctype html>
   <div id="log"></div>
 </footer>
 <script>
+%(bridge)s
 const THEME = %(theme)s;
 const frame = document.getElementById('frame');
 const mainBtn = document.getElementById('main');
@@ -183,6 +184,59 @@ setTimeout(() => {
   note('приложение не отозвалось — вероятно, запрещает встраивание', true);
 }, 5000);
 
+// Окно должно быть видно и управляемо снаружи: агент не смотрит на пиксели,
+// он спрашивает состояние и просит действия. Объявляем их так же, как это
+// делает страница в WebMCP, — сама, а не через список где-то в другом файле.
+// Начальное «спрятано» задано таблицей стилей, а не инлайном, поэтому
+// смотреть на element.style бесполезно: там пусто и у скрытой кнопки.
+const shown = (el) => getComputedStyle(el).display !== 'none';
+
+function snapshot() {
+  return {
+    приложение: %(title_json)s,
+    'главная кнопка': shown(mainBtn)
+      ? {надпись: mainBtn.textContent, доступна: !mainBtn.disabled} : null,
+    'кнопка назад': shown(backBtn),
+    'встраивание запрещено': shown(document.getElementById('blocked')),
+    'приложение отозвалось': heard,
+    журнал: [...log.children].map(x => x.textContent),
+    'прислано данных': sent.slice(),
+  };
+}
+
+function announce() { window.tgx.setState(snapshot()); }
+
+window.tgx.registerTool('snapshot', 'что сейчас в окне: кнопки, журнал, присланные данные',
+  {}, () => snapshot());
+window.tgx.registerTool('press_main', 'нажать главную кнопку приложения', {}, () => {
+  if (!shown(mainBtn)) return {error: 'главной кнопки сейчас нет'};
+  if (mainBtn.disabled) return {error: 'главная кнопка неактивна'};
+  reply('main_button_pressed', {}); note('главную кнопку нажал агент');
+  return {нажато: mainBtn.textContent};
+});
+window.tgx.registerTool('press_back', 'нажать кнопку «назад»', {}, () => {
+  if (!shown(backBtn)) return {error: 'кнопки «назад» сейчас нет'};
+  reply('back_button_pressed', {}); note('«назад» нажал агент');
+  return {нажато: 'назад'};
+});
+window.tgx.registerTool('send_event',
+  'послать приложению произвольное событие протокола',
+  {type: {type: 'string'}, data: {type: 'object'}}, (a) => {
+    if (!a.type) return {error: 'нужно имя события'};
+    reply(a.type, a.data || {}); note('агент послал ' + a.type);
+    return {послано: a.type};
+  });
+window.tgx.registerTool('close', 'закрыть окно', {}, () => {
+  fetch('/closed', {method: 'POST'}); note('окно закрыл агент');
+  return {закрыто: true};
+});
+
+// состояние обновляем при каждом изменении, а не по опросу: агент должен
+// видеть окно таким, какое оно сейчас, а не каким было секунду назад
+new MutationObserver(announce).observe(document.body, {subtree: true, childList: true,
+                                                       attributes: true});
+announce();
+
 mainBtn.onclick = () => reply('main_button_pressed', {});
 backBtn.onclick = () => reply('back_button_pressed', {});
 new ResizeObserver(() => reply('viewport_changed', viewport())).observe(frame);
@@ -202,11 +256,17 @@ class Host:
 
     def __init__(self, title: str, url: str, port: int = 0,
                  on_data: Callable[[str], None] | None = None) -> None:
+        import tgx_windows
+
         self.title, self.app_url = title, url
         self.on_data = on_data or (lambda _: None)
         self.received: list[str] = []
         self.closed = threading.Event()
-        self.server = HTTPServer(("127.0.0.1", port), self._handler())
+        self.bridge = tgx_windows.Bridge()
+        # Сервер обязан быть многопоточным: поручение агента ждёт ответа
+        # страницы, а страница за ответом ходит сюда же. Один поток —
+        # и они заперли бы друг друга насмерть.
+        self.server = ThreadingHTTPServer(("127.0.0.1", port), self._handler())
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
     @property
@@ -214,8 +274,11 @@ class Host:
         return f"http://127.0.0.1:{self.server.server_port}/"
 
     def page(self) -> str:
+        import tgx_windows
+
         return PAGE % {"title": _escape(self.title), "url": _escape(self.app_url),
-                       "theme": json.dumps(THEME),
+                       "title_json": json.dumps(self.title, ensure_ascii=False),
+                       "theme": json.dumps(THEME), "bridge": tgx_windows.BRIDGE_JS,
                        "refused": json.dumps(REFUSED, ensure_ascii=False)}
 
     def _handler(self) -> type:
@@ -233,7 +296,18 @@ class Host:
                 self.wfile.write(body)
 
             def do_GET(self) -> None:     # noqa: N802 — имя задаёт библиотека
+                if self.path.startswith("/mcp/pending"):
+                    return self._json(host.bridge.take_pending())
+                if self.path.startswith("/mcp/snapshot"):
+                    return self._json({"состояние": host.bridge.state,
+                                       "действия": host.bridge.tools,
+                                       "прислано": host.received,
+                                       "просит закрыть": host.closed.is_set()})
                 self._ok(host.page().encode(), "text/html; charset=utf-8")
+
+            def _json(self, value: Any) -> None:
+                self._ok(json.dumps(value, ensure_ascii=False).encode(),
+                         "application/json; charset=utf-8")
 
             def do_POST(self) -> None:    # noqa: N802
                 length = int(self.headers.get("Content-Length") or 0)
@@ -243,12 +317,31 @@ class Host:
                     host.on_data(body)
                 elif self.path.startswith("/closed"):
                     host.closed.set()
+                elif self.path.startswith("/mcp/state"):
+                    host.bridge.push_state(json.loads(body or "{}"))
+                elif self.path.startswith("/mcp/tools"):
+                    host.bridge.push_tools(json.loads(body or "[]"))
+                elif self.path.startswith("/mcp/result"):
+                    got = json.loads(body or "{}")
+                    host.bridge.push_result(str(got.get("ticket")), got.get("value"))
+                elif self.path.startswith("/mcp/ask"):
+                    # Просьба снаружи: ждём, пока страница выполнит и ответит.
+                    got = json.loads(body or "{}")
+                    try:
+                        value = host.bridge.ask(str(got.get("tool")), got.get("args") or {},
+                                                float(got.get("timeout") or 10.0))
+                        return self._json({"ok": True, "результат": value})
+                    except Exception as exc:
+                        return self._json({"ok": False, "error": str(exc)})
                 self._ok(b"{}", "application/json")
 
         return Handler
 
     def start(self) -> str:
+        import tgx_windows
+
         self.thread.start()
+        tgx_windows.register(self.title, "мини-приложение", self.url)
         return self.url
 
     def wait(self, seconds: float) -> bool:
@@ -256,6 +349,9 @@ class Host:
         return self.closed.wait(seconds)
 
     def stop(self) -> None:
+        import tgx_windows
+
+        tgx_windows.unregister(self.url)
         self.server.shutdown()
         self.server.server_close()
 
