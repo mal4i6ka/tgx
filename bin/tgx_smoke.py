@@ -1813,6 +1813,34 @@ async def msgextra_regression() -> None:
 
     check("закрытый опрос объяснён", "MESSAGE_POLL_CLOSED" in M.HINTS)
 
+    # фильтры вложений: неизвестный вид отвергаем сразу, а не шлём серверу
+    check("видов вложений девять", len(M.FILTERS) == 9)
+    check("фото среди них", M.FILTERS["photo"] == "InputMessagesFilterPhotos")
+    check("«любое» тоже есть", "any" in M.FILTERS)
+    try:
+        M._filter("шляпа")
+        check("неизвестный вид должен ругаться", False)
+    except M.MsgError as exc:
+        check("и перечислять известные", "photo" in str(exc))
+
+    # ключ рекламы — байты; в командную строку он идёт шестнадцатеричным
+    class Ads(M.Extra):
+        def __init__(self):
+            self.sent = []
+
+        async def _call(self, request):
+            self.sent.append(request)
+            return Thing(messages=[Thing(random_id=b"\xab\xcd", message="реклама",
+                                         button_text="Открыть", can_report=True)])
+
+    ads = Ads()
+    rows = await ads.sponsored(None)
+    check("ключ отдаётся шестнадцатеричным", rows[0]["ключ"] == "abcd")
+    await ads.sponsored_seen("abcd")
+    check("и разворачивается обратно в байты", ads.sent[-1].random_id == b"\xab\xcd")
+
+    check("протухшее приглашение объяснено", "INVITE_HASH_EXPIRED" in M.HINTS)
+
 
 def webapp_dom_regression() -> None:
     """Глаза и руки агента внутри приложения. Ключевое решение — textContent, а

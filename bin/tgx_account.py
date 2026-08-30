@@ -291,3 +291,128 @@ class Account:
         await self._call(functions.account.ReportPeerRequest(
             peer=peer, reason=getattr(types, name)(), message=comment))
         return {"жалоба": "отправлена", "причина": reason}
+
+    # --- деловые ссылки и место ---
+
+    async def resolve_link(self, slug: str) -> dict[str, Any]:
+        """Что стоит за деловой ссылкой t.me/m/… — текст и к кому ведёт."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.account.ResolveBusinessChatLinkRequest(
+            slug=slug.rstrip("/").split("/")[-1]))
+        message = getattr(result, "message", None)
+        return {"текст": message, "к кому": getattr(result, "peer", None) and
+                type(result.peer).__name__}
+
+    async def business_location(self, *, address: str = "", lat: float | None = None,
+                                lon: float | None = None) -> dict[str, Any]:
+        """Адрес делового профиля. Пустой адрес убирает место совсем."""
+        from telethon.tl import functions, types
+
+        point = (types.InputGeoPoint(lat=lat, long=lon)
+                 if lat is not None and lon is not None else None)
+        await self._call(functions.account.UpdateBusinessLocationRequest(
+            geo_point=point, address=address or None))
+        return {"адрес": address or "убран", "точка": [lat, lon] if point else None}
+
+    async def bot_connection(self, connection_id: str) -> dict[str, Any]:
+        """Что за деловое подключение бота — по его идентификатору."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.account.GetBotBusinessConnectionRequest(
+            connection_id=connection_id))
+        updates = getattr(result, "updates", None) or []
+        found = next((getattr(u, "connection", None) for u in updates
+                      if getattr(u, "connection", None)), None)
+        return {"подключение": connection_id,
+                "бот": getattr(found, "bot_id", None),
+                "может писать": bool(getattr(found, "rights", None)),
+                "отключено": bool(getattr(found, "disabled", False))}
+
+    # --- статусы каналов ---
+
+    async def channel_statuses(self, *, restricted: bool = False) -> list[dict[str, Any]]:
+        """Эмодзи-статусы для каналов: обычные или недоступные без бустов."""
+        from telethon.tl import functions
+
+        request = (functions.account.GetChannelRestrictedStatusEmojisRequest if restricted
+                   else functions.account.GetChannelDefaultEmojiStatusesRequest)
+        result = await self._call(request(hash=0))
+        items = getattr(result, "statuses", None) or getattr(result, "documents", None) or []
+        return [_emoji_row(s) if hasattr(s, "document_id") else {"эмодзи": getattr(s, "id", s)}
+                for s in items]
+
+    async def gift_themes(self, *, limit: int = 30) -> list[dict[str, Any]]:
+        """Темы чата, которые дают коллекционные подарки."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.account.GetUniqueGiftChatThemesRequest(
+            offset="", limit=limit, hash=0))
+        return [{"тема": getattr(t, "emoticon", None) or getattr(t, "title", None),
+                 "id": getattr(t, "id", None)}
+                for t in getattr(result, "themes", None) or []]
+
+    # --- отдельные обои и темы по ссылке ---
+
+    async def wallpaper(self, slug: str) -> dict[str, Any]:
+        """Подробности одних обоев по адресу-слагу."""
+        from telethon.tl import functions, types
+
+        result = await self._call(functions.account.GetWallPaperRequest(
+            wallpaper=types.InputWallPaperSlug(slug=slug)))
+        return {"обои": slug, "id": getattr(result, "id", None),
+                "по умолчанию": bool(getattr(result, "default", False)),
+                "узор": bool(getattr(result, "pattern", False))}
+
+    async def theme(self, slug: str) -> dict[str, Any]:
+        from telethon.tl import functions, types
+
+        result = await self._call(functions.account.GetThemeRequest(
+            format="ios", theme=types.InputThemeSlug(slug=slug)))
+        return {"тема": getattr(result, "title", None), "адрес": slug,
+                "установок": getattr(result, "installs_count", None)}
+
+    # --- рингтоны, музыка, платные сообщения ---
+
+    async def save_ringtone(self, key: str, *, remove: bool = False) -> dict[str, Any]:
+        """Сохранить звук в рингтоны. Ключ — «id:hash», как у стикеров."""
+        import tgx_stickers
+        from telethon.tl import functions
+
+        await self._call(functions.account.SaveRingtoneRequest(
+            id=tgx_stickers.sticker_ref(key), unsave=remove))
+        return {"рингтон": key, "сохранён": not remove}
+
+    async def save_music(self, key: str, *, remove: bool = False) -> dict[str, Any]:
+        """Прикрепить музыку к профилю или снять."""
+        import tgx_stickers
+        from telethon.tl import functions
+
+        await self._call(functions.account.SaveMusicRequest(
+            id=tgx_stickers.sticker_ref(key), unsave=remove or None))
+        return {"музыка": key, "в профиле": not remove}
+
+    async def free_messages_for(self, user: Any, *, free: bool = True,
+                                refund: bool = False) -> dict[str, Any]:
+        """Пустить человека писать бесплатно, когда у вас платные сообщения."""
+        from telethon.tl import functions
+
+        entity = await self.client.get_input_entity(user)
+        await self._call(functions.account.ToggleNoPaidMessagesExceptionRequest(
+            user_id=entity, require_payment=None if free else True,
+            refund_charged=refund or None))
+        return {"кому": str(user), "пишет бесплатно": free,
+                "вернули уплаченное": refund}
+
+    async def report_photo(self, peer: Any, photo_id: int, access_hash: int,
+                           reason: str = "other", comment: str = "") -> dict[str, Any]:
+        """Пожаловаться на аватар — отдельно от жалобы на профиль."""
+        from telethon.tl import functions, types
+
+        name = REPORT_REASONS.get(reason)
+        if name is None:
+            raise AccountError(f"причина: {', '.join(sorted(REPORT_REASONS))}")
+        photo = types.InputPhoto(id=photo_id, access_hash=access_hash, file_reference=b"")
+        await self._call(functions.account.ReportProfilePhotoRequest(
+            peer=peer, photo_id=photo, reason=getattr(types, name)(), message=comment))
+        return {"жалоба на аватар": "отправлена", "причина": reason}

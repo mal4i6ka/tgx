@@ -3278,6 +3278,27 @@ async def cmd_msgx(args: argparse.Namespace) -> None:
             "who-reacted": lambda: ex.who_reacted(peer, args.id),
             "saved-dialogs": lambda: ex.saved_dialogs(limit=args.limit),
             "saved-history": lambda: ex.saved_history(args.who, limit=args.limit),
+            "sponsored": lambda: ex.sponsored(peer),
+            "sponsored-seen": lambda: ex.sponsored_seen(args.key, clicked=args.clicked),
+            "url-auth": lambda: ex.url_auth(peer, args.id, args.button),
+            "url-accept": lambda: ex.url_accept(peer, args.id, args.button,
+                                                allow_write=args.allow_write),
+            "search-calendar": lambda: ex.search_calendar(peer, kind=args.kind),
+            "search-positions": lambda: ex.search_positions(peer, kind=args.kind,
+                                                            limit=args.limit),
+            "sent-media": lambda: ex.sent_media(args.query, kind=args.kind, limit=args.limit),
+            "check-invite": lambda: ex.check_invite(args.link),
+            "invite-info": lambda: ex.invite_info(peer, args.link),
+            "edit-window": lambda: ex.edit_window(peer, args.id),
+            "scheduled": lambda: ex.scheduled(peer, args.id),
+            "default-send-as": lambda: ex.default_send_as(peer, args.who),
+            "personal-channel": lambda: ex.personal_channel(args.who, limit=args.limit),
+            "suggested-post": lambda: ex.suggested_post(
+                peer, args.id, reject=args.reject, comment=args.comment or ""),
+            "check-shortcut": lambda: ex.check_shortcut(args.name),
+            "order-shortcuts": lambda: ex.order_shortcuts(args.id),
+            "drop-shortcut-messages": lambda: ex.drop_shortcut_messages(
+                args.shortcut_id, args.id),
         }
         if command in actions:
             got = await actions[command]()
@@ -3288,6 +3309,8 @@ async def cmd_msgx(args: argparse.Namespace) -> None:
             render.emit(await ex.fact_check(peer, args.id, args.text))
         elif command == "drop-fact-check":
             render.emit(await ex.drop_fact_check(peer, args.id))
+        elif command == "report-sponsored":
+            render.emit(await ex.report_sponsored(args.key, option=args.option or ""))
         elif command == "report-reaction":
             await gated_or_die(client, args, f"пожаловаться на реакцию в {args.peer}",
                                "жалобу нельзя отозвать", danger=True)
@@ -3326,12 +3349,31 @@ async def cmd_account(args: argparse.Namespace) -> None:
             "ringtones": lambda: acct.ringtones(),
             "profile-music": lambda: acct.profile_music(),
             "autosave": lambda: acct.autosave(),
+            "resolve-link": lambda: acct.resolve_link(args.slug),
+            "business-location": lambda: acct.business_location(
+                address=args.address or "", lat=args.lat, lon=args.lon),
+            "bot-connection": lambda: acct.bot_connection(args.id),
+            "channel-statuses": lambda: acct.channel_statuses(restricted=args.restricted),
+            "gift-themes": lambda: acct.gift_themes(limit=args.limit),
+            "wallpaper": lambda: acct.wallpaper(args.slug),
+            "theme": lambda: acct.theme(args.slug),
+            "save-ringtone": lambda: acct.save_ringtone(args.key, remove=args.remove),
+            "save-music": lambda: acct.save_music(args.key, remove=args.remove),
             "set-autosave": lambda: acct.set_autosave(
                 where=args.where, photos=args.photos, videos=args.videos, max_mb=args.max_mb),
         }
         if command in actions:
             got = await actions[command]()
             render.emit(got if isinstance(got, dict) else {"найдено": got})
+        elif command == "free-messages-for":
+            render.emit(await acct.free_messages_for(
+                args.user, free=args.state == "on", refund=args.refund))
+        elif command == "report-photo":
+            await gated_or_die(client, args, f"пожаловаться на аватар {args.peer}",
+                               "жалобу нельзя отозвать", danger=True)
+            render.emit(await acct.report_photo(
+                await whom(), args.photo_id, args.access_hash, args.reason,
+                args.comment or ""))
         elif command == "paid-revenue":
             render.emit(await acct.paid_revenue(args.user))
         elif command == "report":
@@ -4437,6 +4479,83 @@ def build_parser() -> argparse.ArgumentParser:
     m_sh.add_argument("who")
     m_sh.add_argument("--limit", type=int, default=30)
 
+    KINDS = sorted(tgx_msgextra.FILTERS)
+
+    m_sp = mx_sub.add_parser("sponsored", help="какая реклама показывается в канале")
+    m_sp.add_argument("peer")
+
+    m_ss = mx_sub.add_parser("sponsored-seen", help="отметить рекламу просмотренной")
+    m_ss.add_argument("key", help="ключ из sponsored")
+    m_ss.add_argument("--clicked", action="store_true", help="нажатой, а не просмотренной")
+
+    m_rsp = mx_sub.add_parser("report-sponsored", help="жалоба на рекламу по меню сервера")
+    m_rsp.add_argument("key")
+    m_rsp.add_argument("--option")
+
+    m_ua = mx_sub.add_parser("url-auth", help="что предлагает кнопка «войти через Telegram»")
+    m_ua.add_argument("peer")
+    m_ua.add_argument("id", type=int)
+    m_ua.add_argument("button", type=int)
+
+    m_uac = mx_sub.add_parser("url-accept", help="согласиться войти по ссылке")
+    m_uac.add_argument("peer")
+    m_uac.add_argument("id", type=int)
+    m_uac.add_argument("button", type=int)
+    m_uac.add_argument("--allow-write", action="store_true")
+
+    m_sc = mx_sub.add_parser("search-calendar", help="по каким дням есть вложения")
+    m_sc.add_argument("peer")
+    m_sc.add_argument("--kind", default="photo", choices=KINDS)
+
+    m_spos = mx_sub.add_parser("search-positions", help="номера сообщений с вложениями")
+    m_spos.add_argument("peer")
+    m_spos.add_argument("--kind", default="photo", choices=KINDS)
+    m_spos.add_argument("--limit", type=int, default=100)
+
+    m_sme = mx_sub.add_parser("sent-media", help="поиск среди того, что вы отправляли")
+    m_sme.add_argument("query")
+    m_sme.add_argument("--kind", default="photo", choices=KINDS)
+    m_sme.add_argument("--limit", type=int, default=30)
+
+    m_ci = mx_sub.add_parser("check-invite", help="что за чат по ссылке, не вступая")
+    m_ci.add_argument("link")
+
+    m_ii = mx_sub.add_parser("invite-info", help="подробности выпущенной ссылки")
+    m_ii.add_argument("peer")
+    m_ii.add_argument("link")
+
+    m_ew = mx_sub.add_parser("edit-window", help="можно ли ещё править сообщение")
+    m_ew.add_argument("peer")
+    m_ew.add_argument("id", type=int)
+
+    m_sch = mx_sub.add_parser("scheduled", help="отложенные сообщения по номерам")
+    m_sch.add_argument("peer")
+    m_sch.add_argument("id", type=int, nargs="+")
+
+    m_dsa = mx_sub.add_parser("default-send-as", help="от чьего имени писать сюда")
+    m_dsa.add_argument("peer")
+    m_dsa.add_argument("who")
+
+    m_pc = mx_sub.add_parser("personal-channel", help="посты личного канала человека")
+    m_pc.add_argument("who")
+    m_pc.add_argument("--limit", type=int, default=20)
+
+    m_sup = mx_sub.add_parser("suggested-post", help="принять или отклонить предложенный пост")
+    m_sup.add_argument("peer")
+    m_sup.add_argument("id", type=int)
+    m_sup.add_argument("--reject", action="store_true")
+    m_sup.add_argument("--comment")
+
+    m_cs = mx_sub.add_parser("check-shortcut", help="свободно ли имя быстрого ответа")
+    m_cs.add_argument("name")
+
+    m_os = mx_sub.add_parser("order-shortcuts", help="переставить быстрые ответы")
+    m_os.add_argument("id", type=int, nargs="+")
+
+    m_dsm = mx_sub.add_parser("drop-shortcut-messages", help="убрать сообщения из быстрого ответа")
+    m_dsm.add_argument("shortcut_id", type=int)
+    m_dsm.add_argument("id", type=int, nargs="+")
+
     m_fc = mx_sub.add_parser("fact-check", help="приписать проверку факта (подтверждение)")
     m_fc.add_argument("peer")
     m_fc.add_argument("id", type=int)
@@ -4512,6 +4631,53 @@ def build_parser() -> argparse.ArgumentParser:
     a_sa.add_argument("--photos", action="store_true")
     a_sa.add_argument("--videos", action="store_true")
     a_sa.add_argument("--max-mb", type=int, default=0, help="видео крупнее не качать")
+
+    a_rl = ac_sub.add_parser("resolve-link", help="что стоит за деловой ссылкой t.me/m/…")
+    a_rl.add_argument("slug")
+
+    a_bl = ac_sub.add_parser("business-location", help="адрес делового профиля")
+    a_bl.add_argument("--address", help="пусто — убрать место")
+    a_bl.add_argument("--lat", type=float)
+    a_bl.add_argument("--lon", type=float)
+
+    a_bc = ac_sub.add_parser("bot-connection", help="что за деловое подключение бота")
+    a_bc.add_argument("id", help="идентификатор подключения")
+
+    a_cs = ac_sub.add_parser("channel-statuses", help="эмодзи-статусы для каналов")
+    a_cs.add_argument("--restricted", action="store_true", help="требующие бустов")
+
+    a_gt = ac_sub.add_parser("gift-themes", help="темы чата от коллекционных подарков")
+    a_gt.add_argument("--limit", type=int, default=30)
+
+    a_wp = ac_sub.add_parser("wallpaper", help="подробности одних обоев")
+    a_wp.add_argument("slug")
+
+    a_th1 = ac_sub.add_parser("theme", help="подробности одной темы")
+    a_th1.add_argument("slug")
+
+    a_sr = ac_sub.add_parser("save-ringtone", help="сохранить звук в рингтоны")
+    a_sr.add_argument("key", help="ключ «id:hash»")
+    a_sr.add_argument("--remove", action="store_true")
+
+    a_sm2 = ac_sub.add_parser("save-music", help="прикрепить музыку к профилю")
+    a_sm2.add_argument("key", help="ключ «id:hash»")
+    a_sm2.add_argument("--remove", action="store_true")
+
+    a_fm = ac_sub.add_parser("free-messages-for", help="пустить писать бесплатно")
+    a_fm.add_argument("user")
+    a_fm.add_argument("state", nargs="?", default="on", choices=["on", "off"])
+    a_fm.add_argument("--refund", action="store_true", help="вернуть уже уплаченное")
+
+    a_rph = ac_sub.add_parser("report-photo", help="пожаловаться на аватар (подтверждение)")
+    a_rph.add_argument("peer")
+    a_rph.add_argument("photo_id", type=int)
+    a_rph.add_argument("access_hash", type=int)
+    a_rph.add_argument("reason", nargs="?", default="other",
+                       choices=sorted(tgx_account.REPORT_REASONS))
+    a_rph.add_argument("--comment", default="")
+    a_rph.add_argument("--confirm-to")
+    a_rph.add_argument("--as", dest="bot")
+    a_rph.add_argument("--timeout", type=float, default=300.0)
 
     a_pr = ac_sub.add_parser("paid-revenue", help="сколько принесли платные сообщения от человека")
     a_pr.add_argument("user")

@@ -34,8 +34,30 @@ HINTS = {
     "THEME_INVALID": "такой темы нет",
     "REACTION_INVALID": "такой реакции нет",
     "USER_ID_INVALID": "такого пользователя нет",
+    "INVITE_HASH_EXPIRED": "ссылка-приглашение больше не действует",
+    "INVITE_HASH_INVALID": "такой ссылки-приглашения не существует",
+    "RANDOM_ID_INVALID": "ключ рекламы не тот; возьмите свежий из `msgx sponsored`",
+    "BUTTON_ID_INVALID": "у этого сообщения нет кнопки с таким номером",
+    "URL_AUTH_TOKEN_INVALID": "вход по этой ссылке больше не предлагается",
     "FLOOD_WAIT": "слишком часто — подождите и повторите",
 }
+
+
+FILTERS = {"photo": "InputMessagesFilterPhotos", "video": "InputMessagesFilterVideo",
+           "file": "InputMessagesFilterDocument", "music": "InputMessagesFilterMusic",
+           "voice": "InputMessagesFilterVoice", "link": "InputMessagesFilterUrl",
+           "gif": "InputMessagesFilterGif", "round": "InputMessagesFilterRoundVideo",
+           "any": "InputMessagesFilterEmpty"}
+
+
+def _filter(kind: str) -> Any:
+    """Вид вложения — в фильтр поиска. Неизвестное лучше отвергнуть сразу."""
+    from telethon.tl import types
+
+    name = FILTERS.get(kind)
+    if name is None:
+        raise MsgError(f"не знаю вида «{kind}»; есть: {', '.join(sorted(FILTERS))}")
+    return getattr(types, name)()
 
 
 def _explain(exc: Exception) -> Exception:
@@ -284,3 +306,212 @@ class Extra:
             rows.append({"id": message.id, "когда": _when(getattr(message, "date", None)),
                          "текст": body[:160] + ("…" if len(body) > 160 else "")})
         return rows
+
+    # --- реклама в каналах ---
+
+    async def sponsored(self, peer: Any) -> list[dict[str, Any]]:
+        """Какую рекламу Telegram показывает в этом канале.
+
+        Ключ отдаём как есть, шестнадцатеричным: он нужен, чтобы отметить
+        просмотр, нажатие или пожаловаться, а сам по себе — просто байты.
+        """
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetSponsoredMessagesRequest(peer=peer))
+        rows = []
+        for item in getattr(result, "messages", None) or []:
+            rows.append({"ключ": getattr(item, "random_id", b"").hex(),
+                         "текст": (getattr(item, "message", "") or "")[:160],
+                         "кнопка": getattr(item, "button_text", None),
+                         "рекламодатель": getattr(item, "sponsor_info", None),
+                         "можно скрыть": bool(getattr(item, "can_report", False))})
+        return rows
+
+    async def sponsored_seen(self, key: str, *, clicked: bool = False) -> dict[str, Any]:
+        """Отметить рекламу просмотренной или нажатой — как делает клиент."""
+        from telethon.tl import functions
+
+        raw = bytes.fromhex(key)
+        request = (functions.messages.ClickSponsoredMessageRequest(random_id=raw) if clicked
+                   else functions.messages.ViewSponsoredMessageRequest(random_id=raw))
+        await self._call(request)
+        return {"реклама": "нажата" if clicked else "просмотрена"}
+
+    async def report_sponsored(self, key: str, *, option: str = "") -> dict[str, Any]:
+        """Жалоба на рекламу — по меню сервера, как и всё остальное."""
+        import base64
+
+        from telethon.tl import functions
+
+        picked = base64.urlsafe_b64decode(option + "==") if option else b""
+        result = await self._call(functions.messages.ReportSponsoredMessageRequest(
+            random_id=bytes.fromhex(key), option=picked))
+        if type(result).__name__ == "ChannelsSponsoredMessageReportResultChooseOption":
+            return {"шаг": getattr(result, "title", "выберите причину"),
+                    "варианты": [{"что": o.text,
+                                  "ключ": base64.urlsafe_b64encode(o.option).decode().rstrip("=")}
+                                 for o in getattr(result, "options", None) or []]}
+        return {"жалоба": "отправлена"}
+
+    # --- вход по ссылке из кнопки ---
+
+    async def url_auth(self, peer: Any, message_id: int, button_id: int) -> dict[str, Any]:
+        """Что предлагает кнопка «войти через Telegram», до согласия."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.RequestUrlAuthRequest(
+            peer=peer, msg_id=message_id, button_id=button_id))
+        kind = type(result).__name__
+        if kind == "UrlAuthResultRequest":
+            return {"сайт": getattr(result, "domain", None),
+                    "бот": getattr(getattr(result, "bot", None), "username", None),
+                    "просит писать вам": bool(getattr(result, "request_write_access", False)),
+                    "дальше": "tgx msgx url-accept"}
+        return {"адрес": getattr(result, "url", None) or "согласие не требуется"}
+
+    async def url_accept(self, peer: Any, message_id: int, button_id: int, *,
+                         allow_write: bool = False) -> dict[str, Any]:
+        """Согласиться войти. Это выдаёт сайту ваш профиль — потому и спрашивают."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.AcceptUrlAuthRequest(
+            peer=peer, msg_id=message_id, button_id=button_id,
+            write_allowed=allow_write or None))
+        return {"адрес": getattr(result, "url", None), "разрешили писать": allow_write}
+
+    # --- календарь и позиции найденного ---
+
+    async def search_calendar(self, peer: Any, *, kind: str = "photo") -> list[dict[str, Any]]:
+        """По каким дням в чате есть вложения этого вида."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetSearchResultsCalendarRequest(
+            peer=peer, filter=_filter(kind), offset_id=0, offset_date=None))
+        return [{"дата": _when(getattr(p, "date", None)), "сообщений": getattr(p, "count", None),
+                 "первое": getattr(p, "min_msg_id", None)}
+                for p in getattr(result, "periods", None) or []]
+
+    async def search_positions(self, peer: Any, *, kind: str = "photo",
+                               limit: int = 100) -> list[int]:
+        """Номера сообщений с вложениями — чтобы прыгать по ленте."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetSearchResultsPositionsRequest(
+            peer=peer, filter=_filter(kind), offset_id=0, limit=limit))
+        return [getattr(p, "msg_id", None) for p in getattr(result, "positions", None) or []]
+
+    async def sent_media(self, query: str, *, kind: str = "photo",
+                         limit: int = 30) -> list[dict[str, Any]]:
+        """Поиск среди того, что вы сами отправляли."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.SearchSentMediaRequest(
+            q=query, filter=_filter(kind), limit=limit))
+        rows = []
+        for message in getattr(result, "messages", None) or []:
+            rows.append({"id": message.id, "когда": _when(getattr(message, "date", None)),
+                         "текст": (getattr(message, "message", "") or "")[:100]})
+        return rows
+
+    # --- приглашения, правка, отложенные ---
+
+    async def check_invite(self, link: str) -> dict[str, Any]:
+        """Что за чат по ссылке-приглашению, не вступая в него."""
+        from telethon.tl import functions
+
+        code = link.rstrip("/").split("/")[-1].lstrip("+")
+        result = await self._call(functions.messages.CheckChatInviteRequest(hash=code))
+        kind = type(result).__name__
+        if kind == "ChatInviteAlready":
+            chat = getattr(result, "chat", None)
+            return {"вы уже там": True, "чат": getattr(chat, "title", None)}
+        return {"чат": getattr(result, "title", None),
+                "участников": getattr(result, "participants_count", None),
+                "по заявке": bool(getattr(result, "request_needed", False)),
+                "вы уже там": False}
+
+    async def invite_info(self, peer: Any, link: str) -> dict[str, Any]:
+        """Подробности выпущенной ссылки: кто выпустил, сколько прошло."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetExportedChatInviteRequest(
+            peer=peer, link=link))
+        invite = getattr(result, "invite", None)
+        return {"ссылка": getattr(invite, "link", link),
+                "название": getattr(invite, "title", None),
+                "вошло": getattr(invite, "usage", None),
+                "предел": getattr(invite, "usage_limit", None),
+                "отозвана": bool(getattr(invite, "revoked", False))}
+
+    async def edit_window(self, peer: Any, message_id: int) -> dict[str, Any]:
+        """Можно ли ещё править это сообщение — сервер знает точнее часов."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetMessageEditDataRequest(
+            peer=peer, id=message_id))
+        return {"сообщение": message_id,
+                "правится": True,
+                "нужен предпросмотр ссылки": bool(getattr(result, "caption", False))}
+
+    async def scheduled(self, peer: Any, ids: list[int]) -> list[dict[str, Any]]:
+        """Отложенные сообщения по номерам."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetScheduledMessagesRequest(
+            peer=peer, id=ids))
+        return [{"id": m.id, "когда": _when(getattr(m, "date", None)),
+                 "текст": (getattr(m, "message", "") or "")[:120]}
+                for m in getattr(result, "messages", None) or []]
+
+    async def default_send_as(self, peer: Any, who: Any) -> dict[str, Any]:
+        """От чьего имени писать в этот чат по умолчанию."""
+        from telethon.tl import functions
+
+        author = await self.client.get_input_entity(who)
+        await self._call(functions.messages.SaveDefaultSendAsRequest(
+            peer=peer, send_as=author))
+        return {"писать как": str(who)}
+
+    async def personal_channel(self, user: Any, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Посты личного канала человека — те, что видны в его профиле."""
+        from telethon.tl import functions
+
+        entity = await self.client.get_input_entity(user)
+        result = await self._call(functions.messages.GetPersonalChannelHistoryRequest(
+            user_id=entity, limit=limit, max_id=0, min_id=0, hash=0))
+        return [{"id": m.id, "когда": _when(getattr(m, "date", None)),
+                 "текст": (getattr(m, "message", "") or "")[:120]}
+                for m in getattr(result, "messages", None) or []]
+
+    async def suggested_post(self, peer: Any, message_id: int, *, reject: bool = False,
+                             comment: str = "") -> dict[str, Any]:
+        """Принять или отклонить предложенный в канал пост."""
+        from telethon.tl import functions
+
+        await self._call(functions.messages.ToggleSuggestedPostApprovalRequest(
+            peer=peer, msg_id=message_id, reject=reject or None,
+            reject_comment=comment or None))
+        return {"предложенный пост": "отклонён" if reject else "принят"}
+
+    # --- быстрые ответы ---
+
+    async def check_shortcut(self, name: str) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        free = await self._call(functions.messages.CheckQuickReplyShortcutRequest(
+            shortcut=name))
+        return {"имя": name, "свободно": bool(free)}
+
+    async def order_shortcuts(self, ids: list[int]) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.messages.ReorderQuickRepliesRequest(order=ids))
+        return {"порядок быстрых ответов": ids}
+
+    async def drop_shortcut_messages(self, shortcut_id: int,
+                                     ids: list[int]) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.messages.DeleteQuickReplyMessagesRequest(
+            shortcut_id=shortcut_id, id=ids))
+        return {"убрано из быстрого ответа": len(ids)}
