@@ -363,10 +363,22 @@ BOT_HINTS = {
     "USERNAME_OCCUPIED": "этот адрес занят — придумайте другой",
     "USERNAME_PURCHASE_AVAILABLE": "адрес свободен, но продаётся на Fragment — бесплатно его не занять",
     "BOTS_TOO_MUCH": "у вас уже предельное число ботов; удалите ненужного через BotFather",
-    "BOT_INVALID": "это не ваш бот — токен выдают только владельцу",
+    "BOT_INVALID": ("бот не подходит для этого вызова: либо он не ваш, либо у него нет "
+                    "того, о чём спрашиваете, — превью бывают только у ботов "
+                    "с мини-приложением"),
     "USER_ID_INVALID": "такого пользователя нет",
     "PASSWORD_HASH_INVALID": "неверный пароль двухфакторной защиты",
     "BOT_NOT_FOUND": "бот не найден",
+    "BOT_ACCESS_FORBIDDEN": ("у бота выключен ограниченный доступ — его включают в "
+                             "BotFather, и только тогда список допущенных имеет смысл"),
+    "BOT_APP_INVALID": "у бота нет мини-приложения",
+    "MEDIA_INVALID": "превью принимает картинку или ролик по публичному адресу",
+    "MEDIA_EMPTY": "нечего добавлять",
+    "BOT_BUSINESS_MISSING": "у бота выключен секретарский режим",
+    "STARREF_PERMILLE_INVALID": "доля партнёра вне разрешённого; сервер называет свои границы",
+    "STARREF_HOSTING_PEER_INVALID": "партнёрская программа этому боту недоступна",
+    "LANG_CODE_INVALID": "непонятный код языка; нужен двухбуквенный, например ru",
+    "USERNAME_NOT_MODIFIED": "и так уже так",
 }
 
 
@@ -616,3 +628,180 @@ class BotSession:
             target, body, parse_mode=None, formatting_entities=entities or None,
             buttons=markup, link_preview=link_preview, silent=silent or None, schedule=schedule,
         )
+
+
+class Shop:
+    """Витрина бота и всё, что вокруг неё.
+
+    Превью — картинки и ролики, которые человек видит до того, как нажал
+    «Начать». Они заводятся отдельно для каждого языка: у набора без языка свой
+    список, у русского свой. Ссылаться на превью можно только тем же медиа,
+    каким его положили, — отдельного идентификатора у них нет, и это заметно
+    неудобно при удалении и перестановке.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    async def _call(self, request: Any) -> Any:
+        try:
+            return await self.client(request)
+        except Exception as exc:
+            raise explain_bot_error(exc) from exc
+
+    async def _bot(self, bot: Any) -> Any:
+        return await self.client.get_input_entity(bot)
+
+    @staticmethod
+    def _media(url_or_id: str) -> Any:
+        """Ссылка или file_id → InputMedia. Локальные файлы сюда не годятся."""
+        from telethon.tl import types
+
+        text = (url_or_id or "").strip()
+        if not text:
+            raise BotError("нечего добавлять — нужен адрес картинки или ролика")
+        if text.startswith(("http://", "https://")):
+            kind = text.rsplit(".", 1)[-1].lower()
+            if kind in {"mp4", "mov", "webm"}:
+                return types.InputMediaDocumentExternal(url=text)
+            return types.InputMediaPhotoExternal(url=text)
+        raise BotError("превью принимает только публичный адрес; "
+                       "файл сначала выложите куда-нибудь")
+
+    async def previews(self, bot: Any, lang: str = "") -> dict[str, Any]:
+        """Что стоит на витрине и на каких языках."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.bots.GetPreviewInfoRequest(
+            bot=await self._bot(bot), lang_code=lang))
+        return {"язык": lang or "по умолчанию",
+                "превью": [type(getattr(m, "media", None)).__name__.replace("MessageMedia", "")
+                           for m in getattr(result, "media", None) or []],
+                "языки с превью": list(getattr(result, "lang_codes", None) or [])}
+
+    async def add_preview(self, bot: Any, url: str, lang: str = "") -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.bots.AddPreviewMediaRequest(
+            bot=await self._bot(bot), lang_code=lang, media=self._media(url)))
+        return {"добавлено": url, "язык": lang or "по умолчанию"}
+
+    async def drop_preview(self, bot: Any, urls: list[str], lang: str = "") -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.bots.DeletePreviewMediaRequest(
+            bot=await self._bot(bot), lang_code=lang,
+            media=[self._media(u) for u in urls]))
+        return {"убрано": len(urls), "язык": lang or "по умолчанию"}
+
+    async def swap_preview(self, bot: Any, old: str, new: str, lang: str = "") -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.bots.EditPreviewMediaRequest(
+            bot=await self._bot(bot), lang_code=lang,
+            media=self._media(old), new_media=self._media(new)))
+        return {"было": old, "стало": new}
+
+    async def order_previews(self, bot: Any, urls: list[str], lang: str = "") -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.bots.ReorderPreviewMediasRequest(
+            bot=await self._bot(bot), lang_code=lang,
+            order=[self._media(u) for u in urls]))
+        return {"порядок": len(urls)}
+
+    async def access(self, bot: Any, *, restricted: bool | None = None,
+                     allow: list[Any] | None = None) -> dict[str, Any]:
+        """Кому бот вообще отвечает. Без аргументов — показать."""
+        from telethon.tl import functions
+
+        target = await self._bot(bot)
+        if restricted is None and not allow:
+            result = await self._call(functions.bots.GetAccessSettingsRequest(bot=target))
+            return {"доступ": "по списку" if getattr(result, "restricted", False) else "всем",
+                    "в списке": len(getattr(result, "users", None) or [])}
+        people = [await self.client.get_input_entity(u) for u in (allow or [])]
+        await self._call(functions.bots.EditAccessSettingsRequest(
+            bot=target, restricted=restricted, add_users=people or None))
+        return {"доступ": "по списку" if restricted else "всем", "добавлено": len(people)}
+
+    async def similar(self, bot: Any) -> list[dict[str, Any]]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.bots.GetBotRecommendationsRequest(
+            bot=await self._bot(bot)))
+        return [{"бот": getattr(u, "username", None), "имя": getattr(u, "first_name", None)}
+                for u in getattr(result, "users", None) or []]
+
+    async def popular(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Какие мини-приложения сейчас смотрят."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.bots.GetPopularAppBotsRequest(
+            offset="", limit=limit))
+        return [{"бот": getattr(u, "username", None), "имя": getattr(u, "first_name", None)}
+                for u in getattr(result, "users", None) or []]
+
+    async def free_name(self, username: str) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        try:
+            free = await self._call(functions.bots.CheckUsernameRequest(
+                username=username.lstrip("@")))
+        except BotError as exc:
+            return {"адрес": username, "свободен": False, "почему": str(exc)}
+        return {"адрес": username.lstrip("@"), "свободен": bool(free)}
+
+    async def username(self, bot: Any, name: str, *, on: bool = True) -> dict[str, Any]:
+        """Включить или выключить один из адресов бота."""
+        from telethon.tl import functions
+
+        await self._call(functions.bots.ToggleUsernameRequest(
+            bot=await self._bot(bot), username=name.lstrip("@"), active=on))
+        return {"адрес": name.lstrip("@"), "включён": on}
+
+    async def order_usernames(self, bot: Any, names: list[str]) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.bots.ReorderUsernamesRequest(
+            bot=await self._bot(bot), order=[n.lstrip("@") for n in names]))
+        return {"порядок адресов": [n.lstrip("@") for n in names]}
+
+    async def referrals(self, bot: Any, permille: int, *, months: int = 0) -> dict[str, Any]:
+        """Партнёрская программа: сколько бот отдаёт приведшему, в тысячных."""
+        from telethon.tl import functions
+
+        if not 0 <= permille <= 1000:
+            raise BotError("доля считается в тысячных: от 0 до 1000")
+        await self._call(functions.bots.UpdateStarRefProgramRequest(
+            bot=await self._bot(bot), commission_permille=permille,
+            duration_months=months or None))
+        return {"доля партнёра": f"{permille / 10:g}%",
+                "срок": f"{months} мес." if months else "бессрочно"}
+
+    async def reset_commands(self, lang: str = "") -> dict[str, Any]:
+        """Убрать свои команды. Вызывается сессией самого бота."""
+        from telethon.tl import functions, types
+
+        await self._call(functions.bots.ResetBotCommandsRequest(
+            scope=types.BotCommandScopeDefault(), lang_code=lang))
+        return {"команды": "сброшены"}
+
+    async def emoji_permission(self, bot: Any, on: bool) -> dict[str, Any]:
+        """Разрешить боту менять ваш эмодзи-статус."""
+        from telethon.tl import functions
+
+        await self._call(functions.bots.ToggleUserEmojiStatusPermissionRequest(
+            bot=await self._bot(bot), enabled=on))
+        return {"бот меняет ваш статус": on}
+
+    async def can_write(self, bot: Any, *, allow: bool = False) -> dict[str, Any]:
+        """Может ли бот писать вам первым; `allow` — разрешить."""
+        from telethon.tl import functions
+
+        target = await self._bot(bot)
+        if allow:
+            await self._call(functions.bots.AllowSendMessageRequest(bot=target))
+            return {"бот может писать вам": True}
+        result = await self._call(functions.bots.CanSendMessageRequest(bot=target))
+        return {"бот может писать вам": bool(result)}

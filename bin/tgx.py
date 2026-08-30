@@ -26,6 +26,7 @@ from telethon.tl.types import Channel, Chat, User
 import tgx_article
 import tgx_banner
 import tgx_ai
+import tgx_chanadmin
 import tgx_chatx
 import tgx_bots
 import tgx_business
@@ -3086,6 +3087,79 @@ async def cmd_safety(args: argparse.Namespace) -> None:
         await client.disconnect()
 
 
+async def cmd_chan(args: argparse.Namespace) -> None:
+    """Остаток управления каналами: адреса, вид, уборка, необратимое."""
+    command = args.chancmd
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        admin = tgx_chanadmin.ChanAdmin(client)
+        peer = await resolve_peer(client, args.peer) if getattr(args, "peer", None) else None
+
+        if command == "search-posts":
+            render.emit({"посты": await admin.search_posts(
+                args.query or "", hashtag=args.hashtag or "", limit=args.limit)})
+        elif command == "search-quota":
+            render.emit(await admin.search_quota(args.query or ""))
+        elif command == "free-name":
+            render.emit(await admin.free_name(peer, args.name))
+        elif command == "username":
+            render.emit(await admin.username(peer, args.name, on=args.state == "on"))
+        elif command == "usernames-order":
+            render.emit(await admin.order_usernames(peer, args.name))
+        elif command == "usernames-off":
+            await gated_or_die(client, args, f"погасить все адреса {args.peer}",
+                               "канал станет закрытым", danger=True)
+            render.emit(await admin.drop_usernames(peer))
+        elif command == "autotranslate":
+            render.emit(await admin.autotranslate(peer, args.state == "on"))
+        elif command == "main-tab":
+            render.emit(await admin.main_tab(peer, args.tab))
+        elif command == "stickers":
+            render.emit(await admin.stickers(peer, args.name, emoji=args.emoji))
+        elif command == "location":
+            render.emit(await admin.location(peer, args.lat, args.lon, args.address))
+        elif command == "send-as":
+            render.emit({"можно писать от": await admin.send_as(
+                peer, paid_reactions=args.paid_reactions)})
+        elif command == "paid-messages":
+            render.emit(await admin.paid_messages(peer, args.stars, broadcast=args.broadcast))
+        elif command == "boost-bypass":
+            render.emit(await admin.boost_bypass(peer, args.boosts))
+        elif command == "hide-ads":
+            render.emit(await admin.hide_ads(peer, args.state == "on"))
+        elif command == "author":
+            render.emit(await admin.author(peer, args.id))
+        elif command == "wipe-participant":
+            await gated_or_die(client, args, f"стереть все сообщения {args.who} в {args.peer}",
+                               "вернуть их нельзя", danger=True)
+            render.emit(await admin.wipe_participant(peer, args.who))
+        elif command == "clear":
+            await gated_or_die(client, args, f"стереть историю {args.peer}",
+                               "у всех участников" if args.everyone else "только у вас",
+                               danger=True)
+            render.emit(await admin.clear(peer, up_to=args.up_to or 0, everyone=args.everyone))
+        elif command == "report-spam":
+            render.emit(await admin.report_spam(peer, args.who, args.id))
+        elif command == "antispam-mistake":
+            render.emit(await admin.antispam_mistake(peer, args.id))
+        elif command == "left":
+            render.emit({"покинутые": await admin.left(limit=args.limit)})
+        elif command == "discussable":
+            render.emit({"годятся в обсуждение": await admin.discussable()})
+        elif command == "to-broadcast":
+            await gated_or_die(client, args, f"превратить {args.peer} в трансляцию",
+                               "писать смогут только администраторы, обратно нельзя",
+                               danger=True)
+            render.emit(await admin.to_broadcast(peer))
+        elif command == "delete":
+            await gated_or_die(client, args, f"удалить канал {args.peer}",
+                               "вместе со всеми постами и подписчиками", danger=True)
+            render.emit(await admin.drop(peer))
+    finally:
+        await client.disconnect()
+
+
 async def cmd_group(args: argparse.Namespace) -> None:
     """Обычные группы, ветки обсуждений и признак набора."""
     command = args.groupcmd
@@ -3380,6 +3454,47 @@ async def cmd_bot(args: argparse.Namespace) -> None:
     if command == "previews":
         render.emit({"превью": await _with_user(
             lambda c: tgx_bots.Direct(c).previews(args.username))})
+        return
+
+    if command == "access":
+        # доступ к боту настраивает сам бот: из аккаунта приходит USER_BOT_REQUIRED
+        render.emit(await _with_bot(args.username, lambda s: tgx_bots.Shop(
+            s.client).access(args.username, restricted=args.restricted, allow=args.allow)))
+        return
+
+    if command in {"previews-info", "preview-add", "preview-remove", "preview-swap",
+                   "preview-order", "similar", "popular", "free-name",
+                   "username", "usernames-order", "referrals", "emoji-permission",
+                   "can-write"}:
+        # витрина и настройки спрашиваются от вашего имени, сброс команд — от бота
+        shop = lambda c: tgx_bots.Shop(c)
+        actions = {
+            "previews-info": lambda c: shop(c).previews(args.username, args.lang or ""),
+            "preview-add": lambda c: shop(c).add_preview(args.username, args.url, args.lang or ""),
+            "preview-remove": lambda c: shop(c).drop_preview(args.username, args.url, args.lang or ""),
+            "preview-swap": lambda c: shop(c).swap_preview(args.username, args.old, args.new,
+                                                           args.lang or ""),
+            "preview-order": lambda c: shop(c).order_previews(args.username, args.url,
+                                                              args.lang or ""),
+            "similar": lambda c: shop(c).similar(args.username),
+            "popular": lambda c: shop(c).popular(args.limit),
+            "free-name": lambda c: shop(c).free_name(args.username),
+            "username": lambda c: shop(c).username(args.username, args.name,
+                                                   on=args.state == "on"),
+            "usernames-order": lambda c: shop(c).order_usernames(args.username, args.name),
+            "referrals": lambda c: shop(c).referrals(args.username, args.permille,
+                                                     months=args.months or 0),
+            "emoji-permission": lambda c: shop(c).emoji_permission(args.username,
+                                                                   args.state == "on"),
+            "can-write": lambda c: shop(c).can_write(args.username, allow=args.allow_write),
+        }
+        got = await _with_user(actions[command])
+        render.emit(got if isinstance(got, dict) else {"найдено": got})
+        return
+
+    if command == "reset-commands":
+        render.emit(await _with_bot(args.username, lambda s: tgx_bots.Shop(
+            s.client).reset_commands(args.lang or "")))
         return
 
     if command == "group-rights":
@@ -3976,6 +4091,111 @@ def build_parser() -> argparse.ArgumentParser:
     s_sp = sf_sub.add_parser("sponsored", help="показывать ли рекламу (скрыть — Premium)")
     s_sp.add_argument("state", choices=["on", "off"])
 
+    ch = sub.add_parser("chan", help="каналы: адреса, вид, уборка, поиск по всему Telegram")
+    ch_sub = ch.add_subparsers(dest="chancmd", required=True)
+    ch.set_defaults(func=cmd_chan)
+
+    def wants(parser):
+        parser.add_argument("--confirm-to", help="кто подтверждает")
+        parser.add_argument("--as", dest="bot", help="бот, который спросит")
+        parser.add_argument("--timeout", type=float, default=300.0)
+        return parser
+
+    c_sp = ch_sub.add_parser("search-posts", help="искать по постам всего Telegram")
+    c_sp.add_argument("query", nargs="?", default="")
+    c_sp.add_argument("--hashtag")
+    c_sp.add_argument("--limit", type=int, default=30)
+
+    c_sq = ch_sub.add_parser("search-quota", help="сколько поисков осталось бесплатно")
+    c_sq.add_argument("query", nargs="?", default="")
+
+    c_fn = ch_sub.add_parser("free-name", help="свободен ли адрес")
+    c_fn.add_argument("peer")
+    c_fn.add_argument("name")
+
+    c_un = ch_sub.add_parser("username", help="включить или выключить адрес")
+    c_un.add_argument("peer")
+    c_un.add_argument("name")
+    c_un.add_argument("state", nargs="?", default="on", choices=["on", "off"])
+
+    c_uo = ch_sub.add_parser("usernames-order", help="переставить адреса")
+    c_uo.add_argument("peer")
+    c_uo.add_argument("name", nargs="+")
+
+    c_uf = wants(ch_sub.add_parser("usernames-off", help="погасить все адреса (подтверждение)"))
+    c_uf.add_argument("peer")
+
+    c_at = ch_sub.add_parser("autotranslate", help="кнопка перевода постов у читателей")
+    c_at.add_argument("peer")
+    c_at.add_argument("state", choices=["on", "off"])
+
+    c_mt = ch_sub.add_parser("main-tab", help="что показывать первым в профиле")
+    c_mt.add_argument("peer")
+    c_mt.add_argument("tab", choices=sorted(tgx_chanadmin.TABS))
+
+    c_st = ch_sub.add_parser("stickers", help="общий набор стикеров группы")
+    c_st.add_argument("peer")
+    c_st.add_argument("name", help="короткое имя набора или id:hash")
+    c_st.add_argument("--emoji", action="store_true", help="набор эмодзи, а не стикеров")
+
+    c_lo = ch_sub.add_parser("location", help="привязать группу к месту")
+    c_lo.add_argument("peer")
+    c_lo.add_argument("lat", type=float)
+    c_lo.add_argument("lon", type=float)
+    c_lo.add_argument("address")
+
+    c_sa = ch_sub.add_parser("send-as", help="от чьего имени можно писать сюда")
+    c_sa.add_argument("peer")
+    c_sa.add_argument("--paid-reactions", action="store_true")
+
+    c_pm = ch_sub.add_parser("paid-messages", help="звёзд за сообщение в группе")
+    c_pm.add_argument("peer")
+    c_pm.add_argument("stars", type=int, help="0 — бесплатно")
+    c_pm.add_argument("--broadcast", action="store_true", help="разрешить рассылки")
+
+    c_bb = ch_sub.add_parser("boost-bypass", help="сколько бустов снимает ограничения")
+    c_bb.add_argument("peer")
+    c_bb.add_argument("boosts", type=int)
+
+    c_ha = ch_sub.add_parser("hide-ads", help="убрать рекламу из своего канала (за бусты)")
+    c_ha.add_argument("peer")
+    c_ha.add_argument("state", choices=["on", "off"])
+
+    c_au = ch_sub.add_parser("author", help="кто из админов написал пост")
+    c_au.add_argument("peer")
+    c_au.add_argument("id", type=int)
+
+    c_wp = wants(ch_sub.add_parser("wipe-participant",
+                                   help="стереть всё, что человек написал (подтверждение)"))
+    c_wp.add_argument("peer")
+    c_wp.add_argument("who")
+
+    c_cl = wants(ch_sub.add_parser("clear", help="стереть историю (подтверждение)"))
+    c_cl.add_argument("peer")
+    c_cl.add_argument("--up-to", type=int, help="до этого сообщения")
+    c_cl.add_argument("--everyone", action="store_true", help="у всех участников")
+
+    c_rs = ch_sub.add_parser("report-spam", help="пожаловаться на сообщения участника")
+    c_rs.add_argument("peer")
+    c_rs.add_argument("who")
+    c_rs.add_argument("id", type=int, nargs="+")
+
+    c_am = ch_sub.add_parser("antispam-mistake", help="антиспам зря удалил сообщение")
+    c_am.add_argument("peer")
+    c_am.add_argument("id", type=int)
+
+    c_lf = ch_sub.add_parser("left", help="каналы, из которых вы вышли")
+    c_lf.add_argument("--limit", type=int, default=50)
+
+    ch_sub.add_parser("discussable", help="какие группы годятся в обсуждение канала")
+
+    c_tb = wants(ch_sub.add_parser("to-broadcast",
+                                   help="супергруппа → трансляция (подтверждение)"))
+    c_tb.add_argument("peer")
+
+    c_dl = wants(ch_sub.add_parser("delete", help="удалить канал (подтверждение)"))
+    c_dl.add_argument("peer")
+
     gr = sub.add_parser("group", help="обычные группы, ветки обсуждений, «печатает…»")
     gr_sub = gr.add_subparsers(dest="groupcmd", required=True)
     gr.set_defaults(func=cmd_group)
@@ -4232,6 +4452,72 @@ def build_parser() -> argparse.ArgumentParser:
                             ("delete", "удалять сообщения"), ("ban", "банить"),
                             ("info", "менять описание")):
         b_rights.add_argument(f"--{flag}", action="store_true", help=help_text)
+
+    b_pin = bot_sub.add_parser("previews-info", help="что стоит на витрине бота")
+    b_pin.add_argument("username")
+    b_pin.add_argument("--lang", help="для этого языка")
+
+    b_pa = bot_sub.add_parser("preview-add", help="добавить превью (публичный адрес)")
+    b_pa.add_argument("username")
+    b_pa.add_argument("url")
+    b_pa.add_argument("--lang")
+
+    b_pr = bot_sub.add_parser("preview-remove", help="убрать превью")
+    b_pr.add_argument("username")
+    b_pr.add_argument("url", nargs="+")
+    b_pr.add_argument("--lang")
+
+    b_pw = bot_sub.add_parser("preview-swap", help="заменить одно превью другим")
+    b_pw.add_argument("username")
+    b_pw.add_argument("old")
+    b_pw.add_argument("new")
+    b_pw.add_argument("--lang")
+
+    b_po = bot_sub.add_parser("preview-order", help="переставить превью")
+    b_po.add_argument("username")
+    b_po.add_argument("url", nargs="+", help="в нужном порядке")
+    b_po.add_argument("--lang")
+
+    b_ac = bot_sub.add_parser("access", help="кому бот отвечает; без ключей — показать")
+    b_ac.add_argument("username")
+    b_ac.add_argument("--restricted", action=argparse.BooleanOptionalAction,
+                      help="только по списку")
+    b_ac.add_argument("--allow", action="append", help="добавить в список; можно повторять")
+
+    b_sim = bot_sub.add_parser("similar", help="похожие боты")
+    b_sim.add_argument("username")
+
+    b_pop = bot_sub.add_parser("popular", help="какие мини-приложения сейчас смотрят")
+    b_pop.add_argument("--limit", type=int, default=20)
+
+    b_fn = bot_sub.add_parser("free-name", help="свободен ли адрес для бота")
+    b_fn.add_argument("username")
+
+    b_un = bot_sub.add_parser("username", help="включить или выключить один из адресов")
+    b_un.add_argument("username")
+    b_un.add_argument("name")
+    b_un.add_argument("state", nargs="?", default="on", choices=["on", "off"])
+
+    b_uo = bot_sub.add_parser("usernames-order", help="переставить адреса бота")
+    b_uo.add_argument("username")
+    b_uo.add_argument("name", nargs="+", help="в нужном порядке")
+
+    b_ref = bot_sub.add_parser("referrals", help="партнёрская программа: доля в тысячных")
+    b_ref.add_argument("username")
+    b_ref.add_argument("permille", type=int, help="0–1000; 150 — это 15%%")
+    b_ref.add_argument("--months", type=int, help="срок; без него бессрочно")
+
+    b_rc = bot_sub.add_parser("reset-commands", help="убрать команды бота")
+    b_rc.add_argument("username")
+    b_rc.add_argument("--lang")
+
+    b_ep = bot_sub.add_parser("emoji-permission", help="пускать ли бота к вашему эмодзи-статусу")
+    b_ep.add_argument("username")
+    b_ep.add_argument("state", choices=["on", "off"])
+
+    b_cw = bot_sub.add_parser("can-write", help="может ли бот писать вам первым")
+    b_cw.add_argument("username")
+    b_cw.add_argument("--allow-write", action="store_true", help="разрешить")
 
     b_secr = bot_sub.add_parser(
         "secretary", help="секретарский режим — без него бота не подключить к личным чатам")
@@ -5920,7 +6206,7 @@ async def amain() -> None:
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_calls.CallError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_pending.PendingError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
-                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_safety.SafetyError, tgx_groups.GroupError, tgx_inline.InlineError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
+                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_safety.SafetyError, tgx_groups.GroupError, tgx_chanadmin.ChanError, tgx_inline.InlineError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
                  tgx_stories.StoryError,
                  tgx_transcribe.TranscribeError)
 

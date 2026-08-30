@@ -1758,6 +1758,56 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+async def chanadmin_regression() -> None:
+    """Управление каналом: вкладки профиля, доля партнёра, объяснения ошибок,
+    которые сервер даёт мимо сути."""
+    import tgx_bots as B
+    import tgx_chanadmin as C
+
+    check("вкладок профиля девять", len(C.TABS) == 9)
+    check("посты среди них", C.TABS["posts"] == "ProfileTabPosts")
+    check("подарки тоже", "gifts" in C.TABS)
+
+    # PEER_ID_INVALID здесь значит не «нет чата», а «нельзя писать от чужого имени»
+    peer_hint = C.HINTS["PEER_ID_INVALID"]
+    check("двусмысленность PEER_ID_INVALID объяснена", "и когда" in peer_hint)
+    check("и сказано, у кого выбор бывает", "анонимных" in peer_hint)
+    check("требование выгрузки объяснено", "выгрузк" in C.HINTS["TAKEOUT_REQUIRED"])
+
+    # доля партнёра считается в тысячных — легко перепутать с процентами
+    class Fake(B.Shop):
+        def __init__(self):
+            self.sent = []
+
+        async def _call(self, request):
+            self.sent.append(request)
+
+        async def _bot(self, bot):
+            return bot
+
+    got = await Fake().referrals("b", 150)
+    check("тысячные переводятся в проценты", got["доля партнёра"] == "15%")
+    check("бессрочная программа так и подписана", got["срок"] == "бессрочно")
+
+    for bad in (-1, 1001):
+        try:
+            await Fake().referrals("b", bad)
+            check(f"доля {bad} должна ругаться", False)
+        except B.BotError as exc:
+            check(f"доля {bad} отвергнута с объяснением", "тысячных" in str(exc))
+
+    # превью принимают только публичный адрес — локальный путь надо отвергнуть
+    try:
+        B.Shop._media("/tmp/картинка.png")
+        check("локальный файл в превью не пускаем", False)
+    except B.BotError as exc:
+        check("и сказано почему", "публичный адрес" in str(exc))
+    check("ролик распознаётся по расширению",
+          type(B.Shop._media("https://a/b.mp4")).__name__ == "InputMediaDocumentExternal")
+    check("картинка тоже",
+          type(B.Shop._media("https://a/b.jpg")).__name__ == "InputMediaPhotoExternal")
+
+
 def groups_regression() -> None:
     """Обычная группа адресуется голым числом — единственное место в схеме, где
     так. Перепутать легко, а сервер отвечает невнятным CHAT_ID_INVALID."""
@@ -2547,6 +2597,7 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    await chanadmin_regression()
     groups_regression()
     await peer_ambiguity_regression()
     markdown_to_blocks_regression()
