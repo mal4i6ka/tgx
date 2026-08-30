@@ -153,6 +153,25 @@ function note(text, bad) {
   log.appendChild(line); log.scrollTop = log.scrollHeight;
 }
 
+// Часть приложений шлёт сообщения не «куда придётся», а на конкретный адрес —
+// обычно https://web.telegram.org. Мы не он: браузер такое сообщение молча
+// выбрасывает, приложение не дожидается ответа и решает, что запущено вне
+// Telegram. Со стороны это выглядит как «Environment Error» через 200 мс.
+//
+// Своё окно вправе принимать всё, что ему шлют: подменяем собственный
+// postMessage так, чтобы чужой адрес назначения не мешал доставке. Наружу это
+// ничего не открывает — сообщение и так шло к нам, просто с чужой пометкой.
+(function () {
+  const real = window.postMessage.bind(window);
+  window.postMessage = function (data, target, transfer) {
+    if (target && target !== '*' && target !== location.origin) {
+      note('сообщение адресовано ' + target + ' — принимаем как своё');
+      return real(data, '*', transfer);
+    }
+    return real(data, target === undefined ? '*' : target, transfer);
+  };
+})();
+
 function reply(type, data) {
   // Тот же способ, которым отвечает настоящий клиент: сообщение уходит в рамку
   // строкой, а не объектом, — приложение ждёт именно строку.
@@ -242,6 +261,34 @@ window.addEventListener('message', (event) => {
       note('приложение просит закрыть окно'); fetch('/closed', {method: 'POST'}); break;
     case 'web_app_trigger_haptic_feedback': break;   // вибрации у окна нет
     case 'web_app_setup_settings_button': break;    // своей шестерёнки не рисуем
+    case 'web_app_setup_swipe_behavior': break;    // смахивать в окне нечем
+    case 'web_app_setup_closing_behavior': break;  // закрытие спрашиваем сами
+    case 'web_app_toggle_orientation_lock': break; // экран у окна один
+
+    // Полноэкранный режим. Приложение ждёт ответа и без него висит на заставке:
+    // «Тюряга» так и делала. Настоящего полного экрана у рамки нет, но сказать
+    // об этом надо ответом, а не молчанием.
+    case 'web_app_request_fullscreen':
+      reply('fullscreen_changed', {is_fullscreen: true});
+      break;
+    case 'web_app_exit_fullscreen':
+      reply('fullscreen_changed', {is_fullscreen: false});
+      break;
+
+    // «Добавить на домашний экран» — этого у окна нет; отвечаем «не умеем»,
+    // и приложение перестаёт ждать.
+    case 'web_app_check_home_screen':
+      reply('home_screen_checked', {status: 'unsupported'});
+      break;
+    case 'web_app_add_to_home_screen':
+      reply('home_screen_added', {});
+      break;
+
+    // Своих методов у нас нет, но запрос требует ответа с тем же номером —
+    // иначе приложение ждёт его до бесконечности.
+    case 'web_app_invoke_custom_method':
+      reply('custom_method_invoked', {req_id: data.req_id, error: 'UNSUPPORTED_METHOD'});
+      break;
 
     // Хранилища. Приложение считает их само собой разумеющимися: Wallet без
     // них уходит в «Some technical issue» и дальше не идёт. Держим в

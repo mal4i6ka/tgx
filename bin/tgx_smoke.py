@@ -2024,6 +2024,21 @@ def webapp_dom_regression() -> None:
     # без проводника внутрь не заглянуть — это надо сказать, а не молчать
     check("отказ объяснён происхождением", "одного происхождения" in page)
 
+    # Часть приложений шлёт сообщения на конкретный адрес (web.telegram.org).
+    # Мы не он, браузер такое молча выбрасывает, и приложение решает, что
+    # запущено вне Telegram: «Environment Error» через 200 мс.
+    check("чужой адрес назначения не мешает доставке",
+          "window.postMessage = function" in page)
+    check("и об этом видно в журнале", "принимаем как своё" in page)
+
+    # Событиям, которые ждут ответа, надо отвечать — иначе приложение висит.
+    for kind in ("web_app_request_fullscreen", "web_app_exit_fullscreen",
+                 "web_app_check_home_screen", "web_app_invoke_custom_method"):
+        check(f"{kind} получает ответ", kind in page)
+    check("полноэкранный отвечает своим событием", "fullscreen_changed" in page)
+    check("свой метод отвечает с тем же номером",
+          "custom_method_invoked" in page and "req_id: data.req_id" in page)
+
     # то, чего человек не видит, в вывод попадать не должно
     check("невидимые теги перечислены", "UNSEEN" in page)
     for tag in ("SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"):
@@ -2145,6 +2160,13 @@ def proxy_regression() -> None:
     # скрипт-перехватчик
     check("подставляется происхождение", "__APP_ORIGIN__" in P.HOOK)
     check("вебсокеты возвращаются на настоящий сервер", "function back(" in P.HOOK)
+
+    # Приложение может строить адрес, приклеивая поддомен к текущему хосту:
+    # «alectryon.walletbot.me» у себя дома и «alectryon.127.0.0.1:51805» у нас.
+    # Такое браузер не разбирает вовсе — fetch падает до сети, а Wallet уходил
+    # в init_failed.
+    check("склейка поддомена с нашим хостом чинится", "function unglue(" in P.HOOK)
+    check("и служба возвращается в свой дом", "APP_HOST" in P.HOOK)
     check("и по верной схеме", "'wss:' : 'ws:'" in P.HOOK)
 
     # происхождение закрепляется: иначе виджет поддержки внутри приложения

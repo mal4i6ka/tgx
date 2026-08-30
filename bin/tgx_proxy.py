@@ -146,7 +146,24 @@ HOOK = """<script>(function () {
   const own = location.origin;
   const APP = "__APP_ORIGIN__";          // куда ведёт эта страница на самом деле
   const PREFIX = '/x/' + APP.replace('://', '/');
+  // Приложение может строить адрес, приклеивая поддомен к текущему хосту:
+  // «https://<служба>.<хост>/…». У себя дома это «alectryon.walletbot.me», а у
+  // нас выходит «alectryon.127.0.0.1:51805» — такое браузер не разбирает вовсе,
+  // и fetch падает ещё до сети. Возвращаем службе её настоящий дом.
+  const APP_HOST = (function () { try { return new URL(APP).host; } catch (e) { return ''; } })();
+  function unglue(url) {
+    const text = String(url);
+    const mark = '.' + location.host;            // «.127.0.0.1:51805»
+    const at = text.indexOf(mark);
+    if (at === -1 || !APP_HOST) return text;
+    const scheme = text.slice(0, text.indexOf('//') + 2);
+    const label = text.slice(scheme.length, at);
+    if (!label || label.includes('/')) return text;
+    return scheme + label + '.' + APP_HOST + text.slice(at + mark.length);
+  }
+
   function ours(url) {
+    url = unglue(url);
     try {
       const full = new URL(url, location.href);
       if (!/^https?:$/.test(full.protocol)) return url;  // data:, blob:, mailto:
