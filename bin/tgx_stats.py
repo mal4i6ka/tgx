@@ -171,3 +171,30 @@ class Stats:
             "MSG_ID_INVALID": "такого сообщения нет",
         }
         return tgx_net.explain(exc, hints, StatsError)
+
+
+    async def poll(self, peer: Any, message_id: int) -> dict[str, Any]:
+        """Как голосовали в опросе — сервер отдаёт готовые графики."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.stats.GetPollStatsRequest(
+            peer=peer, msg_id=message_id, dark=None))
+        return {"опрос": message_id,
+                "графиков": len(getattr(result, "graphs", None) or []),
+                "готовы": [type(g).__name__.replace("StatsGraph", "") or "готов"
+                           for g in getattr(result, "graphs", None) or []]}
+
+    async def story_forwards(self, peer: Any, story_id: int, *,
+                             limit: int = 50) -> list[dict[str, Any]]:
+        """Кто публично переслал вашу историю."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.stats.GetStoryPublicForwardsRequest(
+            peer=peer, id=story_id, offset="", limit=limit))
+        rows = []
+        for item in getattr(result, "forwards", None) or []:
+            message = getattr(item, "message", None)
+            rows.append({"вид": type(item).__name__.replace("PublicForward", "").lower() or "пост",
+                         "id": getattr(message, "id", None),
+                         "просмотров": getattr(message, "views", None)})
+        return rows

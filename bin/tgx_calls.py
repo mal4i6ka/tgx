@@ -19,6 +19,25 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 
+HINTS = {
+    "GROUPCALL_INVALID": "этот звонок уже завершён",
+    "GROUPCALL_NOT_MODIFIED": "ничего не изменилось",
+    "GROUPCALL_FORBIDDEN": "нет доступа к этому звонку",
+    "CHAT_ADMIN_REQUIRED": "звонком распоряжается администратор",
+    "CALL_ALREADY_ACCEPTED": "звонок уже начат",
+    "PARTICIPANT_JOIN_MISSING": "этот участник не в звонке",
+    "SCHEDULE_DATE_INVALID": "назначить звонок можно только на будущее",
+    "RTMP_STREAM_NOT_ALLOWED": "трансляция в этом чате не разрешена",
+    "PUBLIC_CHANNEL_MISSING": ("ссылку на звонок выдают только публичные чаты — "
+                               "у приватного её не существует, зовите по одному"),
+    "UNTIL_DATE_INVALID": "неверная дата",
+    "GROUPCALL_SSRC_DUPLICATE_MUCH": "этот источник звука уже в звонке",
+    "MESSAGE_ID_INVALID": "такого сообщения в чате звонка нет",
+    "JOIN_AS_PEER_INVALID": "от этого имени в звонок не войти",
+    "SEND_AS_PEER_INVALID": "от этого имени в чат звонка не написать",
+}
+
+
 class CallError(RuntimeError):
     """Действие со звонком, которое не удалось выполнить."""
 
@@ -249,17 +268,75 @@ class Calls:
     def _explain(exc: Exception) -> Exception:
         import tgx_net
 
-        hints = {
-            "GROUPCALL_INVALID": "этот звонок уже завершён",
-            "GROUPCALL_NOT_MODIFIED": "ничего не изменилось",
-            "GROUPCALL_FORBIDDEN": "нет доступа к этому звонку",
-            "CHAT_ADMIN_REQUIRED": "звонком распоряжается администратор",
-            "CALL_ALREADY_ACCEPTED": "звонок уже начат",
-            "PARTICIPANT_JOIN_MISSING": "этот участник не в звонке",
-            "SCHEDULE_DATE_INVALID": "назначить звонок можно только на будущее",
-            "RTMP_STREAM_NOT_ALLOWED": "трансляция в этом чате не разрешена",
-            "PUBLIC_CHANNEL_MISSING": "ссылку на звонок выдают только публичные чаты — "
-                                      "у приватного её не существует, зовите по одному",
-            "UNTIL_DATE_INVALID": "неверная дата",
-        }
-        return tgx_net.explain(exc, hints, CallError)
+        return tgx_net.explain(exc, HINTS, CallError)
+
+
+# --- остаток: проверка связи, уборка чата звонка, умолчания, подписка ---
+
+
+class CallExtras:
+    """Мелочи вокруг группового звонка, до которых не доходили руки."""
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    async def _call(self, request: Any) -> Any:
+        import tgx_net
+
+        try:
+            return await self.client(request)
+        except Exception as exc:
+            raise tgx_net.explain(exc, HINTS, CallError) from exc
+
+    async def alive(self, call: Any, sources: list[int]) -> dict[str, Any]:
+        """Держится ли звук у этих участников — сервер отвечает списком живых."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.phone.CheckGroupCallRequest(
+            call=call, sources=sources))
+        alive = list(result or [])
+        return {"спрашивали": len(sources), "звук идёт у": len(alive),
+                "молчат": [s for s in sources if s not in alive]}
+
+    async def wipe_messages(self, call: Any, ids: list[int], *,
+                            spam: bool = False) -> dict[str, Any]:
+        """Стереть сообщения в чате звонка."""
+        from telethon.tl import functions
+
+        await self._call(functions.phone.DeleteGroupCallMessagesRequest(
+            call=call, messages=ids, report_spam=spam or None))
+        return {"стёрто": len(ids), "с жалобой": spam}
+
+    async def wipe_participant(self, call: Any, who: Any, *,
+                               spam: bool = False) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        peer = await self.client.get_input_entity(who)
+        await self._call(functions.phone.DeleteGroupCallParticipantMessagesRequest(
+            call=call, participant=peer, report_spam=spam or None))
+        return {"сообщения": "стёрты", "чьи": str(who), "с жалобой": spam}
+
+    async def default_join_as(self, peer: Any, who: Any) -> dict[str, Any]:
+        """От чьего имени входить в звонки этого чата по умолчанию."""
+        from telethon.tl import functions
+
+        target = await self.client.get_input_entity(who)
+        await self._call(functions.phone.SaveDefaultGroupCallJoinAsRequest(
+            peer=peer, join_as=target))
+        return {"входить как": str(who)}
+
+    async def default_send_as(self, call: Any, who: Any) -> dict[str, Any]:
+        """От чьего имени писать в чат звонка."""
+        from telethon.tl import functions
+
+        target = await self.client.get_input_entity(who)
+        await self._call(functions.phone.SaveDefaultSendAsRequest(call=call, send_as=target))
+        return {"писать как": str(who)}
+
+    async def remind(self, call: Any, on: bool) -> dict[str, Any]:
+        """Напомнить, когда запланированный звонок начнётся."""
+        from telethon.tl import functions
+
+        await self._call(functions.phone.ToggleGroupCallStartSubscriptionRequest(
+            call=call, subscribed=on))
+        return {"напомнить о начале": on}

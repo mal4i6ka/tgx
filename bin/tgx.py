@@ -718,6 +718,26 @@ async def cmd_call(args: argparse.Namespace) -> None:
         chat = await resolve_peer(client, args.chat)
         cmd = args.callcmd
 
+        EXTRAS = {"alive", "wipe-messages", "wipe-participant", "default-join-as",
+                  "default-send-as", "remind"}
+        if cmd in EXTRAS:
+            peer = await resolve_peer(client, args.peer)
+            extras = tgx_calls.CallExtras(client)
+            if cmd == "default-join-as":
+                render.emit(await extras.default_join_as(peer, args.who))
+                return
+            call = await tgx_calls.Calls(client)._ref(peer)
+            actions = {
+                "alive": lambda: extras.alive(call, args.source),
+                "wipe-messages": lambda: extras.wipe_messages(call, args.id, spam=args.spam),
+                "wipe-participant": lambda: extras.wipe_participant(call, args.who,
+                                                                    spam=args.spam),
+                "default-send-as": lambda: extras.default_send_as(call, args.who),
+                "remind": lambda: extras.remind(call, args.state == "on"),
+            }
+            render.emit(await actions[cmd]())
+            return
+
         if cmd == "participants":
             rows = await calls.participants(chat, args.limit)
             print_jsonl(rows) if args.jsonl else print_table(
@@ -931,6 +951,15 @@ async def cmd_stats(args: argparse.Namespace) -> None:
         peer = await resolve_peer(client, args.chat)
         cmd = args.statscmd
 
+        if cmd == "poll":
+            render.emit(await stats.poll(peer, args.id))
+            return
+
+        if cmd == "story-forwards":
+            render.emit({"переслали": await stats.story_forwards(
+                peer, args.id, limit=args.limit)})
+            return
+
         if cmd == "forwards":
             rows = await stats.forwards(peer, args.id, args.limit)
             print_jsonl(rows) if args.jsonl else print_table(
@@ -998,6 +1027,9 @@ async def cmd_stickers(args: argparse.Namespace) -> None:
         if cmd == "send":
             peer = await resolve_peer(client, args.peer)
             render.emit(await box.send(peer, args.key, reply_to=args.reply_to or 0))
+            return
+        if cmd == "replace":
+            render.emit(await box.replace(args.key, args.file, args.emoji))
             return
 
         actions = {
@@ -1084,7 +1116,39 @@ async def cmd_stories(args: argparse.Namespace) -> None:
     try:
         await ensure_login(client)
         st = tgx_stories.Stories(client)
+        more = tgx_stories.More(client)
         cmd = args.storycmd
+
+        MORE = {"edit", "by-id", "views", "seen", "reactions", "latest", "read-everywhere",
+                "where-to-post", "hide-all", "pin-top", "album", "album-edit",
+                "albums-order", "report", "start-live"}
+        if cmd in MORE:
+            peer = await resolve_peer(client, args.chat) if getattr(args, "chat", None) else None
+            actions = {
+                "edit": lambda: more.edit(peer, args.id, caption=args.caption,
+                                          media=args.media or ""),
+                "by-id": lambda: more.by_id(peer, args.id),
+                "views": lambda: more.views(peer, args.id),
+                "seen": lambda: more.seen(peer, args.id),
+                "reactions": lambda: more.reactions(peer, args.id, limit=args.limit),
+                "latest": lambda: more.latest([peer]),
+                "read-everywhere": lambda: more.read_everywhere(),
+                "where-to-post": lambda: more.where_to_post(),
+                "hide-all": lambda: more.hide_all(args.state == "on"),
+                "pin-top": lambda: more.pin_top(peer, args.id),
+                "album": lambda: more.album(peer, args.album, limit=args.limit),
+                "album-edit": lambda: more.edit_album(
+                    peer, args.album, title=args.title or "", add=args.add,
+                    drop=args.drop, order=args.order),
+                "albums-order": lambda: more.order_albums(peer, args.album),
+                "report": lambda: more.report(peer, args.id, option=args.option or "",
+                                              comment=args.comment or ""),
+                "start-live": lambda: more.start_live(peer, caption=args.caption or "",
+                                                      rtmp=args.rtmp),
+            }
+            got = await actions[cmd]()
+            render.emit(got if isinstance(got, dict) else {"найдено": got})
+            return
         columns = ["id", "подпись", "просмотров", "реакций", "истекает"]
 
         if cmd == "feed":
@@ -1154,7 +1218,32 @@ async def cmd_contacts(args: argparse.Namespace) -> None:
     try:
         await ensure_login(client)
         book = tgx_contacts.Contacts(client)
+        more = tgx_contacts.More(client)
         cmd = args.contactcmd
+
+        MORE = {"add-phone", "forget-phones", "accept", "ids", "statuses", "saved",
+                "forget-saved", "invite-token", "nearby", "forget-top", "sponsored",
+                "block-list"}
+        if cmd in MORE:
+            actions = {
+                "add-phone": lambda: more.add_by_phone(
+                    [tuple((p.split(":", 2) + ["", ""])[:3]) for p in args.person]),
+                "forget-phones": lambda: more.forget_phones(args.phone),
+                "accept": lambda: more.accept(args.who),
+                "ids": lambda: more.ids(),
+                "statuses": lambda: more.statuses(),
+                "saved": lambda: more.saved(),
+                "forget-saved": lambda: more.forget_saved(),
+                "invite-token": lambda: more.invite_token(),
+                "nearby": lambda: more.nearby(args.lat, args.lon, minutes=args.show_me or 0),
+                "forget-top": lambda: more.forget_top(args.who, args.category),
+                "sponsored": lambda: more.sponsored(args.query),
+                "block-list": lambda: more.block_many(args.who,
+                                                      stories_only=args.stories_only),
+            }
+            got = await actions[cmd]()
+            render.emit(got if isinstance(got, dict) else {"найдено": got})
+            return
 
         listings = {
             "list": (lambda: book.all(), ["id", "имя", "username", "взаимный", "был"]),
@@ -4743,6 +4832,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     cl = sub.add_parser("call", help="групповые звонки: управление и живая страница")
     cl_sub = cl.add_subparsers(dest="callcmd", required=True)
+
+    v_al = cl_sub.add_parser("alive", help="у кого из участников идёт звук")
+    v_al.add_argument("peer")
+    v_al.add_argument("source", type=int, nargs="+", help="номера источников звука")
+
+    v_wm = cl_sub.add_parser("wipe-messages", help="стереть сообщения в чате звонка")
+    v_wm.add_argument("peer")
+    v_wm.add_argument("id", type=int, nargs="+")
+    v_wm.add_argument("--spam", action="store_true", help="заодно пожаловаться")
+
+    v_wp = cl_sub.add_parser("wipe-participant", help="стереть сообщения участника")
+    v_wp.add_argument("peer")
+    v_wp.add_argument("who")
+    v_wp.add_argument("--spam", action="store_true")
+
+    v_ja = cl_sub.add_parser("default-join-as",
+                             help="от чьего имени входить в звонки этого чата по умолчанию")
+    v_ja.add_argument("peer")
+    v_ja.add_argument("who")
+
+    v_sa = cl_sub.add_parser("default-send-as", help="от чьего имени писать в чат звонка")
+    v_sa.add_argument("peer")
+    v_sa.add_argument("who")
+
+    v_rm = cl_sub.add_parser("remind", help="напомнить, когда назначенный звонок начнётся")
+    v_rm.add_argument("peer")
+    v_rm.add_argument("state", choices=["on", "off"])
+
     cl.set_defaults(func=cmd_call)
 
     def call_cmd(name: str, help_text: str) -> Any:
@@ -4923,6 +5040,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     stt = sub.add_parser("stats", help="статистика каналов, групп, постов и историй")
     stt_sub = stt.add_subparsers(dest="statscmd", required=True)
+
+    t_poll = stt_sub.add_parser("poll", help="как голосовали в опросе")
+    t_poll.add_argument("chat")
+    t_poll.add_argument("id", type=int)
+
+    t_sf = stt_sub.add_parser("story-forwards", help="кто публично переслал вашу историю")
+    t_sf.add_argument("chat")
+    t_sf.add_argument("id", type=int)
+    t_sf.add_argument("--limit", type=int, default=50)
+
     stt.set_defaults(func=cmd_stats)
     for name, help_text in (("channel", "сводка по каналу"), ("group", "сводка по группе")):
         parser = stt_sub.add_parser(name, help=help_text)
@@ -4971,6 +5098,11 @@ def build_parser() -> argparse.ArgumentParser:
     k_ins = sk_sub.add_parser("install", help="поставить набор себе или убрать")
     k_ins.add_argument("name", help="короткое имя или ссылка t.me/addstickers/…")
     k_ins.add_argument("--remove", action="store_true")
+
+    k_rep = sk_sub.add_parser("replace", help="заменить стикер, сохранив его место в наборе")
+    k_rep.add_argument("key", help="ключ вида «число:число» из find")
+    k_rep.add_argument("file")
+    k_rep.add_argument("emoji")
 
     k_snd = sk_sub.add_parser("send", help="отправить существующий стикер")
     k_snd.add_argument("peer")
@@ -5089,6 +5221,63 @@ def build_parser() -> argparse.ArgumentParser:
 
     stz = sub.add_parser("stories", help="истории: лента, публикация, просмотры, альбомы")
     stz_sub = stz.add_subparsers(dest="storycmd", required=True)
+
+    z_ed = stz_sub.add_parser("edit", help="поправить опубликованную историю")
+    z_ed.add_argument("chat")
+    z_ed.add_argument("id", type=int)
+    z_ed.add_argument("--caption", help="новая подпись")
+    z_ed.add_argument("--media", help="новый файл")
+
+    for name, help_text in (("by-id", "истории по номерам"),
+                            ("views", "просмотры и реакции по номерам"),
+                            ("seen", "отметить чужие истории просмотренными"),
+                            ("pin-top", "поднять истории наверх профиля")):
+        parser = stz_sub.add_parser(name, help=help_text)
+        parser.add_argument("chat")
+        parser.add_argument("id", type=int, nargs="+")
+
+    z_rx = stz_sub.add_parser("reactions", help="кто как отреагировал")
+    z_rx.add_argument("chat")
+    z_rx.add_argument("id", type=int)
+    z_rx.add_argument("--limit", type=int, default=50)
+
+    z_lt = stz_sub.add_parser("latest", help="номер свежей истории — есть ли новое")
+    z_lt.add_argument("chat")
+
+    stz_sub.add_parser("read-everywhere", help="у кого истории дочитаны")
+    stz_sub.add_parser("where-to-post", help="куда вы можете публиковать истории")
+
+    z_ha = stz_sub.add_parser("hide-all", help="убрать чужие истории из ленты разом")
+    z_ha.add_argument("state", choices=["on", "off"])
+
+    z_al = stz_sub.add_parser("album", help="что в альбоме")
+    z_al.add_argument("chat")
+    z_al.add_argument("album", type=int)
+    z_al.add_argument("--limit", type=int, default=50)
+
+    z_ae = stz_sub.add_parser("album-edit", help="поправить альбом")
+    z_ae.add_argument("chat")
+    z_ae.add_argument("album", type=int)
+    z_ae.add_argument("--title")
+    z_ae.add_argument("--add", type=int, action="append")
+    z_ae.add_argument("--drop", type=int, action="append")
+    z_ae.add_argument("--order", type=int, action="append")
+
+    z_ao = stz_sub.add_parser("albums-order", help="переставить альбомы")
+    z_ao.add_argument("chat")
+    z_ao.add_argument("album", type=int, nargs="+")
+
+    z_rp = stz_sub.add_parser("report", help="жалоба на историю по меню сервера")
+    z_rp.add_argument("chat")
+    z_rp.add_argument("id", type=int, nargs="+")
+    z_rp.add_argument("--option")
+    z_rp.add_argument("--comment", default="")
+
+    z_lv = stz_sub.add_parser("start-live", help="начать прямой эфир историей")
+    z_lv.add_argument("chat")
+    z_lv.add_argument("--caption")
+    z_lv.add_argument("--rtmp", action="store_true", help="поток извне, а не с устройства")
+
     stz.set_defaults(func=cmd_stories)
 
     s_feed = stz_sub.add_parser("feed", help="лента историй")
@@ -5184,6 +5373,41 @@ def build_parser() -> argparse.ArgumentParser:
 
     ct = sub.add_parser("contacts", help="адресная книга, чёрный список, поиск людей")
     ct_sub = ct.add_subparsers(dest="contactcmd", required=True)
+
+    k_ap = ct_sub.add_parser("add-phone", help="добавить по номерам")
+    k_ap.add_argument("person", nargs="+", metavar="ТЕЛЕФОН:ИМЯ:ФАМИЛИЯ")
+
+    k_fp = ct_sub.add_parser("forget-phones", help="убрать контакты по номерам")
+    k_fp.add_argument("phone", nargs="+")
+
+    k_ac = ct_sub.add_parser("accept", help="принять чужую запись — он увидит ваш номер")
+    k_ac.add_argument("who")
+
+    ct_sub.add_parser("ids", help="номера всех контактов")
+    ct_sub.add_parser("statuses", help="кто когда был в сети")
+    ct_sub.add_parser("saved", help="что Telegram запомнил из вашей телефонной книги")
+    ct_sub.add_parser("forget-saved", help="заставить его это забыть")
+    ct_sub.add_parser("invite-token", help="ссылка «добавь меня» без раскрытия номера")
+
+    k_nb = ct_sub.add_parser("nearby", help="кто рядом")
+    k_nb.add_argument("lat", type=float)
+    k_nb.add_argument("lon", type=float)
+    k_nb.add_argument("--show-me", type=int, metavar="МИНУТ",
+                      help="показать себя другим; без него только смотрим")
+
+    k_ft = ct_sub.add_parser("forget-top", help="убрать из «часто пишете»")
+    k_ft.add_argument("who")
+    k_ft.add_argument("--category", default="correspondents",
+                      choices=["correspondents", "bots", "inline", "groups", "channels",
+                               "calls", "forwards", "apps"])
+
+    k_sp = ct_sub.add_parser("sponsored", help="что подсовывается в поиске как реклама")
+    k_sp.add_argument("query")
+
+    k_bl = ct_sub.add_parser("block-list", help="заменить чёрный список целиком")
+    k_bl.add_argument("who", nargs="*")
+    k_bl.add_argument("--stories-only", action="store_true")
+
     ct.set_defaults(func=cmd_contacts)
 
     c_list = ct_sub.add_parser("list", help="все контакты")

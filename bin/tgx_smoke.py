@@ -1758,6 +1758,57 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+async def takeout_only_regression() -> None:
+    """Часть списков сервер отдаёт только внутри выгрузки: он считает их
+    персональными данными, а не состоянием. Просить человека открыть режим
+    экспорта ради списка покинутых каналов — странно, поэтому открываем сами."""
+    import tgx_chanadmin as C
+    import tgx_contacts as K
+
+    check("требование выгрузки объяснено у каналов",
+          "выгрузк" in C.HINTS["TAKEOUT_REQUIRED"])
+    check("и у контактов", "выгрузк" in K.MORE_HINTS["TAKEOUT_REQUIRED"])
+    check("пауза названа защитой, а не поломкой",
+          "защита" in C.HINTS["TAKEOUT_INIT_DELAY"])
+
+    # оба места обязаны снимать пустую метку перед открытием — иначе
+    # выгрузка не начнётся из-за b'' в сессии
+    for name, text in (("каналы", open("bin/tgx_chanadmin.py").read()),
+                       ("контакты", open("bin/tgx_contacts.py").read())):
+        check(f"{name}: метка сессии снимается перед выгрузкой", "_tidy()" in text)
+        check(f"{name}: выгрузка закрывается сама", "finalize=True" in text)
+
+
+def contacts_more_regression() -> None:
+    """Ссылку «добавь меня» сервер отдаёт готовой. Собирать её из токена значит
+    однажды собрать неправильно: в настоящем токене есть вторая половина после
+    двоеточия, и без неё ссылка не работает."""
+    import tgx_contacts as K
+
+    text = open("bin/tgx_contacts.py").read()
+    check("ссылка берётся из ответа, а не собирается",
+          'getattr(result, "url", None)' in text and "t.me/contact/{token}" not in text)
+
+    check("разрядов «часто пишете» восемь",
+          len([n for n in ("correspondents", "bots", "inline", "groups", "channels",
+                           "calls", "forwards", "apps")]) == 8)
+    check("номер объяснён международным видом",
+          "+7" in K.MORE_HINTS["PHONE_NUMBER_INVALID"])
+
+
+def stories_more_regression() -> None:
+    """У правки истории отсутствие поля значит «не трогать», а не «стереть»."""
+    import tgx_stories as S
+
+    check("правка знает про неизменённое", "STORY_NOT_MODIFIED" in S.MORE_HINTS)
+    check("альбом с чужим номером объяснён", "ALBUM_ID_INVALID" in S.MORE_HINTS)
+    text = open("bin/tgx_stories.py").read()
+    check("caption передаётся как есть, а не через or",
+          "caption=caption," in text)
+    check("эфир честно говорит, что смотреть его нечем",
+          "видео терминал не покажет" in text)
+
+
 async def chanadmin_regression() -> None:
     """Управление каналом: вкладки профиля, доля партнёра, объяснения ошибок,
     которые сервер даёт мимо сути."""
@@ -2597,6 +2648,9 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    await takeout_only_regression()
+    contacts_more_regression()
+    stories_more_regression()
     await chanadmin_regression()
     groups_regression()
     await peer_ambiguity_regression()

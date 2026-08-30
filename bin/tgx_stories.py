@@ -313,4 +313,192 @@ class Stories:
         import tgx_net
 
         return tgx_net.explain(exc, hints, StoryError)
-        return exc
+
+
+# --- то, чего не хватало: правка, альбомы, эфиры, разбор ---
+
+MORE_HINTS = {
+    "STORY_ID_INVALID": "такой истории нет",
+    "STORY_NOT_MODIFIED": "и так уже так",
+    "ALBUM_ID_INVALID": "такого альбома нет",
+    "STORIES_TOO_MUCH": "историй больше, чем можно",
+    "PREMIUM_ACCOUNT_REQUIRED": "нужен Telegram Premium",
+    "PEER_ID_INVALID": "такого адресата нет",
+    "MEDIA_EMPTY": "нечего публиковать",
+    "CHAT_ADMIN_REQUIRED": "нужны права администратора",
+    "BOOSTS_REQUIRED": "каналу не хватает бустов для историй",
+}
+
+
+class More:
+    """Остаток историй: правка, альбомы, эфиры, просмотры, жалобы."""
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    async def _call(self, request: Any) -> Any:
+        import tgx_net
+
+        try:
+            return await self.client(request)
+        except Exception as exc:
+            raise tgx_net.explain(exc, MORE_HINTS, StoryError) from exc
+
+    async def edit(self, peer: Any, story_id: int, *, caption: str | None = None,
+                   media: str = "") -> dict[str, Any]:
+        """Поправить опубликованную историю.
+
+        Менять можно подпись, картинку и круг зрителей; поле, которое не
+        назвали, остаётся прежним — сервер трактует отсутствие как «не трогать».
+        """
+        from telethon.tl import functions
+
+        uploaded = None
+        if media:
+            from pathlib import Path
+
+            path = Path(media).expanduser()
+            if not path.is_file():
+                raise StoryError(f"файла {path} нет")
+            uploaded = await self.client.upload_file(str(path))
+        await self._call(functions.stories.EditStoryRequest(
+            peer=peer, id=story_id, caption=caption, media=uploaded))
+        changed = [n for n, v in (("подпись", caption is not None), ("медиа", bool(media))) if v]
+        return {"история": story_id, "изменено": changed or ["ничего"]}
+
+    async def by_id(self, peer: Any, ids: list[int]) -> list[dict[str, Any]]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.stories.GetStoriesByIDRequest(peer=peer, id=ids))
+        return [story_row(s) for s in getattr(result, "stories", None) or []]
+
+    async def views(self, peer: Any, ids: list[int]) -> list[dict[str, Any]]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.stories.GetStoriesViewsRequest(peer=peer, id=ids))
+        rows = []
+        for index, item in enumerate(getattr(result, "views", None) or []):
+            rows.append({"история": ids[index] if index < len(ids) else None,
+                         "просмотров": getattr(item, "views_count", None),
+                         "реакций": getattr(item, "reactions_count", None),
+                         "переслали": getattr(item, "forwards_count", None)})
+        return rows
+
+    async def seen(self, peer: Any, ids: list[int]) -> dict[str, Any]:
+        """Отметить чужие истории просмотренными — как если бы вы их открыли."""
+        from telethon.tl import functions
+
+        await self._call(functions.stories.IncrementStoryViewsRequest(peer=peer, id=ids))
+        return {"отмечено просмотренными": len(ids)}
+
+    async def reactions(self, peer: Any, story_id: int, *,
+                        limit: int = 50) -> list[dict[str, Any]]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.stories.GetStoryReactionsListRequest(
+            peer=peer, id=story_id, limit=limit, offset=None))
+        names = {u.id: getattr(u, "username", None) or getattr(u, "first_name", None)
+                 for u in getattr(result, "users", None) or []}
+        rows = []
+        for item in getattr(result, "reactions", None) or []:
+            who = getattr(getattr(item, "peer_id", None), "user_id", None)
+            rows.append({"кто": names.get(who, who),
+                         "реакция": getattr(getattr(item, "reaction", None), "emoticon", None)})
+        return rows
+
+    async def latest(self, peers: list[Any]) -> list[dict[str, Any]]:
+        """Номер свежей истории у каждого — дёшево проверить, есть ли новое."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.stories.GetPeerMaxIDsRequest(id=peers))
+        return [{"адресат": index, "последняя": value}
+                for index, value in enumerate(result or [])]
+
+    async def read_everywhere(self) -> list[Any]:
+        """У кого истории дочитаны до конца."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.stories.GetAllReadPeerStoriesRequest())
+        return [{"кто": getattr(getattr(p, "peer", None), "user_id", None)
+                       or getattr(getattr(p, "peer", None), "channel_id", None),
+                 "прочитано до": getattr(p, "max_read_id", None)}
+                for p in getattr(result, "peers", None) or []]
+
+    async def where_to_post(self) -> list[dict[str, Any]]:
+        """Куда вы вообще можете публиковать истории, кроме своего профиля."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.stories.GetChatsToSendRequest())
+        return [{"куда": getattr(c, "title", None), "id": getattr(c, "id", None)}
+                for c in getattr(result, "chats", None) or []]
+
+    async def hide_all(self, hidden: bool) -> dict[str, Any]:
+        """Убрать все чужие истории из ленты разом."""
+        from telethon.tl import functions
+
+        await self._call(functions.stories.ToggleAllStoriesHiddenRequest(hidden=hidden))
+        return {"чужие истории": "скрыты" if hidden else "показываются"}
+
+    async def pin_top(self, peer: Any, ids: list[int]) -> dict[str, Any]:
+        """Поднять истории наверх профиля."""
+        from telethon.tl import functions
+
+        await self._call(functions.stories.TogglePinnedToTopRequest(peer=peer, id=ids))
+        return {"наверху профиля": ids or "ничего"}
+
+    async def album(self, peer: Any, album_id: int, *, limit: int = 50) -> list[dict[str, Any]]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.stories.GetAlbumStoriesRequest(
+            peer=peer, album_id=album_id, offset=0, limit=limit))
+        return [story_row(s) for s in getattr(result, "stories", None) or []]
+
+    async def edit_album(self, peer: Any, album_id: int, *, title: str = "",
+                         add: list[int] | None = None, drop: list[int] | None = None,
+                         order: list[int] | None = None) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.stories.UpdateAlbumRequest(
+            peer=peer, album_id=album_id, title=title or None,
+            add_stories=add or None, delete_stories=drop or None, order=order or None))
+        did = [n for n, v in (("название", title), ("добавлено", add),
+                              ("убрано", drop), ("порядок", order)) if v]
+        return {"альбом": album_id, "изменено": did or ["ничего"]}
+
+    async def order_albums(self, peer: Any, ids: list[int]) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.stories.ReorderAlbumsRequest(peer=peer, order=ids))
+        return {"порядок альбомов": ids}
+
+    async def report(self, peer: Any, ids: list[int], *, option: str = "",
+                     comment: str = "") -> dict[str, Any]:
+        """Жалоба по меню сервера — как и на сообщения."""
+        import base64
+
+        from telethon.tl import functions
+
+        picked = base64.urlsafe_b64decode(option + "==") if option else b""
+        result = await self._call(functions.stories.ReportRequest(
+            peer=peer, id=ids, option=picked, message=comment))
+        if type(result).__name__ == "ReportResultChooseOption":
+            return {"шаг": getattr(result, "title", "выберите причину"),
+                    "варианты": [{"что": o.text,
+                                  "ключ": base64.urlsafe_b64encode(o.option).decode().rstrip("=")}
+                                 for o in getattr(result, "options", None) or []]}
+        return {"жалоба": "отправлена"}
+
+    async def start_live(self, peer: Any, *, caption: str = "",
+                         rtmp: bool = False) -> dict[str, Any]:
+        """Начать прямой эфир историей. Смотреть его из терминала нечем."""
+        import secrets
+
+        from telethon.tl import functions, types
+
+        result = await self._call(functions.stories.StartLiveRequest(
+            peer=peer, privacy_rules=[types.InputPrivacyValueAllowAll()],
+            caption=caption or None, rtmp_stream=rtmp or None,
+            random_id=secrets.randbits(63)))
+        return {"эфир": "начат", "id": getattr(result, "id", None),
+                "поток": "RTMP" if rtmp else "с устройства",
+                "смотреть": "в обычном клиенте — видео терминал не покажет"}

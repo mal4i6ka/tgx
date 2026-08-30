@@ -230,3 +230,181 @@ class Contacts:
 
         return tgx_net.explain(exc, hints, ContactError)
         return exc
+
+
+# --- остаток: импорт по номерам, свои записи, кто рядом, топ ---
+
+MORE_HINTS = {
+    "PHONE_NUMBER_INVALID": "номер записан не так; нужен международный вид, +7…",
+    "CONTACT_ID_INVALID": "такого контакта нет",
+    "USER_ID_INVALID": "такого пользователя нет",
+    "PEER_ID_INVALID": "такого собеседника нет",
+    "GEO_POINT_INVALID": "координаты не годятся",
+    "CONTACT_NAME_EMPTY": "у контакта должно быть имя",
+    "IMPORT_FILE_INVALID": "файл с контактами не разобрался",
+    "TAKEOUT_REQUIRED": "эти данные отдают только внутри выгрузки — tgx делает её сам",
+    "TAKEOUT_INIT_DELAY": ("Telegram поставил выгрузку на паузу — это защита. Подтвердите "
+                           "запрос в другом своём Telegram и повторите"),
+    "FLOOD_WAIT": "слишком часто — подождите и повторите",
+}
+
+
+class More:
+    """То, что осталось за краем контактов."""
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    async def _call(self, request: Any) -> Any:
+        import tgx_net
+
+        try:
+            return await self.client(request)
+        except Exception as exc:
+            raise tgx_net.explain(exc, MORE_HINTS, ContactError) from exc
+
+    async def add_by_phone(self, people: list[tuple[str, str, str]]) -> dict[str, Any]:
+        """Добавить по номерам. Пара «есть в Telegram» и «добавлен» — разная.
+
+        Сервер возвращает и тех, кого нашёл, и тех, кого нет; вторых он молча
+        пропускает, поэтому мы считаем сами и говорим, сколько не нашлось.
+        """
+        import secrets
+
+        from telethon.tl import functions, types
+
+        rows = [types.InputPhoneContact(client_id=secrets.randbits(62), phone=phone,
+                                        first_name=first, last_name=last)
+                for phone, first, last in people]
+        result = await self._call(functions.contacts.ImportContactsRequest(contacts=rows))
+        added = getattr(result, "imported", None) or []
+        return {"просили": len(rows), "добавлено": len(added),
+                "не нашлось": len(rows) - len(added),
+                "сколько ещё можно сегодня": getattr(result, "retry_contacts", None) and
+                                             len(result.retry_contacts) or None}
+
+    async def forget_phones(self, phones: list[str]) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.contacts.DeleteByPhonesRequest(phones=phones))
+        return {"убрано номеров": len(phones)}
+
+    async def accept(self, who: Any) -> dict[str, Any]:
+        """Принять чужую запись о себе — тогда он увидит ваш номер."""
+        from telethon.tl import functions
+
+        user = await self.client.get_input_entity(who)
+        await self._call(functions.contacts.AcceptContactRequest(id=user))
+        return {"кто": str(who), "теперь видит ваш номер": True}
+
+    async def ids(self) -> list[int]:
+        from telethon.tl import functions
+
+        return list(await self._call(functions.contacts.GetContactIDsRequest(hash=0)) or [])
+
+    async def statuses(self) -> list[dict[str, Any]]:
+        """Кто когда был в сети — одним запросом по всем контактам."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.contacts.GetStatusesRequest())
+        rows = []
+        for item in result or []:
+            kind = type(getattr(item, "status", None)).__name__.replace("UserStatus", "")
+            rows.append({"кто": getattr(item, "user_id", None),
+                         "когда": {"Online": "сейчас", "Offline": "не сейчас",
+                                   "Recently": "недавно", "LastWeek": "на неделе",
+                                   "LastMonth": "в этом месяце",
+                                   "Empty": "скрыто"}.get(kind, kind.lower())})
+        return rows
+
+    async def saved(self) -> list[dict[str, Any]]:
+        """Что Telegram запомнил из вашей телефонной книги.
+
+        Отдаётся только внутри выгрузки: сервер считает это персональными
+        данными, а не текущим состоянием. Открываем её сами и закрываем за
+        собой — человек спросил список, а не режим экспорта.
+        """
+        import tgx_takeout
+        from telethon.tl import functions
+
+        tgx_takeout.Takeout(self.client)._tidy()
+        async with self.client.takeout(finalize=True, contacts=True) as session:
+            result = await session(functions.contacts.GetSavedRequest())
+        return [{"телефон": getattr(c, "phone", None), "имя": getattr(c, "first_name", None),
+                 "фамилия": getattr(c, "last_name", None), "записано": getattr(c, "date", None)
+                 and str(c.date)} for c in result or []]
+
+    async def forget_saved(self) -> dict[str, Any]:
+        """Выбросить всё, что Telegram запомнил из вашей телефонной книги."""
+        from telethon.tl import functions
+
+        await self._call(functions.contacts.ResetSavedRequest())
+        return {"телефонная книга": "забыта на сервере"}
+
+    async def invite_token(self) -> dict[str, Any]:
+        """Одноразовая ссылка «добавь меня» — без раскрытия номера."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.contacts.ExportContactTokenRequest())
+        # сервер отдаёт готовый адрес в url, а не голый токен: собирать ссылку
+        # самому значит однажды собрать её неправильно
+        return {"ссылка": getattr(result, "url", None),
+                "живёт до": getattr(result, "expires", None) and str(result.expires)}
+
+    async def nearby(self, lat: float, lon: float, *, minutes: int = 0) -> list[dict[str, Any]]:
+        """Кто рядом. `minutes` — на сколько показать себя другим.
+
+        Ноль означает «только посмотреть»: себя не публикуем. Это важно —
+        случайно раздать своё местоположение проще, чем кажется.
+        """
+        from telethon.tl import functions, types
+
+        result = await self._call(functions.contacts.GetLocatedRequest(
+            geo_point=types.InputGeoPoint(lat=lat, long=lon),
+            self_expires=minutes * 60 if minutes else 0))
+        names = {u.id: getattr(u, "username", None) or getattr(u, "first_name", None)
+                 for u in getattr(result, "users", None) or []}
+        rows = []
+        for update in getattr(result, "updates", None) or []:
+            for item in getattr(update, "peers", None) or []:
+                who = getattr(getattr(item, "peer", None), "user_id", None)
+                rows.append({"кто": names.get(who, who),
+                             "метров": getattr(item, "distance", None)})
+        return rows
+
+    async def forget_top(self, who: Any, category: str = "correspondents") -> dict[str, Any]:
+        """Убрать человека из «часто пишете» — эта подсказка бывает некстати."""
+        from telethon.tl import functions, types
+
+        kinds = {"correspondents": "TopPeerCategoryCorrespondents",
+                 "bots": "TopPeerCategoryBotsPM", "inline": "TopPeerCategoryBotsInline",
+                 "groups": "TopPeerCategoryGroups", "channels": "TopPeerCategoryChannels",
+                 "calls": "TopPeerCategoryPhoneCalls", "forwards": "TopPeerCategoryForwardUsers",
+                 "apps": "TopPeerCategoryBotsApp"}
+        name = kinds.get(category)
+        if name is None:
+            raise ContactError(f"не знаю разряда «{category}»; есть: {', '.join(sorted(kinds))}")
+        peer = await self.client.get_input_entity(who)
+        await self._call(functions.contacts.ResetTopPeerRatingRequest(
+            category=getattr(types, name)(), peer=peer))
+        return {"кто": str(who), "убран из": category}
+
+    async def sponsored(self, query: str) -> list[dict[str, Any]]:
+        """Что Telegram подсовывает в поиске как рекламу."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.contacts.GetSponsoredPeersRequest(q=query))
+        return [{"кто": getattr(getattr(p, "peer", None), "user_id", None)
+                       or getattr(getattr(p, "peer", None), "channel_id", None),
+                 "почему": getattr(p, "sponsor_info", None)}
+                for p in getattr(result, "peers", None) or []]
+
+    async def block_many(self, people: list[Any], *, stories_only: bool = False) -> dict[str, Any]:
+        """Заменить список заблокированных целиком — не добавить, а заменить."""
+        from telethon.tl import functions
+
+        peers = [await self.client.get_input_entity(p) for p in people]
+        await self._call(functions.contacts.SetBlockedRequest(
+            id=peers, limit=len(peers), my_stories_from=stories_only or None))
+        return {"в списке теперь": len(peers), "что закрыто":
+                "истории" if stories_only else "всё"}

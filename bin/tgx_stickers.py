@@ -403,3 +403,23 @@ class Box:
         message = await self.client.send_file(
             peer, sticker_ref(key), reply_to=reply_to or None)
         return {"отправлен": key, "id": getattr(message, "id", None)}
+
+
+    async def replace(self, key: str, path: Any, emoji: str) -> dict[str, Any]:
+        """Заменить стикер в наборе новым файлом, сохранив его место.
+
+        Убрать и добавить — не то же самое: стикер уедет в конец, а у тех, кто
+        уже поставил набор, порядок собьётся.
+        """
+        from pathlib import Path
+
+        from telethon.tl import functions, types
+
+        source = Path(path).expanduser()
+        if not source.is_file():
+            raise StickerError(f"файла {source} нет")
+        uploaded = await self.client.upload_file(str(source))
+        item = types.InputStickerSetItem(document=uploaded, emoji=emoji)
+        await self._call(functions.stickers.ReplaceStickerRequest(
+            sticker=sticker_ref(key), new_sticker=item))
+        return {"заменён": key, "эмодзи": emoji}
