@@ -44,7 +44,7 @@ REFUSED = {
 }
 
 # Цвета из системы Altery — те же, что на странице звонка.
-PAGE = """<!doctype html>
+PAGE = r"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>%(title)s</title>
@@ -120,6 +120,30 @@ function reply(type, data) {
   frame.contentWindow.postMessage(JSON.stringify({eventType: type, eventData: data}), '*');
 }
 
+// Отдельные полки: приложение вправе считать, что «надёжное» хранилище живёт
+// иначе, чем обычное, и путать их — значит однажды отдать не то.
+function shelf(kind) {
+  const box = kind.includes('secure') ? 'tgx.secure.' : 'tgx.device.';
+  return {
+    getItem: (k) => localStorage.getItem(box + k),
+    setItem: (k, v) => localStorage.setItem(box + k, v),
+    removeItem: (k) => localStorage.removeItem(box + k),
+    clear: () => Object.keys(localStorage).filter(k => k.startsWith(box))
+                       .forEach(k => localStorage.removeItem(k)),
+  };
+}
+
+function store(kind, data, action, answer) {
+  try {
+    const extra = action() || {};
+    reply(answer, Object.assign({req_id: data.req_id}, extra));
+  } catch (e) {
+    const bad = kind.includes('secure') ? 'secure_storage_failed' : 'device_storage_failed';
+    reply(bad, {req_id: data.req_id, error: String(e)});
+    note(kind + ' → ' + e, true);
+  }
+}
+
 function viewport() {
   return {height: frame.clientHeight, width: frame.clientWidth,
           is_expanded: true, is_state_stable: true};
@@ -136,6 +160,17 @@ window.addEventListener('message', (event) => {
   if (REFUSED[kind]) { note(kind + ' → ' + REFUSED[kind], true); return; }
 
   switch (kind) {
+    // Скрипт Telegram здоровается этим ещё до самого приложения и ждёт стиля в
+    // ответ. Без ответа его собственная подготовка не заканчивается, и
+    // приложение падает по своему таймауту — с виду беспричинно.
+    case 'iframe_ready':
+      reply('set_custom_style', '');
+      reply('theme_changed', {theme_params: THEME});
+      reply('viewport_changed', viewport());
+      note('поздоровались со скриптом Telegram');
+      break;
+    case 'iframe_will_reload': break;
+
     case 'web_app_ready':
       note('приложение готово');
       reply('theme_changed', {theme_params: THEME});
@@ -167,6 +202,34 @@ window.addEventListener('message', (event) => {
     case 'web_app_close':
       note('приложение просит закрыть окно'); fetch('/closed', {method: 'POST'}); break;
     case 'web_app_trigger_haptic_feedback': break;   // вибрации у окна нет
+    case 'web_app_setup_settings_button': break;    // своей шестерёнки не рисуем
+
+    // Хранилища. Приложение считает их само собой разумеющимися: Wallet без
+    // них уходит в «Some technical issue» и дальше не идёт. Держим в
+    // localStorage — он у нашего окна свой и наружу не выходит.
+    case 'web_app_device_storage_save_key':
+    case 'web_app_secure_storage_save_key':
+      store(kind, data, () => {
+        if (data.value === null || data.value === undefined) shelf(kind).removeItem(data.key);
+        else shelf(kind).setItem(data.key, data.value);
+      }, kind.includes('secure') ? 'secure_storage_key_saved' : 'device_storage_key_saved');
+      break;
+    case 'web_app_device_storage_get_key':
+    case 'web_app_secure_storage_get_key':
+      store(kind, data, () => ({value: shelf(kind).getItem(data.key)}),
+            kind.includes('secure') ? 'secure_storage_key_received'
+                                    : 'device_storage_key_received');
+      break;
+    case 'web_app_device_storage_clear':
+    case 'web_app_secure_storage_clear':
+      store(kind, data, () => shelf(kind).clear(),
+            kind.includes('secure') ? 'secure_storage_cleared' : 'device_storage_cleared');
+      break;
+    case 'web_app_secure_storage_restore_key':
+      // Восстановить ключ, сохранённый на другом устройстве, нам неоткуда:
+      // отвечаем отсутствием, а не ошибкой — так приложение заведёт новый.
+      reply('secure_storage_key_restored', {req_id: data.req_id, value: null});
+      break;
     default:
       note(kind);   // неизвестное показываем, но не выдумываем ответ
   }
@@ -180,8 +243,23 @@ let heard = false;
 window.addEventListener('message', () => { heard = true; }, true);
 setTimeout(() => {
   if (heard) return;
-  document.getElementById('blocked').style.display = 'block';
-  note('приложение не отозвалось — вероятно, запрещает встраивание', true);
+  // Две разные беды выглядят одинаково — пустой рамкой. Различаем по тому,
+  // доступно ли нам её содержимое: своё, но молчащее, значит приложение
+  // загрузилось и решило не работать; недоступное — что его вообще не пустили.
+  let ours = false;
+  try { ours = !!(frame.contentDocument && frame.contentDocument.body); } catch (e) {}
+  const box = document.getElementById('blocked');
+  if (ours) {
+    box.querySelector('h2').textContent = 'Приложение не отозвалось';
+    box.querySelector('p').textContent =
+      'Страница загрузилась и доступна — значит, дело не во встраивании. ' +
+      'Часть приложений проверяет, что запущена в настоящем Telegram, и вне его ' +
+      'работать отказывается. Это их защита, и обойти её мы не пытаемся.';
+    note('приложение загрузилось, но работать отказалось', true);
+  } else {
+    note('приложение не отозвалось — вероятно, запрещает встраивание', true);
+  }
+  box.style.display = 'block';
 }, 5000);
 
 // Окно должно быть видно и управляемо снаружи: агент не смотрит на пиксели,
@@ -226,6 +304,121 @@ window.tgx.registerTool('send_event',
     reply(a.type, a.data || {}); note('агент послал ' + a.type);
     return {послано: a.type};
   });
+// --- глаза и руки внутри самого приложения ---
+// Работают, только когда приложение подано через проводник: иначе рамка чужая
+// и правило одного происхождения не пустит нас ни к одному её элементу.
+function inside() {
+  try { return frame.contentDocument || null; } catch (e) { return null; }
+}
+
+const REFS = new Map();
+let refCount = 0;
+
+function label(el) {
+  const own = (el.getAttribute('aria-label') || el.getAttribute('placeholder') ||
+               el.getAttribute('title') || el.value || el.innerText || '').trim();
+  return own.replace(/\s+/g, ' ').slice(0, 80);
+}
+
+function visible(el) {
+  const box = el.getBoundingClientRect();
+  if (!box.width || !box.height) return false;
+  const style = el.ownerDocument.defaultView.getComputedStyle(el);
+  return style.visibility !== 'hidden' && style.display !== 'none' &&
+         parseFloat(style.opacity || '1') > 0.05;
+}
+
+const CLICKABLE = 'a,button,input,select,textarea,[role=button],[role=link],[role=tab],' +
+                  '[role=menuitem],[role=checkbox],[role=switch],[onclick],[tabindex]';
+
+function scan() {
+  const doc = inside();
+  if (!doc) return null;
+  REFS.clear(); refCount = 0;
+  const rows = [];
+  for (const el of doc.querySelectorAll(CLICKABLE)) {
+    if (!visible(el)) continue;
+    const ref = 'e' + (++refCount);
+    REFS.set(ref, el);
+    const row = {ref, тег: el.tagName.toLowerCase(), надпись: label(el)};
+    const role = el.getAttribute('role'); if (role) row.роль = role;
+    if (el.disabled) row.недоступен = true;
+    if (el.type) row.вид = el.type;
+    if (el.href) row.адрес = el.getAttribute('href');
+    if (el.checked !== undefined && el.type && /checkbox|radio/.test(el.type))
+      row.отмечен = !!el.checked;
+    rows.push(row);
+  }
+  return rows;
+}
+
+function pageText() {
+  const doc = inside();
+  if (!doc) return null;
+  return (doc.body ? doc.body.innerText : '').replace(/\n{3,}/g, '\n\n').slice(0, 8000);
+}
+
+const NO_FRAME = {error: 'внутрь приложения не заглянуть: оно подано не через ' +
+                         'проводник, а чужую страницу правило одного происхождения ' +
+                         'закрывает. Запустите без --direct'};
+
+window.tgx.registerTool('page', 'видимый текст приложения целиком', {}, () => {
+  const text = pageText();
+  return text === null ? NO_FRAME : {адрес: inside().location.href, текст: text};
+});
+window.tgx.registerTool('elements',
+  'что на странице можно нажать и заполнить, со ссылками ref', {}, () => {
+  const rows = scan();
+  return rows === null ? NO_FRAME : {адрес: inside().location.href, элементы: rows};
+});
+window.tgx.registerTool('click', 'нажать элемент по ref из elements',
+  {ref: {type: 'string'}}, (a) => {
+  if (!inside()) return NO_FRAME;
+  const el = REFS.get(a.ref);
+  if (!el) return {error: 'нет такого ref — спросите elements заново'};
+  if (el.disabled) return {error: 'элемент недоступен'};
+  el.scrollIntoView({block: 'center'});
+  el.click();
+  note('агент нажал: ' + (label(el) || el.tagName));
+  return {нажато: label(el) || el.tagName.toLowerCase()};
+});
+window.tgx.registerTool('fill', 'вписать текст в поле по ref',
+  {ref: {type: 'string'}, text: {type: 'string'}}, (a) => {
+  if (!inside()) return NO_FRAME;
+  const el = REFS.get(a.ref);
+  if (!el) return {error: 'нет такого ref — спросите elements заново'};
+  el.focus();
+  const setter = Object.getOwnPropertyDescriptor(
+    el.constructor.prototype, 'value');
+  // Через нативный сеттер, иначе React и подобные не заметят изменения
+  if (setter && setter.set) setter.set.call(el, a.text || ''); else el.value = a.text || '';
+  el.dispatchEvent(new Event('input', {bubbles: true}));
+  el.dispatchEvent(new Event('change', {bubbles: true}));
+  note('агент вписал в ' + (label(el) || el.tagName));
+  return {вписано: a.text || ''};
+});
+window.tgx.registerTool('scroll', 'прокрутить приложение',
+  {y: {type: 'number'}}, (a) => {
+  const doc = inside();
+  if (!doc) return NO_FRAME;
+  doc.defaultView.scrollBy(0, a.y === undefined ? 400 : a.y);
+  return {прокручено: a.y === undefined ? 400 : a.y};
+});
+window.tgx.registerTool('go', 'перейти внутри приложения по адресу',
+  {url: {type: 'string'}}, (a) => {
+  if (!inside()) return NO_FRAME;
+  if (!a.url) return {error: 'нужен адрес'};
+  inside().location.href = a.url;
+  note('агент перешёл: ' + a.url);
+  return {переход: a.url};
+});
+window.tgx.registerTool('back', 'назад по истории приложения', {}, () => {
+  const doc = inside();
+  if (!doc) return NO_FRAME;
+  doc.defaultView.history.back();
+  return {назад: true};
+});
+
 window.tgx.registerTool('close', 'закрыть окно', {}, () => {
   fetch('/closed', {method: 'POST'}); note('окно закрыл агент');
   return {закрыто: true};
@@ -255,7 +448,8 @@ class Host:
     """Окно вокруг мини-приложения: рамка, кнопки и разговор по протоколу."""
 
     def __init__(self, title: str, url: str, port: int = 0,
-                 on_data: Callable[[str], None] | None = None) -> None:
+                 on_data: Callable[[str], None] | None = None,
+                 through: bool = True) -> None:
         import tgx_windows
 
         self.title, self.app_url = title, url
@@ -263,6 +457,8 @@ class Host:
         self.received: list[str] = []
         self.closed = threading.Event()
         self.bridge = tgx_windows.Bridge()
+        self.through = through
+        self.fetcher = None
         # Сервер обязан быть многопоточным: поручение агента ждёт ответа
         # страницы, а страница за ответом ходит сюда же. Один поток —
         # и они заперли бы друг друга насмерть.
@@ -273,10 +469,23 @@ class Host:
     def url(self) -> str:
         return f"http://127.0.0.1:{self.server.server_port}/"
 
+    def framed(self) -> str:
+        """Адрес для рамки: через проводник, если он включён.
+
+        Без проводника приложение остаётся чужим — его нельзя ни прочитать, ни
+        нажать, а иное ещё и откажется встраиваться. С проводником оно подаётся
+        с нашего адреса и становится обычной страницей внутри своей же.
+        """
+        if not self.through:
+            return self.app_url
+        import tgx_proxy
+
+        return tgx_proxy.to_path(self.app_url)
+
     def page(self) -> str:
         import tgx_windows
 
-        return PAGE % {"title": _escape(self.title), "url": _escape(self.app_url),
+        return PAGE % {"title": _escape(self.title), "url": _escape(self.framed()),
                        "title_json": json.dumps(self.title, ensure_ascii=False),
                        "theme": json.dumps(THEME), "bridge": tgx_windows.BRIDGE_JS,
                        "refused": json.dumps(REFUSED, ensure_ascii=False)}
@@ -285,6 +494,11 @@ class Host:
         host = self
 
         class Handler(BaseHTTPRequestHandler):
+            # Без этого сервер отвечает по HTTP/1.0, и браузер отказывается
+            # подгружать куски приложения: «Failed to fetch dynamically imported
+            # module» при том, что тот же адрес прекрасно отдаётся curl.
+            protocol_version = "HTTP/1.1"
+
             def log_message(self, *args: Any) -> None:
                 pass                      # это окно, а не веб-сервер
 
@@ -295,7 +509,47 @@ class Host:
                 self.end_headers()
                 self.wfile.write(body)
 
+            OURS = ("/mcp/", "/sent", "/closed", "/x/")
+
+            def _stray(self) -> bool:
+                """Запрос приложения, который не попал под переписывание.
+
+                Такие остаются: адрес мог собраться в коде из кусков, которых в
+                тексте не видно. Отдавать на них нашу разметку — верный способ
+                сломать приложение молча, поэтому уводим их туда же.
+                """
+                if self.path == "/" or self.path.startswith(self.OURS):
+                    return False
+                return bool(getattr(host.fetcher, "origin", ""))
+
+            def _proxy(self, method: str, stray: bool = False) -> None:
+                """Чужая страница, поданная с нашего адреса."""
+                import tgx_proxy
+
+                if host.fetcher is None:
+                    host.fetcher = tgx_proxy.Fetcher()
+                if stray:
+                    self.path = tgx_proxy.to_path(host.fetcher.origin + self.path)
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length) if length else None
+                try:
+                    code, headers, payload = host.fetcher.get(
+                        self.path, method, dict(self.headers), body)
+                except ValueError as exc:
+                    code, headers, payload = 400, {}, str(exc).encode()
+                self.send_response(code)
+                for name, value in headers.items():
+                    self.send_header(name, value)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                if method != "HEAD":
+                    self.wfile.write(payload)
+
             def do_GET(self) -> None:     # noqa: N802 — имя задаёт библиотека
+                if self.path.startswith("/x/"):
+                    return self._proxy("GET")
+                if self._stray():
+                    return self._proxy("GET", stray=True)
                 if self.path.startswith("/mcp/pending"):
                     return self._json(host.bridge.take_pending())
                 if self.path.startswith("/mcp/snapshot"):
@@ -310,6 +564,10 @@ class Host:
                          "application/json; charset=utf-8")
 
             def do_POST(self) -> None:    # noqa: N802
+                if self.path.startswith("/x/"):
+                    return self._proxy("POST")
+                if self._stray():
+                    return self._proxy("POST", stray=True)
                 length = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(length).decode(errors="replace") if length else ""
                 if self.path.startswith("/sent") and body:

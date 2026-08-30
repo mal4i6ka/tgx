@@ -199,19 +199,37 @@ class Inline:
                 peer=where, bot=who, platform=PLATFORM, url=url or None,
                 start_param=param or None, theme_params=params))
 
+        async def main_app(where: Any) -> Any:
+            """Главное мини-приложение — то, что открывается кнопкой «Запустить»."""
+            return await self._call(functions.messages.RequestMainWebViewRequest(
+                peer=where, bot=who, platform=PLATFORM, start_param=param or None,
+                theme_params=params))
+
         if peer is not None:
             result = await from_chat(peer)
             opened = "из чата"
         else:
-            try:
-                result = await self._call(functions.messages.RequestSimpleWebViewRequest(
-                    bot=who, platform=PLATFORM, from_side_menu=True, url=url or None,
-                    start_param=param or None, theme_params=params))
-                opened = "из бокового меню"
-            except InlineError:
-                # приложение заведено как вложение, а не как боковое меню
-                result = await from_chat(types.InputPeerSelf())
-                opened = "из чата с собой"
+            # Три способа под три вида приложений, и снаружи не видно, какой
+            # заведён у этого бота. Пробуем по очереди: боковое меню, главное
+            # приложение, вложение в чате. Для человека это одно действие.
+            attempts = (
+                ("из бокового меню", lambda: self._call(
+                    functions.messages.RequestSimpleWebViewRequest(
+                        bot=who, platform=PLATFORM, from_side_menu=True, url=url or None,
+                        start_param=param or None, theme_params=params))),
+                ("главным приложением", lambda: main_app(types.InputPeerSelf())),
+                ("из чата с собой", lambda: from_chat(types.InputPeerSelf())),
+            )
+            result = opened = None
+            trouble: Exception | None = None
+            for label, attempt in attempts:
+                try:
+                    result, opened = await attempt(), label
+                    break
+                except InlineError as exc:
+                    trouble = trouble or exc
+            if result is None:
+                raise trouble or InlineError("у этого бота нет мини-приложения")
 
         return {"адрес": getattr(result, "url", None), "как открыто": opened,
                 "осторожно": "адрес подписан вашей сессией — не передавайте его никому"}

@@ -1758,6 +1758,65 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+def proxy_regression() -> None:
+    """Приложение подаётся с нашего адреса — иначе его нельзя ни прочитать, ни
+    нажать. Переписывание адресов тут — самое хрупкое место, и каждая из этих
+    проверок стоит поломки, которую я на живом приложении и увидел."""
+    import tgx_proxy as P
+
+    check("адрес превращается в путь",
+          P.to_path("https://h/a/b?q=1") == "/x/https/h/a/b?q=1")
+    check("и обратно", P.from_path("/x/https/h/a/b?q=1") == "https://h/a/b?q=1")
+
+    # якорь: в нём приезжают подписанные данные запуска, и без него приложение
+    # останавливается на «Telegram initData is missing»
+    check("якорь сохраняется",
+          P.to_path("https://h/wv#tgWebAppData=xy") == "/x/https/h/wv#tgWebAppData=xy")
+    check("на сервер якорь не уходит",
+          P.from_path("/x/https/h/wv#tgWebAppData=xy") == "https://h/wv")
+
+    for bad in ("/нет", "/x/ftp/h/a", "/x/https/"):
+        try:
+            P.from_path(bad)
+            check(f"путь «{bad}» должен отвергаться", False)
+        except ValueError:
+            check(f"путь «{bad}» отвергнут", True)
+
+    # абсолютные адреса
+    check("обычный уводится",
+          b'"/x/https/cdn/a.js"' in P.rewrite(b'"https://cdn/a.js"', ""))
+    check("в стилях тоже",
+          b"(/x/https/f/g.woff)" in P.rewrite(b"(https://f/g.woff)", ""))
+    got = P.rewrite(b'"https:\\/\\/a.b\\/c\\/d"', "")
+    check("экранированный не разваливается", b"\\/\\/" not in got.replace(b'"', b""))
+    check("и остаётся экранированным", b"\\/x\\/https\\/a.b\\/c\\/d" in got)
+
+    # пути от корня
+    rooted = P.rewrite_rooted(b'src="/assets/a.js"', "https://w.me")
+    check("корневой путь уводится на приложение", b'"/x/https/w.me/assets/a.js"' in rooted)
+    check("протокол-относительный не трогаем",
+          P.rewrite_rooted(b'src="//cdn/x"', "https://w.me") == b'src="//cdn/x"')
+    check("уже наш путь не трогаем",
+          P.rewrite_rooted(b'src="/x/https/w.me/a"', "https://w.me")
+          == b'src="/x/https/w.me/a"')
+
+    # заголовки, которые нельзя пересылать
+    for header in ("content-security-policy", "x-frame-options", "content-length",
+                   "server", "date", "access-control-allow-origin"):
+        check(f"{header} не пересылается", header in P.DROP_RESPONSE)
+
+    # скрипт-перехватчик
+    check("подставляется происхождение", "__APP_ORIGIN__" in P.HOOK)
+    for hooked in ("window.fetch", "XMLHttpRequest.prototype.open", "window.Worker"):
+        check(f"перехвачен {hooked}", hooked in P.HOOK)
+    check("служебный работник обезврежен", "serviceWorker" in P.HOOK)
+
+    html = P._inject(b"<html><head><title>x</title></head>", "https://w.me")
+    check("скрипт встаёт первым в head", html.index(b"<script>") < html.index(b"<title>"))
+    check("и знает происхождение", b'"https://w.me"' in html)
+    check("без head всё равно встаёт", P._inject(b"<div>x</div>", "https://w").startswith(b"<script>"))
+
+
 def windows_registry_regression() -> None:
     """Реестр окон — единственное, что связывает поднявшую окно команду и того,
     кто про него спрашивает: процессы разные, общей памяти нет. Ошибиться в
@@ -2804,6 +2863,7 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    proxy_regression()
     windows_registry_regression()
     window_bridge_regression()
     webapp_host_regression()
