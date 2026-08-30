@@ -1758,6 +1758,88 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+def groups_regression() -> None:
+    """Обычная группа адресуется голым числом — единственное место в схеме, где
+    так. Перепутать легко, а сервер отвечает невнятным CHAT_ID_INVALID."""
+    import tgx_groups as G
+
+    class Thing:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    check("chat_id берётся из chat_id", G.chat_id_of(Thing(chat_id=42)) == 42)
+    check("и из id, когда chat_id нет", G.chat_id_of(Thing(id=7)) == 7)
+
+    supergroup = Thing(channel_id=5, id=5)
+    try:
+        G.chat_id_of(supergroup)
+        check("супергруппу сюда пускать нельзя", False)
+    except G.GroupError as exc:
+        check("и сказано, куда идти", "channel-" in str(exc))
+
+    try:
+        G.chat_id_of(Thing())
+        check("пустое должно ругаться", False)
+    except G.GroupError:
+        check("пустое ругается", True)
+
+    check("действий набора больше десятка", len(G.ACTIONS) >= 12)
+    check("отмена набора есть", G.ACTIONS["cancel"] == "SendMessageCancelAction")
+    check("доля выполненного только у загрузок",
+          "SendMessageTypingAction" not in G.WITH_PROGRESS
+          and "SendMessageUploadDocumentAction" in G.WITH_PROGRESS)
+    check("одиночную группу не завести", "USERS_TOO_FEW" in G.HINTS)
+    check("и объяснено почему", "в одиночку" in G.HINTS["USERS_TOO_FEW"])
+
+
+async def peer_ambiguity_regression() -> None:
+    """Название своего чата может совпасть с чужим адресом: «PLOMBIR» — это и
+    мой канал, и посторонний @Plombir. Глобальный поиск отдавал постороннего, и
+    сообщение ушло бы не туда. Свои чаты должны выигрывать спор."""
+    import tgx
+
+    class Dialog:
+        def __init__(self, name, entity):
+            self.name, self.entity = name, entity
+
+    class Client:
+        def __init__(self):
+            self.asked = []
+
+        async def get_entity(self, value):
+            self.asked.append(value)
+            return f"глобально:{value}"
+
+        def iter_dialogs(self, limit=None):
+            async def gen():
+                for d in (Dialog("PLOMBIR", "мой канал"),
+                          Dialog("AllCrew Cockpit", "мой форум")):
+                    yield d
+            return gen()
+
+    client = Client()
+    got = await tgx.resolve_peer(client, "PLOMBIR")
+    check("своё название выигрывает у чужого адреса", got == "мой канал")
+    check("и до глобального поиска дело не дошло", client.asked == [])
+
+    client = Client()
+    got = await tgx.resolve_peer(client, "durov")
+    check("адрес в нижнем регистре идёт глобально", got == "глобально:durov")
+
+    client = Client()
+    got = await tgx.resolve_peer(client, "@PLOMBIR")
+    check("собачка означает адрес, а не название", got == "глобально:@PLOMBIR")
+
+    client = Client()
+    got = await tgx.resolve_peer(client, "-100123")
+    check("число остаётся числом", got == "глобально:-100123")
+    check("и передаётся числом, а не строкой", client.asked[0] == -100123)
+
+    client = Client()
+    got = await tgx.resolve_peer(client, "allcrew cockpit")
+    check("регистр в названии не важен", got == "мой форум")
+
+
 def markdown_to_blocks_regression() -> None:
     """Форма текста внутри блока выяснена опытом на живом сервере: строка даёт
     TextPlain, массив — TextConcat, {"type": "bold", …} — TextBold, узлы
@@ -2465,6 +2547,8 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    groups_regression()
+    await peer_ambiguity_regression()
     markdown_to_blocks_regression()
     blocks_media_regression()
     media_label_regression()

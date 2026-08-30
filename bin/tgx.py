@@ -37,6 +37,7 @@ import tgx_folders
 import tgx_format
 import tgx_forum
 import tgx_inline
+import tgx_groups
 import tgx_guard
 import tgx_net
 import tgx_notify
@@ -342,6 +343,19 @@ async def resolve_peer(client: TelegramClient, peer: str) -> Any:
     # Числовой id надо передать числом: строку Telethon ищет как имя и не находит.
     attempts: list[Any] = [int(query)] if query.lstrip("-").isdigit() else []
     attempts.append(query)
+
+    # Свои чаты важнее чужих совпадений. Название канала может оказаться и чужим
+    # адресом: «PLOMBIR» — мой канал и посторонний @Plombir одновременно, и
+    # глобальный поиск отдавал постороннего. Написать не туда так проще простого,
+    # поэтому точное совпадение с названием своего диалога решает спор. Порядок
+    # обратный для @имени и адреса в нижнем регистре: их пишут, когда имеют в
+    # виду именно адрес.
+    looks_like_handle = query.startswith("@") or (
+        query.replace("_", "").isalnum() and query.islower())
+    if not looks_like_handle and not query.lstrip("-").isdigit():
+        async for dialog in client.iter_dialogs(limit=None):
+            if (dialog.name or "").strip().lower() == query.lower():
+                return dialog.entity
 
     missing: Exception | None = None
     for value in attempts:
@@ -3072,6 +3086,58 @@ async def cmd_safety(args: argparse.Namespace) -> None:
         await client.disconnect()
 
 
+async def cmd_group(args: argparse.Namespace) -> None:
+    """Обычные группы, ветки обсуждений и признак набора."""
+    command = args.groupcmd
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        groups = tgx_groups.Groups(client)
+        talk = tgx_groups.Discussion(client)
+        peer = await resolve_peer(client, args.peer) if getattr(args, "peer", None) else None
+
+        if command == "typing":
+            render.emit(await groups.typing(peer, args.what, topic=args.topic or 0,
+                                            progress=args.progress or 0))
+        elif command == "new":
+            render.emit(await groups.create(args.title, args.who, ttl=args.ttl or 0))
+        elif command == "add":
+            render.emit(await groups.add(peer, args.who, history=args.history))
+        elif command == "remove":
+            render.emit(await groups.remove(peer, args.who, wipe=args.wipe))
+        elif command == "rename":
+            render.emit(await groups.rename(peer, args.title))
+        elif command == "admin":
+            render.emit(await groups.admin(peer, args.who, on=args.state == "on"))
+        elif command == "rank":
+            render.emit(await groups.rank(peer, args.who, args.title))
+        elif command == "hand-over":
+            await gated_or_die(client, args, f"передать группу {args.peer} — {args.who}",
+                               "вы перестанете быть владельцем", danger=True)
+            render.emit(await groups.hand_over(
+                peer, args.who, read_secret("пароль двухфакторной защиты: ", "TGX_PASSWORD")))
+        elif command == "delete":
+            await gated_or_die(client, args, f"удалить группу {args.peer}",
+                               "вместе со всей перепиской", danger=True)
+            render.emit(await groups.drop(peer))
+        elif command == "upgrade":
+            await gated_or_die(client, args, f"превратить {args.peer} в супергруппу",
+                               "обратно вернуть нельзя", danger=True)
+            render.emit(await groups.upgrade(peer))
+        elif command == "info":
+            render.emit(await groups.info(peer))
+        elif command == "ttl":
+            render.emit(await groups.ttl(peer, args.seconds))
+        elif command == "thread":
+            render.emit(await talk.thread(peer, args.id))
+        elif command == "replies":
+            render.emit({"ответы": await talk.replies(peer, args.id, limit=args.limit)})
+        elif command == "read-thread":
+            render.emit(await talk.mark_read(peer, args.id, args.up_to or 0))
+    finally:
+        await client.disconnect()
+
+
 async def cmd_notify(args: argparse.Namespace) -> None:
     """Чем вас беспокоят и кого вы впускаете."""
     command = args.notifycmd
@@ -3909,6 +3975,83 @@ def build_parser() -> argparse.ArgumentParser:
 
     s_sp = sf_sub.add_parser("sponsored", help="показывать ли рекламу (скрыть — Premium)")
     s_sp.add_argument("state", choices=["on", "off"])
+
+    gr = sub.add_parser("group", help="обычные группы, ветки обсуждений, «печатает…»")
+    gr_sub = gr.add_subparsers(dest="groupcmd", required=True)
+    gr.set_defaults(func=cmd_group)
+
+    def asks(parser):
+        parser.add_argument("--confirm-to", help="кто подтверждает")
+        parser.add_argument("--as", dest="bot", help="бот, который спросит")
+        parser.add_argument("--timeout", type=float, default=300.0)
+        return parser
+
+    g_typ = gr_sub.add_parser("typing", help="показать, что вы заняты: печатаете, шлёте файл…")
+    g_typ.add_argument("peer")
+    g_typ.add_argument("what", nargs="?", default="typing",
+                       choices=sorted(tgx_groups.ACTIONS))
+    g_typ.add_argument("--topic", type=int, help="в этой теме форума")
+    g_typ.add_argument("--progress", type=int, help="доля выполненного для отправки файла")
+
+    g_new = gr_sub.add_parser("new", help="завести обычную группу (не супергруппу)")
+    g_new.add_argument("title")
+    g_new.add_argument("who", nargs="+", help="кого позвать; в одиночку нельзя")
+    g_new.add_argument("--ttl", type=int, help="через сколько секунд исчезают сообщения")
+
+    g_add = gr_sub.add_parser("add", help="добавить человека")
+    g_add.add_argument("peer")
+    g_add.add_argument("who")
+    g_add.add_argument("--history", type=int, default=0, help="сколько прошлых сообщений показать")
+
+    g_rm = gr_sub.add_parser("remove", help="убрать человека")
+    g_rm.add_argument("peer")
+    g_rm.add_argument("who")
+    g_rm.add_argument("--wipe", action="store_true", help="заодно стереть его сообщения")
+
+    g_ren = gr_sub.add_parser("rename", help="сменить название")
+    g_ren.add_argument("peer")
+    g_ren.add_argument("title")
+
+    g_adm = gr_sub.add_parser("admin", help="выдать или снять права администратора")
+    g_adm.add_argument("peer")
+    g_adm.add_argument("who")
+    g_adm.add_argument("state", nargs="?", default="on", choices=["on", "off"])
+
+    g_rank = gr_sub.add_parser("rank", help="звание администратора вместо слова «админ»")
+    g_rank.add_argument("peer")
+    g_rank.add_argument("who")
+    g_rank.add_argument("title", nargs="?", default="")
+
+    g_ho = asks(gr_sub.add_parser("hand-over", help="передать группу другому (подтверждение)"))
+    g_ho.add_argument("peer")
+    g_ho.add_argument("who")
+
+    g_del = asks(gr_sub.add_parser("delete", help="удалить группу (подтверждение)"))
+    g_del.add_argument("peer")
+
+    g_up = asks(gr_sub.add_parser("upgrade", help="превратить в супергруппу (подтверждение)"))
+    g_up.add_argument("peer")
+
+    g_inf = gr_sub.add_parser("info", help="что за группа")
+    g_inf.add_argument("peer")
+
+    g_ttl = gr_sub.add_parser("ttl", help="через сколько исчезают сообщения в этом чате")
+    g_ttl.add_argument("peer")
+    g_ttl.add_argument("seconds", type=int, help="0, 86400, 604800 или 2678400")
+
+    g_th = gr_sub.add_parser("thread", help="куда ведут комментарии под постом")
+    g_th.add_argument("peer")
+    g_th.add_argument("id", type=int)
+
+    g_rep = gr_sub.add_parser("replies", help="ответы в ветке")
+    g_rep.add_argument("peer")
+    g_rep.add_argument("id", type=int)
+    g_rep.add_argument("--limit", type=int, default=30)
+
+    g_rt = gr_sub.add_parser("read-thread", help="пометить ветку прочитанной")
+    g_rt.add_argument("peer")
+    g_rt.add_argument("id", type=int)
+    g_rt.add_argument("--up-to", type=int)
 
     nt = sub.add_parser("notify", help="уведомления, заявки на вступление, реакции")
     nt_sub = nt.add_subparsers(dest="notifycmd", required=True)
@@ -5777,7 +5920,7 @@ async def amain() -> None:
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_calls.CallError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_pending.PendingError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
-                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_safety.SafetyError, tgx_inline.InlineError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
+                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_safety.SafetyError, tgx_groups.GroupError, tgx_inline.InlineError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
                  tgx_stories.StoryError,
                  tgx_transcribe.TranscribeError)
 
