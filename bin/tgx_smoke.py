@@ -1758,6 +1758,77 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+def webapp_dom_regression() -> None:
+    """Глаза и руки агента внутри приложения. Ключевое решение — textContent, а
+    не innerText: innerText отражает отрисованный текст и в фоновой вкладке
+    пуст, а textContent живёт в дереве и есть всегда. Проверку видимости ведём
+    обходом предков по вычисляемому стилю — offsetParent и геометрия в невидимой
+    вкладке тоже врут."""
+    import tgx_webapp as W
+
+    page = W.Host("x", "https://a/b").page()
+
+    # действия внутри приложения объявлены
+    for tool in ("page", "elements", "click", "fill", "scroll", "go", "back", "layout"):
+        check(f"объявлено действие {tool}", f"registerTool('{tool}'" in page)
+
+    # не отрисовкозависимые источники
+    check("текст берётся из textContent, а не innerText",
+          "body.textContent" in page and "body.innerText" not in page)
+    check("надписи тоже из textContent", "el.textContent" in page)
+    check("видимость — обходом предков по стилю",
+          "parentElement" in page and "getComputedStyle" in page)
+    check("на offsetParent видимость не завязана",
+          "offsetParent !== null" not in page)
+
+    # поле заполняется нативным сеттером, иначе React не заметит
+    check("значение ставится нативным сеттером", "getOwnPropertyDescriptor" in page)
+    check("и шлётся событие input", "new Event('input'" in page)
+
+    # без проводника внутрь не заглянуть — это надо сказать, а не молчать
+    check("отказ объяснён происхождением", "одного происхождения" in page)
+
+
+async def account_regression() -> None:
+    """Оформление аккаунта: вкладки профиля, причины жалоб, автосохранение.
+    Тонкое место — путать основной и дополнительный адрес нельзя, иначе профиль
+    останется без адреса вовсе."""
+    import tgx_account as A
+
+    check("вкладок профиля девять", len(A.TABS) == 9)
+    check("посты среди них", A.TABS["posts"] == "ProfileTabPosts")
+    check("причин жалобы десять", len(A.REPORT_REASONS) == 10)
+    check("спам среди них", A.REPORT_REASONS["spam"] == "InputReportReasonSpam")
+
+    # автосохранение сводит три раздела к понятному виду
+    class Thing:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    class Fake(A.Account):
+        def __init__(self, answer):
+            self.answer = answer
+
+        async def _call(self, request):
+            return self.answer
+
+    settings = Thing(users_settings=Thing(photos=True, videos=True, video_max_size=10485760),
+                     chats_settings=Thing(photos=False, videos=False, video_max_size=0),
+                     broadcasts_settings=Thing(photos=True, videos=False, video_max_size=0))
+    got = await Fake(settings).autosave()
+    check("личные разобраны", got["личные"]["фото"] is True)
+    check("предел видео в мегабайтах", got["личные"]["видео до, МБ"] == 10)
+    check("нулевой предел не показываем", got["группы"]["видео до, МБ"] is None)
+
+    # деликатный контент: без аргумента спрашиваем, с аргументом ставим
+    quiz = Thing(sensitive_enabled=True, sensitive_can_change=True)
+    shown = await Fake(quiz).sensitive(None)
+    check("статус деликатного читается", shown["деликатный контент"] == "показывать")
+    check("и видно, можно ли менять", shown["можно менять"] is True)
+
+    check("непонятная вкладка объяснена", "USERNAME_INVALID" in A.HINTS)
+
+
 def proxy_regression() -> None:
     """Приложение подаётся с нашего адреса — иначе его нельзя ни прочитать, ни
     нажать. Переписывание адресов тут — самое хрупкое место, и каждая из этих
@@ -2863,6 +2934,8 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    webapp_dom_regression()
+    await account_regression()
     proxy_regression()
     windows_registry_regression()
     window_bridge_regression()

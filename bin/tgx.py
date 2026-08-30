@@ -25,6 +25,7 @@ from telethon.tl.types import Channel, Chat, User
 
 import tgx_article
 import tgx_banner
+import tgx_account
 import tgx_ai
 import tgx_chanadmin
 import tgx_chatx
@@ -3251,6 +3252,52 @@ async def cmd_window(args: argparse.Namespace) -> None:
                                                timeout=args.timeout)})
 
 
+async def cmd_account(args: argparse.Namespace) -> None:
+    """Настройки и оформление аккаунта: адреса, обои, темы, автосохранение."""
+    command = args.acctcmd
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        acct = tgx_account.Account(client)
+
+        async def whom():
+            return await resolve_peer(client, args.peer)
+
+        actions = {
+            "sensitive": lambda: acct.sensitive(
+                None if args.state == "show-status" else args.state == "on"),
+            "new-contacts": lambda: acct.new_contact_notice(),
+            "free-name": lambda: acct.free_name(args.name),
+            "username": lambda: acct.username(args.name, on=args.state == "on"),
+            "usernames-order": lambda: acct.order_usernames(args.name),
+            "main-tab": lambda: acct.main_tab(args.tab),
+            "wallpapers": lambda: acct.wallpapers(),
+            "set-wallpaper": lambda: acct.set_wallpaper(args.slug, dark=args.dark),
+            "reset-wallpapers": lambda: acct.reset_wallpapers(),
+            "themes": lambda: acct.themes(chat=args.chat),
+            "install-theme": lambda: acct.install_theme(args.slug, dark=args.dark),
+            "emoji-statuses": lambda: acct.emoji_statuses(kind=args.kind),
+            "clear-recent-statuses": lambda: acct.clear_recent_statuses(),
+            "status-emojis": lambda: acct.status_emojis(kind=args.kind),
+            "ringtones": lambda: acct.ringtones(),
+            "profile-music": lambda: acct.profile_music(),
+            "autosave": lambda: acct.autosave(),
+            "set-autosave": lambda: acct.set_autosave(
+                where=args.where, photos=args.photos, videos=args.videos, max_mb=args.max_mb),
+        }
+        if command in actions:
+            got = await actions[command]()
+            render.emit(got if isinstance(got, dict) else {"найдено": got})
+        elif command == "paid-revenue":
+            render.emit(await acct.paid_revenue(args.user))
+        elif command == "report":
+            await gated_or_die(client, args, f"пожаловаться на {args.peer}",
+                               "жалобу нельзя отозвать", danger=True)
+            render.emit(await acct.report(await whom(), args.reason, args.comment or ""))
+    finally:
+        await client.disconnect()
+
+
 async def cmd_chan(args: argparse.Namespace) -> None:
     """Остаток управления каналами: адреса, вид, уборка, необратимое."""
     command = args.chancmd
@@ -4278,6 +4325,74 @@ def build_parser() -> argparse.ArgumentParser:
     w_do.add_argument("--name", help="в каком окне")
     w_do.add_argument("--args", help="аргументы действия, JSON-объектом")
     w_do.add_argument("--timeout", type=float, default=10.0)
+
+    ac = sub.add_parser("account", help="настройки и оформление: адреса, обои, темы, автосейв")
+    ac_sub = ac.add_subparsers(dest="acctcmd", required=True)
+    ac.set_defaults(func=cmd_account)
+
+    a_se = ac_sub.add_parser("sensitive", help="показывать ли деликатный контент")
+    a_se.add_argument("state", nargs="?", default="show-status",
+                      choices=["on", "off", "show-status"])
+
+    ac_sub.add_parser("new-contacts", help="сообщать ли о регистрации контактов")
+
+    a_fn = ac_sub.add_parser("free-name", help="свободен ли адрес")
+    a_fn.add_argument("name")
+
+    a_un = ac_sub.add_parser("username", help="включить или выключить дополнительный адрес")
+    a_un.add_argument("name")
+    a_un.add_argument("state", nargs="?", default="on", choices=["on", "off"])
+
+    a_uo = ac_sub.add_parser("usernames-order", help="переставить адреса")
+    a_uo.add_argument("name", nargs="+")
+
+    a_mt = ac_sub.add_parser("main-tab", help="что показывать первым в профиле")
+    a_mt.add_argument("tab", choices=sorted(tgx_account.TABS))
+
+    ac_sub.add_parser("wallpapers", help="какие обои доступны")
+    ac_sub.add_parser("reset-wallpapers", help="сбросить обои")
+
+    a_sw = ac_sub.add_parser("set-wallpaper", help="поставить обои (меняется везде)")
+    a_sw.add_argument("slug", help="адрес-слаг из wallpapers")
+    a_sw.add_argument("--dark", action="store_true")
+
+    a_th = ac_sub.add_parser("themes", help="темы: свои или для чатов")
+    a_th.add_argument("--chat", action="store_true", help="готовые темы для чатов")
+
+    a_it = ac_sub.add_parser("install-theme", help="поставить тему")
+    a_it.add_argument("slug")
+    a_it.add_argument("--dark", action="store_true")
+
+    a_es = ac_sub.add_parser("emoji-statuses", help="наборы эмодзи-статусов")
+    a_es.add_argument("--kind", default="default",
+                      choices=["default", "recent", "collectible"])
+
+    ac_sub.add_parser("clear-recent-statuses", help="очистить недавние статусы")
+
+    a_sm = ac_sub.add_parser("status-emojis", help="какие эмодзи годятся в оформление")
+    a_sm.add_argument("--kind", default="profile", choices=["profile", "group", "background"])
+
+    ac_sub.add_parser("ringtones", help="сохранённые рингтоны")
+    ac_sub.add_parser("profile-music", help="музыка в профиле")
+    ac_sub.add_parser("autosave", help="что скачивается само")
+
+    a_sa = ac_sub.add_parser("set-autosave", help="настроить автосохранение медиа")
+    a_sa.add_argument("where", choices=["users", "chats", "channels"])
+    a_sa.add_argument("--photos", action="store_true")
+    a_sa.add_argument("--videos", action="store_true")
+    a_sa.add_argument("--max-mb", type=int, default=0, help="видео крупнее не качать")
+
+    a_pr = ac_sub.add_parser("paid-revenue", help="сколько принесли платные сообщения от человека")
+    a_pr.add_argument("user")
+
+    a_rp = ac_sub.add_parser("report", help="пожаловаться на весь профиль (подтверждение)")
+    a_rp.add_argument("peer")
+    a_rp.add_argument("reason", nargs="?", default="spam",
+                      choices=sorted(tgx_account.REPORT_REASONS))
+    a_rp.add_argument("--comment", default="")
+    a_rp.add_argument("--confirm-to")
+    a_rp.add_argument("--as", dest="bot")
+    a_rp.add_argument("--timeout", type=float, default=300.0)
 
     ch = sub.add_parser("chan", help="каналы: адреса, вид, уборка, поиск по всему Telegram")
     ch_sub = ch.add_subparsers(dest="chancmd", required=True)
@@ -6576,7 +6691,7 @@ async def amain() -> None:
 SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_business.BusinessError, tgx_calls.CallError, tgx_confirm.ConfirmError, tgx_contacts.ContactError,
                  tgx_banner.BannerError, tgx_folders.FolderError, tgx_forum.ForumError, tgx_guard.GuardError, tgx_net.NetError, tgx_pay.PayError, tgx_pending.PendingError, tgx_poll.PollError,
                  tgx_profile.ProfileError,
-                 tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_safety.SafetyError, tgx_groups.GroupError, tgx_chanadmin.ChanError, tgx_windows.WindowError, tgx_inline.InlineError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
+                 tgx_account.AccountError, tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_safety.SafetyError, tgx_groups.GroupError, tgx_chanadmin.ChanError, tgx_windows.WindowError, tgx_inline.InlineError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
                  tgx_stories.StoryError,
                  tgx_transcribe.TranscribeError)
 

@@ -315,17 +315,26 @@ const REFS = new Map();
 let refCount = 0;
 
 function label(el) {
+  // textContent, а не innerText: innerText отражает отрисованный текст, и в
+  // фоновой вкладке он пуст. textContent берётся из дерева и есть всегда —
+  // ровно то, что нужно агенту, который окно не показывает.
   const own = (el.getAttribute('aria-label') || el.getAttribute('placeholder') ||
-               el.getAttribute('title') || el.value || el.innerText || '').trim();
+               el.getAttribute('title') || el.value || el.textContent || '').trim();
   return own.replace(/\s+/g, ' ').slice(0, 80);
 }
 
 function visible(el) {
-  const box = el.getBoundingClientRect();
-  if (!box.width || !box.height) return false;
-  const style = el.ownerDocument.defaultView.getComputedStyle(el);
-  return style.visibility !== 'hidden' && style.display !== 'none' &&
-         parseFloat(style.opacity || '1') > 0.05;
+  // Идём вверх по предкам и смотрим только на display/visibility/opacity —
+  // это вычисляемый стиль, он не зависит от отрисовки. offsetParent и
+  // getBoundingClientRect в фоновой вкладке врут (браузер её не красит), а
+  // здесь важно именно «есть в разметке», а не «сейчас на экране».
+  const win = el.ownerDocument.defaultView;
+  for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+    const style = win.getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (parseFloat(style.opacity || '1') <= 0.05) return false;
+  }
+  return true;
 }
 
 const CLICKABLE = 'a,button,input,select,textarea,[role=button],[role=link],[role=tab],' +
@@ -355,7 +364,10 @@ function scan() {
 function pageText() {
   const doc = inside();
   if (!doc) return null;
-  return (doc.body ? doc.body.innerText : '').replace(/\n{3,}/g, '\n\n').slice(0, 8000);
+  // textContent живёт в дереве, а не в отрисовке: фоновая вкладка не красится,
+  // и innerText там пуст, а textContent — нет.
+  const raw = doc.body ? doc.body.textContent : '';
+  return raw.replace(/[ \t]+/g, ' ').replace(/\n\s*\n\s*\n+/g, '\n\n').trim().slice(0, 8000);
 }
 
 const NO_FRAME = {error: 'внутрь приложения не заглянуть: оно подано не через ' +
@@ -396,6 +408,39 @@ window.tgx.registerTool('fill', 'вписать текст в поле по ref'
   el.dispatchEvent(new Event('change', {bubbles: true}));
   note('агент вписал в ' + (label(el) || el.tagName));
   return {вписано: a.text || ''};
+});
+window.tgx.registerTool('layout',
+  'разметка страницы: видимые блоки с текстом и координатами — снимок без картинки',
+  {}, () => {
+  const doc = inside();
+  if (!doc) return NO_FRAME;
+  const out = [];
+  const walk = (el, depth) => {
+    if (depth > 12 || out.length > 200) return;
+    for (const child of el.children) {
+      if (!visible(child)) continue;
+      const box = child.getBoundingClientRect();
+      // Не фильтруем по размеру: в невидимой вкладке он обнуляется, а дерево —
+      // нет. Координаты кладём как есть, подсказкой; агент опирается на текст.
+      const own = [...child.childNodes]
+        .filter(n => n.nodeType === 3).map(n => n.textContent.trim())
+        .filter(Boolean).join(' ').slice(0, 60);
+      const row = {тег: child.tagName.toLowerCase(),
+                   x: Math.round(box.x), y: Math.round(box.y),
+                   ш: Math.round(box.width), в: Math.round(box.height)};
+      const cls = (child.className && child.className.toString) ?
+                   child.className.toString().slice(0, 40) : '';
+      if (cls) row.класс = cls;
+      if (own) row.текст = own;
+      const ref = [...REFS.entries()].find(([, e]) => e === child);
+      if (ref) row.ref = ref[0];
+      out.push(row);
+      walk(child, depth + 1);
+    }
+  };
+  scan();                    // обновить REFS, чтобы ссылки совпадали с elements
+  walk(doc.body, 0);
+  return {адрес: doc.location.href, блоки: out};
 });
 window.tgx.registerTool('scroll', 'прокрутить приложение',
   {y: {type: 'number'}}, (a) => {
