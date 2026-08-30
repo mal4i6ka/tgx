@@ -3123,6 +3123,25 @@ async def cmd_ai(args: argparse.Namespace) -> None:
         return
 
 
+async def _open_window(title: str, url: str, args: argparse.Namespace) -> dict[str, Any]:
+    """Поднять окно вокруг уже полученного адреса приложения."""
+    host = tgx_webapp.Host(title, url,
+                           on_data=lambda body: render.note(f"приложение прислало: {body}"))
+    where = host.start()
+    if not getattr(args, "no_open", False):
+        import webbrowser
+
+        webbrowser.open(where)
+    try:
+        asked = host.wait(getattr(args, "seconds", 900.0))
+        return {"окно": where, "закрылось само": asked,
+                "прислало данных": len(host.received)}
+    except KeyboardInterrupt:
+        return {"окно": where, "остановлено": "вами"}
+    finally:
+        host.stop()
+
+
 async def cmd_inline(args: argparse.Namespace) -> None:
     """Чужие боты: инлайн-запросы, кнопки, мини-приложения."""
     command = args.inlinecmd
@@ -3154,6 +3173,18 @@ async def cmd_inline(args: argparse.Namespace) -> None:
         elif command == "attach":
             render.emit(await inline.attach_toggle(args.bot, args.state == "on",
                                                    allow_write=args.allow_write))
+        elif command == "press-app":
+            got = await inline.press_web_button(
+                peer, args.id, text=args.text or "", row=args.row or 0, col=args.col or 0)
+            if args.run and got.get("адрес"):
+                got.update(await _open_window(f"{args.peer}/{args.id}", got["адрес"], args))
+            render.emit(got)
+        elif command == "menu-button":
+            target = await resolve_peer(client, args.peer) if args.peer else None
+            got = await inline.press_menu_button(args.bot, peer=target)
+            if args.run and got.get("адрес"):
+                got.update(await _open_window(str(args.bot), got["адрес"], args))
+            render.emit(got)
         elif command == "web-app":
             answer = await inline.web_app(args.bot, peer=peer, url=args.url or "",
                                           param=args.param or "")
@@ -4409,6 +4440,25 @@ def build_parser() -> argparse.ArgumentParser:
     i_at.add_argument("bot")
     i_at.add_argument("state", choices=["on", "off"])
     i_at.add_argument("--allow-write", action="store_true", help="разрешить ему писать вам")
+
+    i_pa = il_sub.add_parser("press-app",
+                             help="нажать кнопку, открывающую мини-приложение")
+    i_pa.add_argument("peer")
+    i_pa.add_argument("id", type=int)
+    i_pa.add_argument("--text", help="надпись на кнопке")
+    i_pa.add_argument("--row", type=int, help="ряд, если без надписи")
+    i_pa.add_argument("--col", type=int, help="место в ряду")
+    i_pa.add_argument("--run", action="store_true", help="сразу открыть в своём окне")
+    i_pa.add_argument("--seconds", type=float, default=900.0)
+    i_pa.add_argument("--no-open", action="store_true")
+
+    i_mb = il_sub.add_parser("menu-button",
+                             help="нажать главную кнопку-меню бота (слева от поля ввода)")
+    i_mb.add_argument("bot")
+    i_mb.add_argument("--peer", help="из какого чата открывать")
+    i_mb.add_argument("--run", action="store_true", help="сразу открыть в своём окне")
+    i_mb.add_argument("--seconds", type=float, default=900.0)
+    i_mb.add_argument("--no-open", action="store_true")
 
     i_run = il_sub.add_parser("run", help="запустить мини-приложение бота в своём окне")
     i_run.add_argument("bot")

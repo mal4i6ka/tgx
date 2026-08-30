@@ -1858,6 +1858,71 @@ async def msgextra_regression() -> None:
     check("описание — с обёртки", rows[0]["описание"] == "все новые")
 
 
+async def webapp_button_regression() -> None:
+    """Кнопка, открывающая мини-приложение, — не callback. У Telethon для неё
+    нет ветки в click(), и нажатие молча возвращает пустоту: со стороны «нажал,
+    и ничего», хотя запрос никуда не уходил. Худший вид поломки — тихий."""
+    import tgx_inline as I
+    from telethon.tl import types
+
+    class Thing:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    def markup(*buttons):
+        return Thing(rows=[Thing(buttons=list(buttons))])
+
+    web = types.KeyboardButtonWebView(text="Открыть", url="https://app/x")
+    plain = types.KeyboardButtonCallback(text="Обычная", data=b"x")
+
+    class Fake(I.Inline):
+        def __init__(self, message):
+            self.message = message
+            self.asked = []
+
+        async def _call(self, request):
+            self.asked.append(request)
+            return Thing(url="https://signed/app#tgWebAppData=xx")
+
+        async def get_messages(self, peer, ids=None):
+            return self.message
+
+        async def get_input_entity(self, who):
+            return who
+
+        @property
+        def client(self):
+            return self
+
+    fake = Fake(Thing(reply_markup=markup(web), sender_id=7))
+    got = await fake.press_web_button(None, 1, text="Открыть")
+    check("адрес приложения получен", got["адрес"].startswith("https://signed/"))
+    check("надпись кнопки названа", got["кнопка"] == "Открыть")
+    check("предупреждение о подписи на месте", "не передавайте" in got["осторожно"])
+    check("серверу ушёл адрес из кнопки", fake.asked[0].url == "https://app/x")
+
+    # обычную кнопку сюда пускать нельзя — для неё есть message-click
+    try:
+        await Fake(Thing(reply_markup=markup(plain), sender_id=7)).press_web_button(
+            None, 1, text="Обычная")
+        check("обычная кнопка должна отвергаться", False)
+    except I.InlineError as exc:
+        check("и отсылать к message-click", "message-click" in str(exc))
+
+    # ненайденная кнопка перечисляет, что есть — иначе искать наугад
+    try:
+        await Fake(Thing(reply_markup=markup(web), sender_id=7)).press_web_button(
+            None, 1, text="Нет такой")
+        check("отсутствующая кнопка должна ругаться", False)
+    except I.InlineError as exc:
+        check("и показывать список", "Открыть" in str(exc))
+
+    # выбор по ряду и месту, когда надписи нет
+    by_place = await Fake(Thing(reply_markup=markup(web), sender_id=7)).press_web_button(
+        None, 1, row=0, col=0)
+    check("кнопка находится по ряду и месту", by_place["кнопка"] == "Открыть")
+
+
 def webapp_dom_regression() -> None:
     """Глаза и руки агента внутри приложения. Ключевое решение — textContent, а
     не innerText: innerText отражает отрисованный текст и в фоновой вкладке
@@ -3035,6 +3100,7 @@ async def main() -> int:
     calls_regression()
     ai_compose_regression()
     await msgextra_regression()
+    await webapp_button_regression()
     webapp_dom_regression()
     await account_regression()
     proxy_regression()

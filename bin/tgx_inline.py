@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import secrets
 from typing import Any
 
@@ -144,6 +145,95 @@ class Inline:
         return {"ответ": getattr(result, "message", None) or "(бот промолчал)",
                 "всплывающим окном": bool(getattr(result, "alert", False)),
                 "адрес": getattr(result, "url", None)}
+
+    # --- кнопки, открывающие мини-приложение ---
+
+    async def press_web_button(self, peer: Any, message_id: int, *, text: str = "",
+                               row: int = 0, col: int = 0) -> dict[str, Any]:
+        """Нажать кнопку, которая открывает мини-приложение.
+
+        Такие кнопки — не callback: у Telethon для них нет ветки в `click()`, и
+        нажатие молча возвращает пустоту. Со стороны это выглядит как «нажал, и
+        ничего не произошло», хотя на деле запрос никуда не уходил. Здесь мы
+        берём из кнопки её адрес и просим у сервера подписанный — тот самый,
+        который открыл бы настоящий клиент.
+        """
+        from telethon.tl import functions, types
+
+        message = await self.client.get_messages(peer, ids=message_id)
+        if message is None:
+            raise InlineError(f"сообщения {message_id} здесь нет")
+
+        lines = getattr(getattr(message, "reply_markup", None), "rows", None) or []
+        button = None
+        if text:
+            for line in lines:
+                for item in line.buttons:
+                    if getattr(item, "text", "") == text:
+                        button = item
+                        break
+                if button is not None:
+                    break
+            if button is None:
+                names = [b.text for line in lines for b in line.buttons]
+                raise InlineError(f"кнопки «{text}» нет; есть: {', '.join(names) or 'ни одной'}")
+        else:
+            if row >= len(lines) or col >= len(lines[row].buttons):
+                raise InlineError(f"кнопки в ряду {row}, месте {col} нет: "
+                                  f"рядов {len(lines)}")
+            button = lines[row].buttons[col]
+
+        kind = type(button).__name__
+        if kind not in {"KeyboardButtonWebView", "KeyboardButtonSimpleWebView"}:
+            raise InlineError(
+                f"кнопка «{getattr(button, 'text', '')}» — это {kind}, а не запуск "
+                f"приложения; обычные кнопки жмёт `tgx message-click`")
+
+        bot = await self.client.get_input_entity(
+            getattr(message, "sender_id", None) or getattr(message, "via_bot_id", None))
+        params = types.DataJSON(data=json.dumps({"bg_color": "#121212"}))
+        if kind == "KeyboardButtonSimpleWebView":
+            result = await self._call(functions.messages.RequestSimpleWebViewRequest(
+                bot=bot, platform=PLATFORM, url=button.url, theme_params=params))
+        else:
+            result = await self._call(functions.messages.RequestWebViewRequest(
+                peer=peer, bot=bot, platform=PLATFORM, url=button.url,
+                theme_params=params))
+        return {"кнопка": getattr(button, "text", None),
+                "адрес": getattr(result, "url", None),
+                "осторожно": "адрес подписан вашей сессией — не передавайте его никому"}
+
+    async def press_menu_button(self, bot: Any, *, peer: Any = None) -> dict[str, Any]:
+        """Нажать главную кнопку-меню бота — ту, что слева от поля ввода.
+
+        Это отдельная сущность: не кнопка под сообщением, а свойство самого
+        бота. Её адрес спрашивается у сервера, потому что бот вправе задать
+        разную кнопку разным людям.
+        """
+        from telethon.tl import functions, types
+
+        # Кнопку читаем из полного профиля бота, а не через bots.getBotMenuButton:
+        # тот отвечает только самому боту, а нам нужна та кнопка, которую видит
+        # человек. Настоящий клиент берёт её отсюда же.
+        who = await self.client.get_input_entity(bot)
+        full = await self._call(functions.users.GetFullUserRequest(id=who))
+        info = getattr(getattr(full, "full_user", None), "bot_info", None)
+        menu = getattr(info, "menu_button", None)
+        url = getattr(menu, "url", None)
+        if not url:
+            shown = type(menu).__name__ if menu else ""
+            what = ("список команд" if shown.endswith("Commands")
+                    else "ничего" if not shown else shown)
+            raise InlineError(
+                f"у бота нет кнопки-меню с приложением — там {what}. "
+                f"Приложение может открываться иначе: `tgx inline run`")
+        params = types.DataJSON(data=json.dumps({"bg_color": "#121212"}))
+        result = await self._call(functions.messages.RequestWebViewRequest(
+            peer=peer or who, bot=who, platform=PLATFORM, url=url,
+            from_bot_menu=True, theme_params=params))
+        return {"кнопка-меню": getattr(menu, "text", None) or "Открыть",
+                "адрес": getattr(result, "url", None),
+                "осторожно": "адрес подписан вашей сессией — не передавайте его никому"}
 
     # --- мини-приложения ---
 
