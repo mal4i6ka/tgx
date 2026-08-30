@@ -1812,7 +1812,7 @@ tgx export @channel --output out.jsonl --format jsonl
 ## Коннектор для агентов (MCP)
 
 `bin/tgx-mcp` — MCP-сервер поверх того же аккаунта. Агенту доступно всё, что
-доступно вам: **577 инструментов**.
+доступно вам: **554 инструмента**.
 
 ```bash
 claude mcp add tgx -- ~/telegram-cli-tools/bin/tgx-mcp
