@@ -1956,6 +1956,26 @@ def palette_regression() -> None:
     check("пустой запрос отдаёт всё",
           len(list(tgx_palette.search(found, ""))) == len(found))
 
+    # Поля ввода отдают строки, а команды ждут числа. Командная строка приводит
+    # их сама при разборе, а палитра разбор обходит — без приведения ломается не
+    # у нас, а глубоко внутри: «'>' not supported between int and str» или
+    # «struct.error». По такому сообщению до причины не добраться.
+    history = by_name["tgx history"]
+    check("число приводится к числу",
+          tgx_palette.coerce(history, {"limit": "3"})["limit"] == 3)
+    check("строка остаётся строкой",
+          tgx_palette.coerce(history, {"peer": "durov"})["peer"] == "durov")
+    views = by_name["tgx views"]
+    check("список чисел приводится поэлементно",
+          tgx_palette.coerce(views, {"id": ["5", "6"]})["id"] == [5, 6])
+    check("уже готовое число не портится",
+          tgx_palette.coerce(history, {"limit": 7})["limit"] == 7)
+    try:
+        tgx_palette.coerce(history, {"limit": "много"})
+        check("негодное значение должно ругаться", False)
+    except ValueError as exc:
+        check("и называть поле", "limit" in str(exc))
+
 
 def webapp_dom_regression() -> None:
     """Глаза и руки агента внутри приложения. Ключевое решение — textContent, а

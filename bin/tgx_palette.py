@@ -111,10 +111,42 @@ def search(all_commands: list[Command], query: str) -> Iterator[tuple[float, Com
             yield 0.4, command
 
 
+def coerce(command: Command, values: dict[str, Any]) -> dict[str, Any]:
+    """Привести введённое к тому виду, которого ждёт команда.
+
+    Поля ввода отдают строки — иначе им неоткуда взяться. Командная строка сама
+    прогоняет их через `type=int` при разборе, а мы этот разбор обходим, вызывая
+    обработчик напрямую. Без приведения число уезжает строкой, и ломается не у
+    нас, а глубоко внутри: то «'>' not supported between int and str», то
+    «struct.error: required argument is not an integer». По такому сообщению до
+    причины не добраться.
+    """
+    kinds = {spec["dest"]: (spec.get("type"), spec.get("many"))
+             for spec in command.positional + command.options}
+    out: dict[str, Any] = {}
+    for name, value in values.items():
+        wanted, many = kinds.get(name, (None, False))
+        if wanted is None or not isinstance(value, (str, list)):
+            out[name] = value
+            continue
+        try:
+            if many and isinstance(value, list):
+                out[name] = [wanted(item) for item in value]
+            elif isinstance(value, str):
+                out[name] = wanted(value)
+            else:
+                out[name] = value
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"«{name}»: {value!r} не подходит — {exc}") from exc
+    return out
+
+
 async def run(command: Command, values: dict[str, Any], client: Any) -> Any:
     """Выполнить команду, одолжив ей уже открытое соединение окна."""
     import tgx
     import tgx_autotools
+
+    values = coerce(command, values)
 
     class Borrowed:
         """Общий клиент под видом личного: закрытие — пустое действие."""
