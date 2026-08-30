@@ -1758,6 +1758,63 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+def webapp_host_regression() -> None:
+    """Мини-приложение ждёт вокруг себя хозяина: шлёт «я готов» и ждёт ответов.
+    Голая вкладка им не является, поэтому окно рисуем сами. Проверяем, что
+    страница отвечает по протоколу и не выдумывает ответов там, где их нет."""
+    import json
+    import urllib.request
+
+    import tgx_webapp as W
+
+    got = []
+    host = W.Host("проба", 'https://app.example/x?k=1&t="кавычка"',
+                  on_data=got.append)
+    where = host.start()
+    try:
+        check("окно поднялось на локальном адресе", where.startswith("http://127.0.0.1:"))
+        page = urllib.request.urlopen(where, timeout=5).read().decode()
+
+        check("адрес приложения попал в рамку", "app.example/x" in page)
+        check("кавычка в адресе экранирована", '&quot;' in page and 't="кавычка"' not in page)
+        check("амперсанд тоже", "k=1&amp;t=" in page)
+
+        # хозяин обязан отвечать на то, что приложение спрашивает первым
+        for kind in ("web_app_ready", "web_app_request_theme", "web_app_request_viewport",
+                     "web_app_setup_main_button", "web_app_data_send", "web_app_close"):
+            check(f"страница знает {kind}", kind in page)
+        check("ответ уходит строкой, а не объектом", "JSON.stringify({eventType" in page)
+
+        # чего у нас нет — отказываем вслух, а не молчим
+        check("оплату не изображаем", "web_app_open_invoice" in page)
+        check("и говорим почему", "только в настоящем Telegram" in page)
+        check("номер телефона не отдаём", "web_app_request_phone" in W.REFUSED)
+        check("камеры нет", "web_app_open_scan_qr_popup" in W.REFUSED)
+
+        check("тема тёмная, как окно вокруг", W.THEME["bg_color"] == "#121212")
+        check("в теме есть всё, что спрашивают", len(W.THEME) >= 12)
+
+        # данные из приложения доходят до терминала
+        urllib.request.urlopen(urllib.request.Request(
+            where + "sent", data="привет".encode()), timeout=5)
+        check("присланное сохранено", host.received == ["привет"])
+        check("и отдано наружу", got == ["привет"])
+
+        # просьба закрыться поднимает флаг, по которому команда заканчивается
+        check("до просьбы окно ждёт", not host.closed.is_set())
+        urllib.request.urlopen(urllib.request.Request(
+            where + "closed", data=b""), timeout=5)
+        check("просьба закрыться услышана", host.closed.is_set())
+        check("и ожидание кончается сразу", host.wait(0.1) is True)
+
+        # запрет встраивания надо показать словами, а не белым прямоугольником
+        check("отказ объяснён", "отказалось открываться в рамке" in page)
+        check("и назван обходной путь", "Открыть вкладкой" in page)
+        check("тишина — единственный признак", "let heard" in page)
+    finally:
+        host.stop()
+
+
 async def takeout_only_regression() -> None:
     """Часть списков сервер отдаёт только внутри выгрузки: он считает их
     персональными данными, а не состоянием. Просить человека открыть режим
@@ -2648,6 +2705,7 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    webapp_host_regression()
     await takeout_only_regression()
     contacts_more_regression()
     stories_more_regression()

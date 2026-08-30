@@ -423,3 +423,155 @@ class Box:
         await self._call(functions.stickers.ReplaceStickerRequest(
             sticker=sticker_ref(key), new_sticker=item))
         return {"заменён": key, "эмодзи": emoji}
+
+
+class Library:
+    """Библиотека наборов: рекомендованные, архив, маски, эмодзи, гифки.
+
+    В графическом клиенте это вкладки панели стикеров. В терминале панели нет,
+    поэтому у каждой вкладки своя команда.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+
+    async def _call(self, request: Any) -> Any:
+        import tgx_net
+
+        try:
+            return await self.client(request)
+        except Exception as exc:
+            raise tgx_net.explain(exc, BOX_HINTS, StickerError) from exc
+
+    @staticmethod
+    def _set_row(item: Any) -> dict[str, Any]:
+        pack = getattr(item, "set", item)
+        row = {"набор": getattr(pack, "short_name", None),
+               "название": getattr(pack, "title", None),
+               "стикеров": getattr(pack, "count", None)}
+        if getattr(pack, "id", None) and getattr(pack, "access_hash", None):
+            row["ключ"] = f"{pack.id}:{pack.access_hash}"
+        if getattr(item, "unread", None):
+            row["непросмотренных"] = len(item.unread)
+        return row
+
+    async def featured(self, *, emoji: bool = False, old: bool = False) -> list[dict[str, Any]]:
+        """Что Telegram рекомендует."""
+        from telethon.tl import functions
+
+        if old:
+            request = functions.messages.GetOldFeaturedStickersRequest(offset=0, limit=50, hash=0)
+        elif emoji:
+            request = functions.messages.GetFeaturedEmojiStickersRequest(hash=0)
+        else:
+            request = functions.messages.GetFeaturedStickersRequest(hash=0)
+        result = await self._call(request)
+        return [self._set_row(s) for s in getattr(result, "sets", None) or []]
+
+    async def archived(self, *, masks: bool = False,
+                       emoji: bool = False) -> list[dict[str, Any]]:
+        """Наборы, убранные в архив, — они не показываются, но и не удалены."""
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetArchivedStickersRequest(
+            offset_id=0, limit=50, masks=masks or None, emojis=emoji or None))
+        return [self._set_row(s) for s in getattr(result, "sets", None) or []]
+
+    async def masks(self) -> list[dict[str, Any]]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetMaskStickersRequest(hash=0))
+        return [self._set_row(s) for s in getattr(result, "sets", None) or []]
+
+    async def emoji_packs(self) -> list[dict[str, Any]]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetEmojiStickersRequest(hash=0))
+        return [self._set_row(s) for s in getattr(result, "sets", None) or []]
+
+    async def emoji_groups(self, *, kind: str = "") -> list[dict[str, Any]]:
+        """Разделы панели эмодзи: «улыбки», «еда» и прочее."""
+        from telethon.tl import functions
+
+        request = {"status": functions.messages.GetEmojiStatusGroupsRequest,
+                   "avatar": functions.messages.GetEmojiProfilePhotoGroupsRequest,
+                   "sticker": functions.messages.GetEmojiStickerGroupsRequest,
+                   }.get(kind, functions.messages.GetEmojiGroupsRequest)
+        result = await self._call(request(hash=0))
+        return [{"раздел": getattr(g, "title", None),
+                 "эмодзи": len(getattr(g, "emoticons", None) or [])}
+                for g in getattr(result, "groups", None) or []]
+
+    async def search_emoji_sets(self, query: str) -> list[dict[str, Any]]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.SearchEmojiStickerSetsRequest(
+            q=query, hash=0))
+        return [self._set_row(s) for s in getattr(result, "sets", None) or []]
+
+    async def mark_seen(self, ids: list[int]) -> dict[str, Any]:
+        """Убрать точку «новое» с рекомендованных наборов."""
+        from telethon.tl import functions
+
+        await self._call(functions.messages.ReadFeaturedStickersRequest(id=ids))
+        return {"просмотрено наборов": len(ids)}
+
+    async def archive(self, names: list[str], *, restore: bool = False,
+                      remove: bool = False) -> dict[str, Any]:
+        """Убрать наборы в архив, вернуть оттуда или снести совсем."""
+        from telethon.tl import functions
+
+        refs = [set_ref(n) for n in names]
+        await self._call(functions.messages.ToggleStickerSetsRequest(
+            stickersets=refs, uninstall=remove or None,
+            archive=None if (restore or remove) else True,
+            unarchive=restore or None))
+        return {"наборов": len(refs),
+                "что сделали": "удалены" if remove else "возвращены" if restore else "в архиве"}
+
+    async def order(self, ids: list[int], *, masks: bool = False,
+                    emoji: bool = False) -> dict[str, Any]:
+        """Переставить наборы. Порядок задаётся числовыми id, не именами."""
+        from telethon.tl import functions
+
+        await self._call(functions.messages.ReorderStickerSetsRequest(
+            order=ids, masks=masks or None, emojis=emoji or None))
+        return {"порядок": len(ids)}
+
+    async def recent(self, key: str, *, remove: bool = False,
+                     attached: bool = False) -> dict[str, Any]:
+        """Положить стикер в недавние или убрать оттуда."""
+        from telethon.tl import functions
+
+        await self._call(functions.messages.SaveRecentStickerRequest(
+            id=sticker_ref(key), unsave=remove, attached=attached or None))
+        return {"стикер": key, "в недавних": not remove}
+
+    async def clear_recent(self, *, attached: bool = False) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.messages.ClearRecentStickersRequest(
+            attached=attached or None))
+        return {"недавние": "очищены"}
+
+    async def gifs(self) -> list[dict[str, Any]]:
+        from telethon.tl import functions
+
+        result = await self._call(functions.messages.GetSavedGifsRequest(hash=0))
+        return [sticker_row(d) for d in getattr(result, "gifs", None) or []]
+
+    async def save_gif(self, key: str, *, remove: bool = False) -> dict[str, Any]:
+        from telethon.tl import functions
+
+        await self._call(functions.messages.SaveGifRequest(
+            id=sticker_ref(key), unsave=remove))
+        return {"гифка": key, "сохранена": not remove}
+
+    async def whose(self, peer: Any, message_id: int) -> list[dict[str, Any]]:
+        """Из какого набора стикеры, наклеенные на фотографию."""
+        from telethon.tl import functions, types
+
+        result = await self._call(functions.messages.GetAttachedStickersRequest(
+            media=types.InputStickeredMediaPhoto(
+                id=(await self.client.get_messages(peer, ids=message_id)).photo)))
+        return [self._set_row(s) for s in result or []]

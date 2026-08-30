@@ -54,6 +54,7 @@ import tgx_security
 import tgx_splash
 import tgx_stats
 import tgx_takeout
+import tgx_webapp
 import tgx_triage
 import tgx_stickers
 import tgx_stories
@@ -1030,6 +1031,31 @@ async def cmd_stickers(args: argparse.Namespace) -> None:
             return
         if cmd == "replace":
             render.emit(await box.replace(args.key, args.file, args.emoji))
+            return
+
+        async def _sticker_whose(client, lib, args):
+            return await lib.whose(await resolve_peer(client, args.peer), args.id)
+
+        lib = tgx_stickers.Library(client)
+        LIB = {
+            "featured": lambda: lib.featured(emoji=args.emoji, old=args.old),
+            "archived": lambda: lib.archived(masks=args.masks, emoji=args.emoji),
+            "masks": lambda: lib.masks(),
+            "emoji-packs": lambda: lib.emoji_packs(),
+            "emoji-groups": lambda: lib.emoji_groups(kind=args.kind or ""),
+            "search-emoji": lambda: lib.search_emoji_sets(args.query),
+            "mark-seen": lambda: lib.mark_seen(args.id),
+            "archive": lambda: lib.archive(args.name, restore=args.restore, remove=args.remove),
+            "order": lambda: lib.order(args.id, masks=args.masks, emoji=args.emoji),
+            "recent-add": lambda: lib.recent(args.key, remove=args.remove),
+            "recent-clear": lambda: lib.clear_recent(),
+            "gifs": lambda: lib.gifs(),
+            "gif-save": lambda: lib.save_gif(args.key, remove=args.remove),
+            "whose": lambda: _sticker_whose(client, lib, args),
+        }
+        if cmd in LIB:
+            got = await LIB[cmd]()
+            render.emit(got if isinstance(got, dict) else {"найдено": got})
             return
 
         actions = {
@@ -3117,7 +3143,37 @@ async def cmd_inline(args: argparse.Namespace) -> None:
 
                 webbrowser.open(answer["адрес"])
                 answer["открыто"] = "в браузере"
+                answer["осторожно"] += (". Голая вкладка приложению не хозяин: "
+                                        "если оно висит на заставке, запустите "
+                                        "`tgx inline run` вместо этого")
             render.emit(answer)
+        elif command == "run":
+            # Приложению нужен хозяин, отвечающий по протоколу Telegram; голая
+            # вкладка им не является, поэтому поднимаем своё окно вокруг него.
+            answer = await inline.web_app(args.bot, peer=peer, url=args.url or "",
+                                          param=args.param or "")
+            address = answer.get("адрес")
+            if not address:
+                raise SystemExit("сервер не дал адреса приложения")
+            host = tgx_webapp.Host(f"{args.bot}", address,
+                                   on_data=lambda body: render.note(f"приложение прислало: {body}"))
+            where = host.start()
+            render.emit({"окно": where, "приложение": args.bot,
+                         "как открыто": answer.get("как открыто"),
+                         "закрыть": "Ctrl+C или само приложение"})
+            if not args.no_open:
+                import webbrowser
+
+                webbrowser.open(where)
+            try:
+                asked = host.wait(args.seconds)
+                render.emit({"закрылось само": asked,
+                             "прислало данных": len(host.received),
+                             "данные": host.received or None})
+            except KeyboardInterrupt:
+                render.emit({"остановлено": "вами", "прислало данных": len(host.received)})
+            finally:
+                host.stop()
     finally:
         await client.disconnect()
 
@@ -3620,7 +3676,8 @@ async def cmd_bot(args: argparse.Namespace) -> None:
 
     if command == "menu":
         result = await _with_bot(args.username, lambda s: s.set_menu_button(
-            text=args.text or "Открыть", url=args.url or "", reset=args.reset))
+            text=args.text or "Открыть", url=args.url or "", reset=args.reset,
+            commands=args.commands, user=args.for_user))
         render.emit(result)
         return
 
@@ -4112,6 +4169,14 @@ def build_parser() -> argparse.ArgumentParser:
     i_at.add_argument("bot")
     i_at.add_argument("state", choices=["on", "off"])
     i_at.add_argument("--allow-write", action="store_true", help="разрешить ему писать вам")
+
+    i_run = il_sub.add_parser("run", help="запустить мини-приложение бота в своём окне")
+    i_run.add_argument("bot")
+    i_run.add_argument("--peer", help="от имени какого чата открывать")
+    i_run.add_argument("--url", help="конкретная страница приложения")
+    i_run.add_argument("--param", help="параметр запуска")
+    i_run.add_argument("--seconds", type=float, default=900.0, help="сколько держать окно")
+    i_run.add_argument("--no-open", action="store_true", help="не открывать браузер самому")
 
     i_wa = il_sub.add_parser("web-app", help="подписанный адрес мини-приложения бота")
     i_wa.add_argument("bot")
@@ -4631,10 +4696,12 @@ def build_parser() -> argparse.ArgumentParser:
     b_me = bot_sub.add_parser("me", help="кто этот бот (вход по токену)")
     b_me.add_argument("username")
 
-    b_menu = bot_sub.add_parser("menu", help="кнопка-меню бота: мини-приложение")
+    b_menu = bot_sub.add_parser("menu", help="кнопка-меню бота: приложение или список команд")
     b_menu.add_argument("username")
-    b_menu.add_argument("--text", default="Открыть")
+    b_menu.add_argument("--text")
     b_menu.add_argument("--url", help="https-адрес мини-приложения")
+    b_menu.add_argument("--commands", action="store_true", help="показывать список команд")
+    b_menu.add_argument("--for-user", help="поставить кнопку одному человеку")
     b_menu.add_argument("--reset", action="store_true", help="вернуть меню по умолчанию")
 
     b_post = bot_sub.add_parser("post", help="опубликовать от имени бота, с кнопками")
@@ -5098,6 +5165,51 @@ def build_parser() -> argparse.ArgumentParser:
     k_ins = sk_sub.add_parser("install", help="поставить набор себе или убрать")
     k_ins.add_argument("name", help="короткое имя или ссылка t.me/addstickers/…")
     k_ins.add_argument("--remove", action="store_true")
+
+    k_ft = sk_sub.add_parser("featured", help="что Telegram рекомендует")
+    k_ft.add_argument("--emoji", action="store_true", help="наборы эмодзи")
+    k_ft.add_argument("--old", action="store_true", help="старые рекомендации")
+
+    k_ar = sk_sub.add_parser("archived", help="наборы, убранные в архив")
+    k_ar.add_argument("--masks", action="store_true")
+    k_ar.add_argument("--emoji", action="store_true")
+
+    sk_sub.add_parser("masks", help="наборы масок")
+    sk_sub.add_parser("emoji-packs", help="наборы эмодзи")
+    sk_sub.add_parser("recent-clear", help="очистить недавние")
+    sk_sub.add_parser("gifs", help="сохранённые гифки")
+
+    k_eg = sk_sub.add_parser("emoji-groups", help="разделы панели эмодзи")
+    k_eg.add_argument("--kind", choices=["status", "avatar", "sticker"],
+                      help="для статуса, аватара или подбора стикеров")
+
+    k_se = sk_sub.add_parser("search-emoji", help="искать наборы эмодзи")
+    k_se.add_argument("query")
+
+    k_ms = sk_sub.add_parser("mark-seen", help="убрать точку «новое» с наборов")
+    k_ms.add_argument("id", type=int, nargs="+")
+
+    k_arc = sk_sub.add_parser("archive", help="убрать наборы в архив, вернуть или снести")
+    k_arc.add_argument("name", nargs="+")
+    k_arc.add_argument("--restore", action="store_true", help="вернуть из архива")
+    k_arc.add_argument("--remove", action="store_true", help="удалить совсем")
+
+    k_ord = sk_sub.add_parser("order", help="переставить наборы (числовые id)")
+    k_ord.add_argument("id", type=int, nargs="+")
+    k_ord.add_argument("--masks", action="store_true")
+    k_ord.add_argument("--emoji", action="store_true")
+
+    k_ra = sk_sub.add_parser("recent-add", help="положить стикер в недавние")
+    k_ra.add_argument("key")
+    k_ra.add_argument("--remove", action="store_true")
+
+    k_gs = sk_sub.add_parser("gif-save", help="сохранить гифку или убрать")
+    k_gs.add_argument("key")
+    k_gs.add_argument("--remove", action="store_true")
+
+    k_wh = sk_sub.add_parser("whose", help="из какого набора стикеры на фотографии")
+    k_wh.add_argument("peer")
+    k_wh.add_argument("id", type=int)
 
     k_rep = sk_sub.add_parser("replace", help="заменить стикер, сохранив его место в наборе")
     k_rep.add_argument("key", help="ключ вида «число:число» из find")

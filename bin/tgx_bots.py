@@ -578,19 +578,35 @@ class BotSession:
             scope=types.BotCommandScopeDefault(), lang_code=lang_code, commands=commands))
         return {"ok": True, "commands": [c.command for c in commands]}
 
-    async def set_menu_button(self, text: str = "", url: str = "", reset: bool = False) -> dict[str, Any]:
-        """The bot's menu button — the standard way to hang a Mini App on a bot."""
+    async def set_menu_button(self, text: str = "", url: str = "", reset: bool = False,
+                              commands: bool = False, user: Any = None) -> dict[str, Any]:
+        """Кнопка-меню бота — обычный способ повесить на бота мини-приложение.
+
+        Видов у неё три, а не два: своя надпись со ссылкой, список команд и
+        «как по умолчанию». Список команд легко пропустить — а это ровно то,
+        чего хотят от бота без приложения.
+
+        Кнопку можно поставить и одному человеку: у него будет своя, у
+        остальных общая. Так делают персональные приложения — например, свою
+        панель для администратора.
+        """
         from telethon.tl import functions, types
 
         if reset:
             button: Any = types.BotMenuButtonDefault()
+            told = "по умолчанию"
+        elif commands:
+            button = types.BotMenuButtonCommands()
+            told = "список команд"
         else:
             if not url.startswith("https://"):
                 raise BotError("мини-приложению нужен https-адрес")
             button = types.BotMenuButton(text=text or "Открыть", url=url)
+            told = f"{text or 'Открыть'} → {url}"
+        target = (await self.client.get_input_entity(user)) if user else types.InputUserEmpty()
         await self.client(functions.bots.SetBotMenuButtonRequest(
-            user_id=types.InputUserEmpty(), button=button))
-        return {"ok": True, "menu": "по умолчанию" if reset else f"{text or 'Открыть'} → {url}"}
+            user_id=target, button=button))
+        return {"ok": True, "menu": told, "кому": str(user) if user else "всем"}
 
     async def post(self, peer: str, text: str = "", buttons: str = "", parse_mode: str = "md",
                    link_preview: bool = True, silent: bool = False, files: Sequence[str] | None = None,
