@@ -606,3 +606,10 @@ Toast {
     border: none;
     margin-top: 1;
 }
+
+/* истории: список слева, картинка справа */
+#stories-body { height: 1fr; }
+#stories-list { width: 40%; border-right: solid $panel-darken-1; }
+#stories-view { width: 1fr; padding: 0 1; }
+#stories-holder { height: 1fr; align: center middle; }
+#stories-caption { height: auto; padding: 0 0 1 0; }

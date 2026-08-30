@@ -400,6 +400,20 @@ class TelegramBackend:
             ))
         return out
 
+    async def _name_of(self, who: Any) -> str:
+        """Имя по номеру, с запоминанием: в ленте историй один автор повторяется."""
+        if who in self._names:
+            return self._names[who]
+        try:
+            entity = await self.client.get_entity(who)
+        except Exception:
+            return str(who)
+        parts = [getattr(entity, "first_name", "") or "", getattr(entity, "last_name", "") or ""]
+        name = (" ".join(p for p in parts if p).strip()
+                or getattr(entity, "title", "") or getattr(entity, "username", "") or str(who))
+        self._names[who] = name
+        return name
+
     async def _sender_name(self, msg: Any) -> str:
         sid = getattr(msg, "sender_id", None)
         if getattr(msg, "out", False):
@@ -772,6 +786,100 @@ class TelegramBackend:
         self._windows.append(host)
         webbrowser.open(where)
         return f"приложение открыто: {where}"
+
+    # ── истории ──────────────────────────────────────────────────────
+
+    async def story_feed(self, *, hidden: bool = False) -> list[dict[str, Any]]:
+        """Лента историй: у кого что есть прямо сейчас.
+
+        Возвращаем плоские записи вместе с адресатом — просмотрщику нужно и
+        показать, и потом скачать, а для скачивания нужен именно тот, чья
+        история: у историй свой номер, уникальный лишь внутри автора.
+        """
+        import tgx_stories
+
+        rows = await tgx_stories.Stories(self.client).feed(hidden=hidden)
+        # Автор приходит числом — человеку оно ни о чём не говорит. Имена
+        # спрашиваем по одному разу на автора: в ленте у одного бывает
+        # несколько историй подряд.
+        names: dict[Any, str] = {}
+        for row in rows:
+            who = row.get("чей")
+            if who is None:
+                row["автор"] = "неизвестно"
+                continue
+            if who not in names:
+                names[who] = self._names.get(who) or await self._name_of(who)
+            row["автор"] = names[who]
+        return rows
+
+    async def story_of(self, who: str) -> list[dict[str, Any]]:
+        import tgx_stories
+
+        rows = await tgx_stories.Stories(self.client).of(who)
+        for row in rows:
+            row["чей"] = who
+        return rows
+
+    async def story_media(self, who: Any, story_id: int, cache: Path) -> Path | None:
+        """Скачать картинку истории — или кадр, если это видео.
+
+        Истории живут отдельно от сообщений, и обычная загрузка вложения к ним
+        не применима: нужен сам объект истории. Кладём в тот же кэш, что и
+        превью сообщений, чтобы повторное открытие ничего не стоило.
+        """
+        from telethon.tl import functions
+
+        cache.mkdir(parents=True, exist_ok=True)
+        for existing in sorted(cache.glob(f"story_{story_id}.*")):
+            if existing.stat().st_size:
+                return existing
+
+        peer = await self.client.get_input_entity(who) if who else None
+        if peer is None:
+            return None
+        got = await self.client(functions.stories.GetStoriesByIDRequest(
+            peer=peer, id=[int(story_id)]))
+        stories = getattr(got, "stories", None) or []
+        if not stories:
+            return None
+        media = getattr(stories[0], "media", None)
+        if media is None:
+            return None
+
+        # У видео берём его превью, а не сам ролик: терминал видео не играет, а
+        # качать мегабайты ради кадра — впустую. У фотографии превью нет, там
+        # скачиваем как есть.
+        stem = str(cache / f"story_{story_id}")
+        if getattr(media, "document", None) is not None:
+            where = await self.client.download_media(media, file=stem, thumb=-1)
+            if where:
+                return Path(where)
+        where = await self.client.download_media(media, file=stem)
+        return Path(where) if where else None
+
+    async def story_file(self, who: Any, story_id: int, where: Path) -> Path | None:
+        """Скачать историю целиком — то, что можно отдать системному плееру."""
+        from telethon.tl import functions
+
+        where.mkdir(parents=True, exist_ok=True)
+        peer = await self.client.get_input_entity(who) if who else None
+        if peer is None:
+            return None
+        got = await self.client(functions.stories.GetStoriesByIDRequest(
+            peer=peer, id=[int(story_id)]))
+        stories = getattr(got, "stories", None) or []
+        media = getattr(stories[0], "media", None) if stories else None
+        if media is None:
+            return None
+        path = await self.client.download_media(media, file=str(where / f"story_{story_id}"))
+        return Path(path) if path else None
+
+    async def story_stealth(self, *, past: bool = True, future: bool = True) -> dict[str, Any]:
+        """Скрытный просмотр историй — возможность Telegram Premium."""
+        import tgx_stories
+
+        return await tgx_stories.Stories(self.client).stealth(past=past, future=future)
 
     # ── channels and groups ──────────────────────────────────────────
     async def create_chat(self, title: str, kind: str = "channel", about: str = "",
@@ -3750,6 +3858,194 @@ class LoginScreen(ModalScreen[bool]):
 
 
 # ── application ──────────────────────────────────────────────────────────────
+class StoriesScreen(ModalScreen[None]):
+    """Истории: список слева, картинка справа.
+
+    Истории — вещь визуальная, и списком подписей от них мало толку. Картинку
+    рисуем тем же способом, что и превью в переписке: Kitty, iTerm2, sixel, а
+    где ничего нет — юникодом. Видео терминал не проиграет, поэтому у него
+    показываем первый кадр и говорим об этом прямо, а не делаем вид.
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "закрыть"),
+        Binding("j,down", "next_story", "ниже", show=False),
+        Binding("k,up", "prev_story", "выше", show=False),
+        Binding("h", "toggle_hidden", "скрытые"),
+        Binding("o", "play", "открыть/проиграть"),
+        Binding("s", "stealth", "скрытный просмотр"),
+        Binding("r", "reload", "обновить"),
+    ]
+
+    def __init__(self, backend: Any, media_backend: str = "auto") -> None:
+        super().__init__()
+        self.backend = backend
+        self.media_backend = media_backend
+        self.rows: list[dict[str, Any]] = []
+        self.picked = 0
+        self.hidden = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog-wide"):
+            yield Static(Text("истории", style=f"bold {pal('primary')}"),
+                         classes="dialog-title")
+            with Horizontal(id="stories-body"):
+                yield OptionList(id="stories-list")
+                with Vertical(id="stories-view"):
+                    yield Static(Text("", style=muted()), id="stories-caption")
+                    yield Vertical(id="stories-holder")
+            yield Static(Text("j/k — листать · o — проиграть · s — скрытно · "
+                              "h — скрытые · r — обновить · escape — закрыть",
+                              style=muted()), classes="dialog-hint")
+
+    def on_mount(self) -> None:
+        self.load()
+
+    @work
+    async def load(self) -> None:
+        listing = self.query_one("#stories-list", OptionList)
+        listing.clear_options()
+        listing.add_option(Option(Text("загружаю…", style=muted())))
+        try:
+            self.rows = await self.backend.story_feed(hidden=self.hidden)
+        except Exception as exc:
+            # Через _say, а не по имени элемента: имя однажды поменялось, и
+            # обработчик ошибки падал сам — окно после этого переставало
+            # отвечать на клавиши, и выглядело это как «не закрывается».
+            self.rows = []
+            self._say(f"лента не открылась: {exc}")
+        listing.clear_options()
+        if not self.rows:
+            listing.add_option(Option(Text(
+                "скрытых историй нет" if self.hidden else "историй нет", style=muted())))
+            return
+        for row in self.rows:
+            listing.add_option(Option(self._label(row)))
+        self.picked = 0
+        listing.highlighted = 0
+        self.show(0)
+
+    @staticmethod
+    def _label(row: dict[str, Any]) -> Text:
+        label = Text(str(row.get("автор") or row.get("чей") or "?"), style="bold")
+        caption = (row.get("подпись") or "").strip()
+        if caption:
+            label.append("  " + caption[:40], style=muted())
+        marks = []
+        if row.get("видео"):
+            marks.append("видео")
+        if row.get("просмотров"):
+            marks.append(f"{row['просмотров']} просм.")
+        if marks:
+            label.append("  " + " · ".join(marks), style=muted())
+        return label
+
+    def _say(self, text: str) -> None:
+        self.query_one("#stories-caption", Static).update(Text(text, style=muted()))
+
+    @work(group="story-picture")
+    async def show(self, index: int) -> None:
+        """Нарисовать выбранную историю."""
+        if not (0 <= index < len(self.rows)):
+            return
+        row = self.rows[index]
+        holder = self.query_one("#stories-holder", Vertical)
+        await holder.remove_children()
+        self._say("загружаю картинку…")
+        try:
+            path = await self.backend.story_media(
+                row.get("чей"), row.get("id"), tgx_media.cache_dir())
+        except Exception as exc:
+            self._say(f"не загрузилось: {exc}")
+            return
+        if index != self.picked:
+            return                       # пока грузили, выбрали другую
+        if path is None:
+            self._say("у этой истории нечего показать")
+            return
+
+        cols = max(20, self.size.width // 2 - 6)
+        rows = max(8, self.size.height - 10)
+        widget = tgx_media.make_widget(Path(path), max_cols=cols, max_rows=rows,
+                                       backend=self.media_backend)
+        head = f"{row.get('автор') or ''} · {row.get('опубликована') or ''}"
+        if row.get("видео"):
+            head += " · кадр из видео, терминал его не проигрывает"
+        self._say(head)
+        if widget is None:
+            await holder.mount(Static(Text("картинку не удалось прочитать",
+                                           style=pal("error"))))
+            return
+        await holder.mount(widget)
+
+    def _move(self, delta: int) -> None:
+        if not self.rows:
+            return
+        self.picked = max(0, min(len(self.rows) - 1, self.picked + delta))
+        self.query_one("#stories-list", OptionList).highlighted = self.picked
+        self.show(self.picked)
+
+    def action_next_story(self) -> None:
+        self._move(1)
+
+    def action_prev_story(self) -> None:
+        self._move(-1)
+
+    def action_toggle_hidden(self) -> None:
+        self.hidden = not self.hidden
+        self.load()
+
+    def action_reload(self) -> None:
+        self.load()
+
+
+
+    @work(group="story-open")
+    async def action_play(self) -> None:
+        """Открыть историю в системном просмотрщике.
+
+        Видео терминал не играет — в окне виден только кадр. Отдаём файл тому,
+        кто играть умеет: тот же путь, что и у вложений в переписке.
+        """
+        if not (0 <= self.picked < len(self.rows)):
+            return
+        row = self.rows[self.picked]
+        self._say("качаю целиком…")
+        downloads = (Path(os.environ.get("TGX_HOME", Path.home() / "telegram-cli-tools"))
+                     / "data" / "downloads")
+        try:
+            path = await self.backend.story_file(row.get("чей"), row.get("id"), downloads)
+        except Exception as exc:
+            self._say(f"не скачалось: {exc}")
+            return
+        if path is None:
+            self._say("скачивать нечего")
+            return
+        error = await asyncio.to_thread(tgx_media.open_external, Path(path))
+        self._say(f"не открылось: {error}" if error else f"открыл {Path(path).name}")
+
+    @work(group="story-stealth")
+    async def action_stealth(self) -> None:
+        """Скрытный просмотр: истории не отмечаются просмотренными.
+
+        Возможность Telegram Premium; без него сервер откажет, и отказ мы
+        показываем как есть — врать, что включилось, нельзя.
+        """
+        try:
+            got = await self.backend.story_stealth()
+        except Exception as exc:
+            self._say(f"скрытный режим не включился: {exc}")
+            return
+        self._say(f"скрытный режим включён · назад {got.get('назад')} · "
+                  f"вперёд {got.get('вперёд')}")
+
+    @on(OptionList.OptionHighlighted, "#stories-list")
+    def highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option_index is not None and event.option_index != self.picked:
+            self.picked = event.option_index
+            self.show(self.picked)
+
+
 class PaletteScreen(ModalScreen[Any]):
     """Все команды tgx, найденные по названию.
 
@@ -3925,6 +4221,7 @@ class TgxApp(App):
         Binding("ctrl+t", "cycle_theme", "тема"),
         Binding("ctrl+p", "palette", "команды"),
         Binding("ctrl+w", "menu_button", "приложение бота"),
+        Binding("ctrl+o", "stories", "истории"),
         Binding("f1", "help", "справка"),
         Binding("question_mark", "help", "справка", show=False),
         Binding("ctrl+k", "focus_chats", "список чатов", show=False),
@@ -4043,6 +4340,10 @@ class TgxApp(App):
                 widget.refresh_text()
             self.query_one(TopBar).refresh()
             self._paint_header()
+
+    def action_stories(self) -> None:
+        """Показать ленту историй."""
+        self.push_screen(StoriesScreen(self.backend, self.media_backend))
 
     @work
     async def action_menu_button(self) -> None:

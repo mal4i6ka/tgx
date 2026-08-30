@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from textual.widgets import Checkbox, Input, Select, TextArea  # noqa: E402
 
 from tgx_tui import (READ_DWELL, ChatList, DemoBackend, MessageList, PaletteScreen,  # noqa: E402
+                     StoriesScreen,
                      TgxApp, plain_task_factory)
 
 OUT = Path(sys.argv[1] if len(sys.argv) > 1 else "/tmp/tgx-shots")
@@ -3927,6 +3928,25 @@ async def main() -> int:
             await wait_until(lambda: not isinstance(app.screen, PaletteScreen), pilot)
             check("палитра закрывается по escape",
                   not isinstance(app.screen, PaletteScreen))
+
+        # Истории: список слева, картинка справа. Их нельзя показать списком
+        # подписей — они визуальные, — но и живой ленты в демо-данных нет,
+        # поэтому проверяем, что экран открывается и честно говорит о пустоте.
+        await pilot.press("ctrl+o")
+        opened = await wait_until(
+            lambda: isinstance(app.screen, StoriesScreen), pilot, timeout=8)
+        check("истории открываются по ctrl+o", opened)
+        if opened:
+            screen = app.screen
+            check("лента пуста без историй", screen.rows == [])
+            check("скрытые переключаются", screen.hidden is False)
+            screen.action_toggle_hidden()
+            check("и переключились", screen.hidden is True)
+            app.save_screenshot(str(OUT / "13-stories.svg"))
+            await pilot.press("escape")
+            closed = await wait_until(
+                lambda: not isinstance(app.screen, StoriesScreen), pilot, timeout=3)
+            check("истории закрываются по escape", closed)
 
         # Кнопка-меню бота — свойство самого бота, а не сообщения. Из чата её
         # жмут чаще всего, поэтому у неё своё сочетание, а не поиск по палитре.
