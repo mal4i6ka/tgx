@@ -241,6 +241,20 @@ HOOK = """<script>(function () {
 })();</script>"""
 
 
+class _KeepRedirect(urllib.request.HTTPRedirectHandler):
+    """Не ходить за переадресацией самим — отдать её браузеру.
+
+    Библиотека следует за 3xx молча, и страница возвращается по исходному пути.
+    Для приложения это гибельно: «esim-bot.mobile.ag/» уводит на
+    «bot.mobile.tg/bot/», а рамка остаётся на «/» — маршрутизатор приложения
+    видит не тот путь и не рисует ничего. Пусть переадресацию отработает
+    браузер: тогда и путь, и происхождение станут верными сами собой.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class Fetcher:
     """Один поход за чужой страницей и возврат её своими словами."""
 
@@ -252,6 +266,9 @@ class Fetcher:
         self.origin = ""
         # закреплено ли происхождение снаружи — тогда ответы его не меняют
         self.pinned = False
+        # но одну поправку по первой странице закрепление всё же принимает:
+        # адрес запуска бывает перенаправлением
+        self.settled = False
 
     def get(self, path: str, method: str = "GET", headers: dict[str, str] | None = None,
             body: bytes | None = None) -> tuple[int, dict[str, str], bytes]:
@@ -268,9 +285,10 @@ class Fetcher:
         # с первой.
         import tgx_net
 
+        opener = urllib.request.build_opener(
+            _KeepRedirect, urllib.request.HTTPSHandler(context=tgx_net.context()))
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout,
-                                        context=tgx_net.context()) as answer:
+            with opener.open(request, timeout=self.timeout) as answer:
                 return self._read(answer, host)
         except urllib.error.HTTPError as exc:
             return self._read(exc, host)
@@ -297,7 +315,27 @@ class Fetcher:
                     filter(None, [self.jar.get(host), value.split(";", 1)[0]]))
                 continue
             if low == "location":
-                value = to_path(urllib.parse.urljoin(answer.geturl(), value))
+                # Свой адрес зеркалит адрес приложения: если переадресация ведёт
+                # к тому же хосту, отдаём голый путь — иначе маршрутизатор
+                # приложения увидит наш префикс вместо своего пути.
+                target = urllib.parse.urljoin(answer.geturl(), value)
+                spot = urllib.parse.urlsplit(target)
+                where = f"{spot.scheme}://{spot.netloc}"
+                # Первая же переадресация с адреса запуска и определяет, где
+                # приложение живёт на самом деле: «esim-bot.mobile.ag» уводит на
+                # «bot.mobile.tg/bot/». Закрепляемся на новом месте, иначе путь
+                # приложения уедет под наш префикс и его маршрутизатор ничего не
+                # нарисует.
+                if not self.settled and where != self.origin:
+                    self.origin = where
+                    self.settled = True
+                same = where in (self.origin, "")
+                if same:
+                    value = spot.path or "/"
+                    if spot.query:
+                        value += "?" + spot.query
+                else:
+                    value = to_path(target)
             out[name] = value
 
         kind = (out.get("Content-Type") or answer.headers.get("Content-Type") or "").lower()
@@ -312,6 +350,20 @@ class Fetcher:
 
         parts = urllib.parse.urlsplit(answer.geturl())
         origin = f"{parts.scheme}://{parts.netloc}"
+        # Закрепление следует за переадресацией.
+        #
+        # Адрес запуска может вести на перенаправление: «esim-bot.mobile.ag»
+        # отвечает 301 и уводит на «bot.mobile.tg». Разметка приходит уже с
+        # настоящего хоста, а закреплённое происхождение оставалось прежним — и
+        # ресурсы уходили обратно в редирект, откуда возвращалась та же
+        # разметка. Браузер ругался «ожидал модуль, получил text/html», и
+        # приложение оставалось белым. Поправку делаем один раз, по первой
+        # странице: дальше происхождение снова неприкосновенно.
+        if "html" in kind and self.pinned and not self.settled:
+            self.settled = True
+            if origin != self.origin:
+                self.origin = origin
+
         if "html" in kind and not self.pinned:
             # Происхождение запоминаем один раз и больше не меняем.
             #

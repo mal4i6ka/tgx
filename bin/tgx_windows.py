@@ -130,6 +130,7 @@ class Bridge:
         self.pending: list[dict[str, Any]] = []
         self.results: dict[str, Any] = {}
         self.done = threading.Event()
+        self.arrived = threading.Event()   # «появилось поручение»
         self._next = 0
         self._lock = threading.Lock()
 
@@ -143,10 +144,24 @@ class Bridge:
         with self._lock:
             self.tools = tools
 
-    def take_pending(self) -> list[dict[str, Any]]:
-        with self._lock:
-            taken, self.pending = self.pending, []
-        return taken
+    def take_pending(self, wait: float = 0.0) -> list[dict[str, Any]]:
+        """Забрать поручения, при необходимости подождав их появления.
+
+        Ждём на стороне сервера, а не опросом по таймеру: браузер душит таймеры
+        в фоновой вкладке — вплоть до одного срабатывания в минуту, — и окно,
+        с которым работает агент, отвечало пустотой просто потому, что его
+        никто не смотрел. Незавершённый запрос браузер так не тормозит.
+        """
+        deadline = time.monotonic() + wait
+        while True:
+            with self._lock:
+                if self.pending:
+                    taken, self.pending = self.pending, []
+                    return taken
+            if time.monotonic() >= deadline:
+                return []
+            self.arrived.wait(0.1)
+            self.arrived.clear()
 
     def push_result(self, ticket: str, value: Any) -> None:
         with self._lock:
@@ -166,6 +181,7 @@ class Bridge:
             self._next += 1
             ticket = str(self._next)
             self.pending.append({"ticket": ticket, "tool": tool, "args": args or {}})
+        self.arrived.set()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             with self._lock:
@@ -258,5 +274,12 @@ async function poll() {
     push('/mcp/result', {ticket: job.ticket, value: value === undefined ? {ok: true} : value});
   }
 }
-setInterval(poll, 200);
+// Спрашиваем снова сразу же, как ответили: сервер держит запрос открытым до
+// появления поручения. Таймер тут не годится — в фоновой вкладке браузер душит
+// его до одного срабатывания в минуту, и окно отвечало бы пустотой.
+(async function forever() {
+  for (;;) {
+    try { await poll(); } catch (e) { await new Promise(r => setTimeout(r, 1000)); }
+  }
+})();
 """

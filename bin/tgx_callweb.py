@@ -149,7 +149,7 @@ class Dashboard:
 
             def do_GET(self) -> None:     # noqa: N802 — имя задаёт библиотека
                 if self.path.startswith("/mcp/pending"):
-                    return self._json(dashboard.bridge.take_pending())
+                    return self._json(dashboard.bridge.take_pending(wait=25.0))
                 if self.path.startswith("/mcp/snapshot"):
                     return self._json({"состояние": dashboard.bridge.state,
                                        "действия": dashboard.bridge.tools})

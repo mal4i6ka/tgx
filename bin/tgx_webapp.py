@@ -801,7 +801,9 @@ class Host:
                 if self._stray():
                     return self._proxy("GET", stray=True)
                 if self.path.startswith("/mcp/pending"):
-                    return self._json(host.bridge.take_pending())
+                    # держим запрос открытым: страница узнаёт о поручении сразу,
+                    # даже когда её вкладка в фоне и таймеры придушены
+                    return self._json(host.bridge.take_pending(wait=25.0))
                 if self.path.startswith("/mcp/snapshot"):
                     return self._json({"состояние": host.bridge.state,
                                        "действия": host.bridge.tools,

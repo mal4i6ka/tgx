@@ -2262,6 +2262,11 @@ def windows_registry_regression() -> None:
     check("страница получает голос", "registerTool" in W.BRIDGE_JS)
     check("и умеет слать состояние", "setState" in W.BRIDGE_JS)
     check("поручения забираются опросом", "/mcp/pending" in W.BRIDGE_JS)
+    # Ждать надо на сервере, а не по таймеру: браузер душит таймеры в фоновой
+    # вкладке вплоть до одного срабатывания в минуту, и окно отвечало пустотой
+    # просто потому, что на него не смотрели.
+    check("таймерного опроса больше нет", "setInterval(poll" not in W.BRIDGE_JS)
+    check("спрашиваем снова сразу после ответа", "forever()" in W.BRIDGE_JS)
 
 
 def window_bridge_regression() -> None:
@@ -2291,6 +2296,26 @@ def window_bridge_regression() -> None:
     got = bridge.ask("press", {"что": "главную"}, timeout=3)
     check("ответ вернулся, а не подтверждение отправки", got == {"нажато": "главную"})
     check("выполненное поручение из очереди убрано", bridge.pending == [])
+
+    # Ожидание на сервере: пустая очередь держит запрос, появление будит сразу.
+    import time as _time
+
+    started = _time.monotonic()
+    check("пустая очередь ждёт, а не отвечает сразу",
+          bridge.take_pending(wait=0.3) == [] and _time.monotonic() - started >= 0.25)
+
+    def later():
+        _time.sleep(0.1)
+        bridge.ask_nowait = None
+        with bridge._lock:
+            bridge.pending.append({"ticket": "9", "tool": "x", "args": {}})
+        bridge.arrived.set()
+
+    threading.Thread(target=later, daemon=True).start()
+    started = _time.monotonic()
+    got_jobs = bridge.take_pending(wait=3.0)
+    check("появившееся поручение будит ожидание", len(got_jobs) == 1)
+    check("и будит сразу, а не по сроку", _time.monotonic() - started < 1.0)
     check("и результат не копится", bridge.results == {})
 
     # никто не отвечает — говорим об этом, а не висим молча
