@@ -4353,9 +4353,14 @@ def subcommand_help(parser: argparse.ArgumentParser) -> dict[str, str]:
 
 
 def overview(parser: argparse.ArgumentParser) -> None:
-    """The no-arguments landing screen: banner plus a grouped command map."""
+    """The no-arguments landing screen: banner plus a grouped command map.
+
+    Первой строкой карты идёт версия — запуск без аргументов чаще всего и есть
+    вопрос «что у меня стоит», и ради ответа не должно требоваться `--version`.
+    """
     helps = subcommand_help(parser)
     if not render.pretty():
+        print(f"tgx {VERSION}")
         parser.print_help()
         return
     if not tgx_splash.play(os.environ.get("TGX_EFFECT") or "beams"):
@@ -4366,6 +4371,10 @@ def overview(parser: argparse.ArgumentParser) -> None:
     from rich.text import Text
 
     console = render.console()
+    head = Text()
+    head.append("  tgx ", style=f"bold {render.ACCENT}")
+    head.append(VERSION, style=render.PALETTE["muted"])
+    console.print(head)
     console.print()
     panels = []
     for title, names in GROUPS:

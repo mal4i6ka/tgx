@@ -1151,6 +1151,52 @@ def command_surface_regression() -> None:
     check("у guard check тоже", "--confirm-to" in flags.get("guard_check", set()))
 
 
+def version_line_regression() -> None:
+    """Карта команд открывается строкой с версией — иначе по одному запуску `tgx`
+    не понять, какая сборка установлена. Значение берётся из единственной
+    константы `tgx.VERSION`, той же, что отдаёт `tgx --version`."""
+    import contextlib
+    import io
+
+    from rich.console import Console
+
+    import tgx
+    import tgx_render as render
+    import tgx_splash
+
+    parser = tgx.build_parser()
+
+    # В конвейере карта команд — это справка argparse; версия идёт над ней.
+    buf = io.StringIO()
+    render.set_plain(True)
+    try:
+        with contextlib.redirect_stdout(buf):
+            tgx.overview(parser)
+    finally:
+        render.set_plain(False)
+    lines = buf.getvalue().splitlines()
+    check("в машинном выводе версия — первая строка", lines[:1] == [f"tgx {tgx.VERSION}"])
+    check("справка под версией осталась целой", any(l.startswith("usage:") for l in lines))
+
+    # В терминале — те же панели, что и раньше, но с версией над ними.
+    buf = io.StringIO()
+    saved_console, saved_pretty, saved_play = render._CONSOLE, render.pretty, tgx_splash.play
+    render._CONSOLE = Console(file=buf, width=200, no_color=True)
+    render.pretty = lambda: True
+    tgx_splash.play = lambda *a, **k: True      # заставка в тесте только мешает
+    try:
+        tgx.overview(parser)
+    finally:
+        render._CONSOLE, render.pretty, tgx_splash.play = saved_console, saved_pretty, saved_play
+    shown = [l.strip() for l in buf.getvalue().splitlines() if l.strip()]
+    check("в терминале карта команд тоже начинается с версии",
+          shown[:1] == [f"tgx {tgx.VERSION}"])
+    check("под версией по-прежнему группы команд", any("сообщения" in l for l in shown))
+    flag = next(a for a in parser._actions if "--version" in a.option_strings)
+    check("карта и --version говорят об одной и той же версии",
+          flag.version == f"tgx {tgx.VERSION}" and shown[:1] == [flag.version])
+
+
 def collapsed_quote_regression() -> None:
     """Свёрнутая цитата (Bot API 7.4) в терминале не сворачивается, но и молчать
     о ней нельзя: иначе длинная врезка выглядит обычным текстом."""
@@ -3318,6 +3364,7 @@ async def main() -> int:
     poll_regression()
     date_entity_regression()
     command_surface_regression()
+    version_line_regression()
     collapsed_quote_regression()
     pay_regression()
     confirm_regression()
