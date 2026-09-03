@@ -4396,9 +4396,10 @@ def group_examples_hint(names: list[str]) -> str:
     transcribe --help`.
 
     Называет первую (реальную, есть у разборщика — см. `group_rows`) команду
-    группы: своей подкоманды-«примеров» у tgx нет, а `--help` — это и есть
-    документированный способ посмотреть подробности по команде (см. README:
-    «детали по команде — `tgx <команда> --help`»)."""
+    группы. У этой команды в разборщике задан `epilog` с готовыми вызовами
+    (`примеры:\\n  tgx …`, см. `build_parser`), так что `--help` печатает не
+    только список подкоманд, а и рабочий пример — а не просто «подробности»,
+    как раньше."""
     return f"примеры: tgx {names[0]} --help" if names else ""
 
 
@@ -4480,7 +4481,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--plain", action="store_true", help="disable colour/boxes; emit machine-readable output")
     sub = p.add_subparsers(dest="cmd")
 
-    ui = sub.add_parser("ui", help="полноэкранный TUI-клиент")
+    ui = sub.add_parser("ui", help="полноэкранный TUI-клиент",
+                        epilog="примеры:\n  tgx ui\n  tgx ui --demo\n",
+                        formatter_class=argparse.RawDescriptionHelpFormatter)
     ui.add_argument("--demo", action="store_true", help="демо-данные, без подключения к Telegram")
     ui.add_argument("--theme", default=os.environ.get("TGX_THEME", "tgx-night"), help="tgx-night | tgx-day | textual-dark | nord | gruvbox | catppuccin-mocha")
     ui.add_argument("--no-mark-read", action="store_true", help="не отмечать чаты прочитанными при открытии")
@@ -5404,7 +5407,9 @@ def build_parser() -> argparse.ArgumentParser:
     a_del.add_argument("--as", dest="bot", help="бот, который спросит")
     a_del.add_argument("--timeout", type=float, default=300.0)
 
-    bot = sub.add_parser("bot", help="боты: создание через BotFather, токены, посты от их имени")
+    bot = sub.add_parser("bot", help="боты: создание через BotFather, токены, посты от их имени",
+                         epilog="примеры:\n  tgx bot list\n  tgx bot create \"Мой бот\" my_new_bot\n",
+                         formatter_class=argparse.RawDescriptionHelpFormatter)
     bot_sub = bot.add_subparsers(dest="botcmd", required=True)
     bot.set_defaults(func=cmd_bot)
 
@@ -5719,10 +5724,14 @@ def build_parser() -> argparse.ArgumentParser:
     bn.add_argument("--list", action="store_true", help="показать доступные эффекты")
     bn.set_defaults(func=cmd_banner)
 
-    sub.add_parser("auth", help="log in and save local Telegram session").set_defaults(func=cmd_auth)
+    sub.add_parser("auth", help="log in and save local Telegram session",
+                   epilog="пример:\n  tgx auth\n",
+                   formatter_class=argparse.RawDescriptionHelpFormatter).set_defaults(func=cmd_auth)
     sub.add_parser("me", help="show the logged-in account").set_defaults(func=cmd_me)
 
-    d = sub.add_parser("dialogs", help="list chats, channels, groups, and users")
+    d = sub.add_parser("dialogs", help="list chats, channels, groups, and users",
+                       epilog="примеры:\n  tgx dialogs\n  tgx dialogs --limit 20\n",
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
     d.add_argument("--limit", type=int, default=50, help="0 — все чаты")
     d.add_argument("--jsonl", action="store_true")
     d.set_defaults(func=cmd_dialogs)
@@ -5749,7 +5758,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="сколько ждать ответа, секунд")
     cf.set_defaults(func=cmd_confirm)
 
-    cl = sub.add_parser("call", help="групповые звонки: управление и живая страница")
+    cl = sub.add_parser("call", help="групповые звонки: управление и живая страница",
+                        epilog="примеры:\n  tgx call start @mychat\n  tgx call info @mychat\n",
+                        formatter_class=argparse.RawDescriptionHelpFormatter)
     cl_sub = cl.add_subparsers(dest="callcmd", required=True)
 
     v_al = cl_sub.add_parser("alive", help="у кого из участников идёт звук")
@@ -5844,7 +5855,9 @@ def build_parser() -> argparse.ArgumentParser:
     c_en.add_argument("--as", dest="bot")
     c_en.add_argument("--timeout", type=float, default=300.0)
 
-    sec = sub.add_parser("security", help="сессии, приватность, сроки")
+    sec = sub.add_parser("security", help="сессии, приватность, сроки",
+                         epilog="примеры:\n  tgx security sessions\n  tgx security privacy\n",
+                         formatter_class=argparse.RawDescriptionHelpFormatter)
     sec_sub = sec.add_subparsers(dest="seccmd", required=True)
     sec.set_defaults(func=cmd_security)
 
@@ -5957,7 +5970,9 @@ def build_parser() -> argparse.ArgumentParser:
     d_ds.add_argument("--as", dest="bot")
     d_ds.add_argument("--timeout", type=float, default=300.0)
 
-    stt = sub.add_parser("stats", help="статистика каналов, групп, постов и историй")
+    stt = sub.add_parser("stats", help="статистика каналов, групп, постов и историй",
+                         epilog="примеры:\n  tgx stats channel @mychannel\n  tgx stats message @mychannel 42\n",
+                         formatter_class=argparse.RawDescriptionHelpFormatter)
     stt_sub = stt.add_subparsers(dest="statscmd", required=True)
 
     t_poll = stt_sub.add_parser("poll", help="как голосовали в опросе")
@@ -6335,7 +6350,9 @@ def build_parser() -> argparse.ArgumentParser:
     s_da = story_gate("delete-album", "удалить альбом историй")
     s_da.add_argument("id", type=int)
 
-    ct = sub.add_parser("contacts", help="адресная книга, чёрный список, поиск людей")
+    ct = sub.add_parser("contacts", help="адресная книга, чёрный список, поиск людей",
+                        epilog="примеры:\n  tgx contacts list\n  tgx contacts search \"Иван\"\n",
+                        formatter_class=argparse.RawDescriptionHelpFormatter)
     ct_sub = ct.add_subparsers(dest="contactcmd", required=True)
 
     k_ap = ct_sub.add_parser("add-phone", help="добавить по номерам")
@@ -6427,7 +6444,9 @@ def build_parser() -> argparse.ArgumentParser:
     c_im = ct_sub.add_parser("import", help="добавить по ссылке-приглашению")
     c_im.add_argument("token")
 
-    pay = sub.add_parser("pay", help="звёзды, TON и счета; оплата — только с подтверждением")
+    pay = sub.add_parser("pay", help="звёзды, TON и счета; оплата — только с подтверждением",
+                         epilog="примеры:\n  tgx pay balance\n  tgx pay history --limit 10\n",
+                         formatter_class=argparse.RawDescriptionHelpFormatter)
     pay_sub = pay.add_subparsers(dest="paycmd", required=True)
     pay.set_defaults(func=cmd_pay)
 
@@ -6782,7 +6801,9 @@ def build_parser() -> argparse.ArgumentParser:
     rich.add_argument("--silent", action="store_true")
     rich.set_defaults(func=cmd_rich)
 
-    tr = sub.add_parser("transcribe", help="расшифровать голосовое или кружок в текст")
+    tr = sub.add_parser("transcribe", help="расшифровать голосовое или кружок в текст",
+                        epilog="примеры:\n  tgx transcribe get @mychat 12345\n  tgx transcribe status\n",
+                        formatter_class=argparse.RawDescriptionHelpFormatter)
     tr_sub = tr.add_subparsers(dest="trcmd", required=True)
     tr.set_defaults(func=cmd_transcribe)
 
@@ -6801,7 +6822,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     tr_sub.add_parser("status", help="доступна ли расшифровка и сколько бесплатных осталось")
 
-    fr = sub.add_parser("forum", help="форумы и темы: создание, иконки, закрепление, порядок")
+    fr = sub.add_parser("forum", help="форумы и темы: создание, иконки, закрепление, порядок",
+                        epilog="примеры:\n  tgx forum topics @mychat\n  tgx forum create @mychat \"Обсуждение\"\n",
+                        formatter_class=argparse.RawDescriptionHelpFormatter)
     fr_sub = fr.add_subparsers(dest="forumcmd", required=True)
     fr.set_defaults(func=cmd_forum)
 
@@ -7003,7 +7026,9 @@ def build_parser() -> argparse.ArgumentParser:
     tpn.add_argument("--unpin", action="store_true")
     tpn.set_defaults(func=cmd_topic_pin)
 
-    cc = sub.add_parser("channel-create", help="создать канал, группу или группу с темами")
+    cc = sub.add_parser("channel-create", help="создать канал, группу или группу с темами",
+                        epilog="примеры:\n  tgx channel-create \"Мой канал\"\n  tgx channel-create \"Группа\" --kind group\n",
+                        formatter_class=argparse.RawDescriptionHelpFormatter)
     cc.add_argument("title")
     cc.add_argument("--kind", choices=["channel", "group", "forum"], default="channel")
     cc.add_argument("--about", default="")
@@ -7210,7 +7235,9 @@ def build_parser() -> argparse.ArgumentParser:
     cia.add_argument("user", action="append")
     cia.set_defaults(func=cmd_channel_invite_add)
 
-    ie = sub.add_parser("invite-export", help="create an invite link for a channel/supergroup")
+    ie = sub.add_parser("invite-export", help="create an invite link for a channel/supergroup",
+                        epilog="примеры:\n  tgx invite-export @mychat\n  tgx invite-export @mychat --usage-limit 10\n",
+                        formatter_class=argparse.RawDescriptionHelpFormatter)
     ie.add_argument("peer")
     ie.add_argument("--title")
     ie.add_argument("--usage-limit", type=int)
@@ -7289,7 +7316,9 @@ def build_parser() -> argparse.ArgumentParser:
     dl.add_argument("--timeout", type=float, default=300.0)
     dl.set_defaults(func=cmd_delete)
 
-    h = sub.add_parser("history", help="show messages from a peer")
+    h = sub.add_parser("history", help="show messages from a peer",
+                       epilog="примеры:\n  tgx history @mychat\n  tgx history @mychat --search \"привет\"\n",
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
     h.add_argument("peer", help="@username, phone, id, or part of dialog title")
     h.add_argument("--limit", type=int, default=20)
     h.add_argument("--search")

@@ -1336,7 +1336,10 @@ def group_examples_hint_regression() -> None:
     """У шапки каждой группы, помимо числа команд, есть подсказка, какой
     командой посмотреть примеры этой группы — иначе видно, сколько в группе
     команд, но не видно, с чего начать. Подсказка называет настоящую команду
-    группы, а не выдуманный синтаксис, и стоит в обеих ветках вывода."""
+    группы и стоит в обеих ветках вывода. Мало того, что команда существует:
+    её --help должен и правда печатать пример вызова, а не только строку
+    usage — раньше `--help` нигде в tgx примеров не показывал, и подсказка на
+    самом деле никуда не вела."""
     import argparse
     import contextlib
     import io
@@ -1352,6 +1355,7 @@ def group_examples_hint_regression() -> None:
     parser = tgx.build_parser()
     helps = tgx.subcommand_help(parser)
     rows = [(title, [n for n in names if n in helps]) for title, names in tgx.GROUPS]
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
 
     def plain_text() -> str:
         buf = io.StringIO()
@@ -1383,8 +1387,23 @@ def group_examples_hint_regression() -> None:
         check(f"в машинном выводе у группы «{title}» есть подсказка про примеры", hint in plain)
         check(f"в терминале у панели «{title}» та же подсказка", hint in rich_out)
 
-    # Подсказка не выдумана: названная в ней команда действительно существует
-    # у разборщика и правда печатает подробности по группе.
+    # Подсказка не выдумана: у названной в ней команды в разборщике задан
+    # epilog с рабочим вызовом, и он реально доезжает до отрисованной справки
+    # — «usage:» само по себе не в счёт, «--help» тут никогда примеров не
+    # показывал (это и была причина отклонения прошлой попытки).
+    for title, names in rows:
+        if not names:
+            continue
+        cmd_parser = sub.choices[names[0]]
+        epilog = cmd_parser.epilog or ""
+        check(f"«{title}»: у справки «{names[0]}» задан пример вызова", "пример" in epilog)
+        check(f"«{title}»: пример называет рабочий вызов «tgx {names[0]} …»",
+              f"tgx {names[0]}" in epilog)
+        check(f"«{title}»: пример доезжает до отрисованного --help",
+              "пример" in cmd_parser.format_help())
+
+    # И на живом процессе: команда из первой группы правда печатает пример,
+    # а не только строку usage.
     first_title, first_names = next((t, n) for t, n in rows if n)
     probe = subprocess.run(
         [sys.executable, "tgx.py", first_names[0], "--help"],
@@ -1392,6 +1411,8 @@ def group_examples_hint_regression() -> None:
     )
     check("названная в подсказке команда реально запускается",
           probe.returncode == 0 and probe.stdout.strip().startswith("usage:"))
+    check("и печатает пример вызова, а не только usage/список подкоманд",
+          "пример" in probe.stdout and f"tgx {first_names[0]}" in probe.stdout)
 
 
 def collapsed_quote_regression() -> None:
