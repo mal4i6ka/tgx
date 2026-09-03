@@ -1251,6 +1251,87 @@ def command_count_line_regression() -> None:
           f"{total + 1} команд" in grown_plain and grown_rich == grown_plain)
 
 
+def group_count_regression() -> None:
+    """У каждой группы в карте команд рядом с названием стоит число её команд:
+    по шапке видно, насколько велика группа, ещё до чтения списка. Цифра
+    считается по тем именам группы, что нашлись у разборщика, и обе ветки вывода
+    (терминал и конвейер) показывают одни и те же группы с одними числами."""
+    import argparse
+    import contextlib
+    import io
+
+    from rich.console import Console
+
+    import tgx
+    import tgx_render as render
+    import tgx_splash
+
+    parser = tgx.build_parser()
+
+    def plain_text() -> str:
+        buf = io.StringIO()
+        render.set_plain(True)
+        try:
+            with contextlib.redirect_stdout(buf):
+                tgx.overview(parser)
+        finally:
+            render.set_plain(False)
+        return buf.getvalue()
+
+    def rich_text() -> str:
+        buf = io.StringIO()
+        saved = render._CONSOLE, render.pretty, tgx_splash.play
+        render._CONSOLE = Console(file=buf, width=200, no_color=True)
+        render.pretty = lambda: True
+        tgx_splash.play = lambda *a, **k: True      # заставка в тесте только мешает
+        try:
+            tgx.overview(parser)
+        finally:
+            render._CONSOLE, render.pretty, tgx_splash.play = saved
+        return buf.getvalue()
+
+    def counts() -> list[tuple[str, int]]:
+        helps = tgx.subcommand_help(parser)
+        return [(title, len([n for n in names if n in helps])) for title, names in tgx.GROUPS]
+
+    plain, rich_out = plain_text(), rich_text()
+    for title, size in counts():
+        # В конвейере — строка группы, в терминале — заголовок панели; в обоих
+        # случаях название и число стоят рядом, разделённые той же точкой, что и
+        # в первой строке карты.
+        head = f"{title} · {size} "
+        check(f"в машинном выводе у группы «{title}» стоит её число команд", head in plain)
+        check(f"в терминале у панели «{title}» стоит то же число", head in rich_out)
+
+    check("в машинном выводе справка argparse осталась целой",
+          any(l.startswith("usage:") for l in plain.splitlines()))
+
+    # Цифра не вписана руками: команда, доехавшая до группы, меняет её шапку.
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    sub.add_parser("zzz-group-probe", help="проба")
+    saved_groups = tgx.GROUPS
+    tgx.GROUPS = [(t, [*names, "zzz-group-probe"] if t == "голос" else names)
+                  for t, names in saved_groups]
+    try:
+        grown_plain, grown_rich = plain_text(), rich_text()
+    finally:
+        tgx.GROUPS = saved_groups
+    was = dict(counts())["голос"]
+    check("число команд группы считается по разборщику, а не захардкожено",
+          f"голос · {was + 1} " in grown_plain and f"голос · {was + 1} " in grown_rich)
+
+    # Имя из карты, которого у разборщика нет, в число не попадает: иначе шапка
+    # обещает команду, которой в панели не будет.
+    tgx.GROUPS = [(t, [*names, "zzz-not-a-command"] if t == "голос" else names)
+                  for t, names in saved_groups]
+    try:
+        ghost_plain, ghost_rich = plain_text(), rich_text()
+    finally:
+        tgx.GROUPS = saved_groups
+    check("несуществующая команда не раздувает число в шапке группы",
+          f"голос · {was} " in ghost_plain and f"голос · {was} " in ghost_rich)
+
+
 def collapsed_quote_regression() -> None:
     """Свёрнутая цитата (Bot API 7.4) в терминале не сворачивается, но и молчать
     о ней нельзя: иначе длинная врезка выглядит обычным текстом."""
@@ -3420,6 +3501,7 @@ async def main() -> int:
     command_surface_regression()
     version_line_regression()
     command_count_line_regression()
+    group_count_regression()
     collapsed_quote_regression()
     pay_regression()
     confirm_regression()

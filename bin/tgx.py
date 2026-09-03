@@ -4352,6 +4352,19 @@ def subcommand_help(parser: argparse.ArgumentParser) -> dict[str, str]:
     return {}
 
 
+def plural_commands(total: int) -> str:
+    """`2` -> `2 команды`. Одно место на всю карту: и первая строка, и шапки
+    групп склоняют слово одинаково."""
+    tail, hundred = total % 10, total % 100
+    if tail == 1 and hundred != 11:
+        word = "команда"
+    elif tail in (2, 3, 4) and hundred not in (12, 13, 14):
+        word = "команды"
+    else:
+        word = "команд"
+    return f"{total} {word}"
+
+
 def command_note(parser: argparse.ArgumentParser) -> str:
     """Хвост первой строки карты команд: `· 105 команд`.
 
@@ -4360,15 +4373,22 @@ def command_note(parser: argparse.ArgumentParser) -> str:
     инструмент целиком. Считается здесь один раз на обе ветки вывода, чтобы
     терминал и конвейер не разошлись в цифре.
     """
-    total = len(subcommand_help(parser))
-    tail, hundred = total % 10, total % 100
-    if tail == 1 and hundred != 11:
-        word = "команда"
-    elif tail in (2, 3, 4) and hundred not in (12, 13, 14):
-        word = "команды"
-    else:
-        word = "команд"
-    return f"· {total} {word}"
+    return f"· {plural_commands(len(subcommand_help(parser)))}"
+
+
+def group_rows(helps: dict[str, str]) -> list[tuple[str, list[str]]]:
+    """Группы карты команд, очищенные от имён, которых у разборщика нет.
+
+    Считать по сырой карте `GROUPS` нельзя: шапка тогда пообещает команду,
+    которой в панели не будет. Отсюда же берут список обе ветки вывода, чтобы
+    терминал и конвейер показывали одни и те же группы с одними числами.
+    """
+    return [(title, [n for n in names if n in helps]) for title, names in GROUPS]
+
+
+def group_note(title: str, names: list[str]) -> str:
+    """Шапка группы: название и число команд в ней — `голос · 1 команда`."""
+    return f"{title} · {plural_commands(len(names))}"
 
 
 def overview(parser: argparse.ArgumentParser) -> None:
@@ -4380,8 +4400,13 @@ def overview(parser: argparse.ArgumentParser) -> None:
     """
     helps = subcommand_help(parser)
     note = command_note(parser)
+    rows = [(title, names) for title, names in group_rows(helps) if names]
     if not render.pretty():
         print(f"tgx {VERSION} {note}")
+        # Панелей в конвейере нет, но группы и их размер — те же: строкой на
+        # группу, чтобы `tgx | grep` видел ту же карту, что и терминал.
+        for title, names in rows:
+            print(f"{group_note(title, names)}: {', '.join(names)}")
         parser.print_help()
         return
     if not tgx_splash.play(os.environ.get("TGX_EFFECT") or "beams"):
@@ -4399,15 +4424,14 @@ def overview(parser: argparse.ArgumentParser) -> None:
     console.print(head)
     console.print()
     panels = []
-    for title, names in GROUPS:
+    for title, names in rows:
         grid = Table.grid(padding=(0, 2))
         grid.add_column(style=f"bold {render.ACCENT}", no_wrap=True)
         grid.add_column(style=render.PALETTE["text"])
         for name in names:
-            if name in helps:
-                text = helps[name]
-                grid.add_row(name, Text(text[:49] + "…" if len(text) > 50 else text, style=render.PALETTE["muted"]))
-        panels.append(Panel(grid, title=Text(f" {title} ", style=f"bold {render.ACCENT}"), title_align="left", border_style="#2C3E50", padding=(0, 1)))
+            text = helps[name]
+            grid.add_row(name, Text(text[:49] + "…" if len(text) > 50 else text, style=render.PALETTE["muted"]))
+        panels.append(Panel(grid, title=Text(f" {group_note(title, names)} ", style=f"bold {render.ACCENT}"), title_align="left", border_style="#2C3E50", padding=(0, 1)))
     console.print(Columns(panels, equal=False, expand=False))
     hint = Text()
     hint.append("  tgx ui", style=f"bold {render.ACCENT}")
