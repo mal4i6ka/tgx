@@ -1175,7 +1175,8 @@ def version_line_regression() -> None:
     finally:
         render.set_plain(False)
     lines = buf.getvalue().splitlines()
-    check("в машинном выводе версия — первая строка", lines[:1] == [f"tgx {tgx.VERSION}"])
+    check("в машинном выводе версия — первая строка",
+          len(lines) > 0 and lines[0].startswith(f"tgx {tgx.VERSION} "))
     check("справка под версией осталась целой", any(l.startswith("usage:") for l in lines))
 
     # В терминале — те же панели, что и раньше, но с версией над ними.
@@ -1190,11 +1191,64 @@ def version_line_regression() -> None:
         render._CONSOLE, render.pretty, tgx_splash.play = saved_console, saved_pretty, saved_play
     shown = [l.strip() for l in buf.getvalue().splitlines() if l.strip()]
     check("в терминале карта команд тоже начинается с версии",
-          shown[:1] == [f"tgx {tgx.VERSION}"])
+          bool(shown) and shown[0].startswith(f"tgx {tgx.VERSION} "))
     check("под версией по-прежнему группы команд", any("сообщения" in l for l in shown))
     flag = next(a for a in parser._actions if "--version" in a.option_strings)
     check("карта и --version говорят об одной и той же версии",
-          flag.version == f"tgx {tgx.VERSION}" and shown[:1] == [flag.version])
+          flag.version == f"tgx {tgx.VERSION}" and bool(shown) and shown[0].startswith(flag.version))
+
+
+def command_count_line_regression() -> None:
+    """Рядом с версией в первой строке карты стоит общее число команд — по одному
+    запуску `tgx` видно масштаб инструмента. Цифра считается по самому разборщику,
+    поэтому новая команда меняет шапку сама, и обе ветки вывода (терминал и
+    конвейер) показывают одно и то же число."""
+    import argparse
+    import contextlib
+    import io
+
+    from rich.console import Console
+
+    import tgx
+    import tgx_render as render
+    import tgx_splash
+
+    parser = tgx.build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+    total = len(sub.choices)
+
+    def first_line_plain() -> str:
+        buf = io.StringIO()
+        render.set_plain(True)
+        try:
+            with contextlib.redirect_stdout(buf):
+                tgx.overview(parser)
+        finally:
+            render.set_plain(False)
+        return buf.getvalue().splitlines()[0]
+
+    def first_line_rich() -> str:
+        buf = io.StringIO()
+        saved = render._CONSOLE, render.pretty, tgx_splash.play
+        render._CONSOLE = Console(file=buf, width=200, no_color=True)
+        render.pretty = lambda: True
+        tgx_splash.play = lambda *a, **k: True
+        try:
+            tgx.overview(parser)
+        finally:
+            render._CONSOLE, render.pretty, tgx_splash.play = saved
+        return next(l.strip() for l in buf.getvalue().splitlines() if l.strip())
+
+    plain, rich_line = first_line_plain(), first_line_rich()
+    check("в машинном выводе рядом с версией стоит число команд",
+          plain.startswith(f"tgx {tgx.VERSION}") and f"{total} команд" in plain)
+    check("в терминале первая строка карты говорит то же самое", rich_line == plain)
+
+    # Цифра не вписана руками: новая команда у разборщика — новая цифра в шапке.
+    sub.add_parser("zzz-smoke-probe", help="проба")
+    grown_plain, grown_rich = first_line_plain(), first_line_rich()
+    check("число команд считается по разборщику, а не захардкожено",
+          f"{total + 1} команд" in grown_plain and grown_rich == grown_plain)
 
 
 def collapsed_quote_regression() -> None:
@@ -3365,6 +3419,7 @@ async def main() -> int:
     date_entity_regression()
     command_surface_regression()
     version_line_regression()
+    command_count_line_regression()
     collapsed_quote_regression()
     pay_regression()
     confirm_regression()

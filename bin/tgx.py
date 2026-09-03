@@ -4352,15 +4352,36 @@ def subcommand_help(parser: argparse.ArgumentParser) -> dict[str, str]:
     return {}
 
 
+def command_note(parser: argparse.ArgumentParser) -> str:
+    """Хвост первой строки карты команд: `· 105 команд`.
+
+    Число берётся у самого разборщика, а не у карты `GROUPS`: карта сводит в
+    панели только самое ходовое, а «сколько всего умеет tgx» — вопрос про
+    инструмент целиком. Считается здесь один раз на обе ветки вывода, чтобы
+    терминал и конвейер не разошлись в цифре.
+    """
+    total = len(subcommand_help(parser))
+    tail, hundred = total % 10, total % 100
+    if tail == 1 and hundred != 11:
+        word = "команда"
+    elif tail in (2, 3, 4) and hundred not in (12, 13, 14):
+        word = "команды"
+    else:
+        word = "команд"
+    return f"· {total} {word}"
+
+
 def overview(parser: argparse.ArgumentParser) -> None:
     """The no-arguments landing screen: banner plus a grouped command map.
 
-    Первой строкой карты идёт версия — запуск без аргументов чаще всего и есть
-    вопрос «что у меня стоит», и ради ответа не должно требоваться `--version`.
+    Первой строкой карты идут версия и общее число команд — запуск без
+    аргументов чаще всего и есть вопрос «что у меня стоит и что оно умеет», и
+    ради ответа не должно требоваться ни `--version`, ни счёт строк справки.
     """
     helps = subcommand_help(parser)
+    note = command_note(parser)
     if not render.pretty():
-        print(f"tgx {VERSION}")
+        print(f"tgx {VERSION} {note}")
         parser.print_help()
         return
     if not tgx_splash.play(os.environ.get("TGX_EFFECT") or "beams"):
@@ -4374,6 +4395,7 @@ def overview(parser: argparse.ArgumentParser) -> None:
     head = Text()
     head.append("  tgx ", style=f"bold {render.ACCENT}")
     head.append(VERSION, style=render.PALETTE["muted"])
+    head.append(f" {note}", style=render.PALETTE["muted"])
     console.print(head)
     console.print()
     panels = []
