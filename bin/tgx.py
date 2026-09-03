@@ -4391,6 +4391,17 @@ def group_note(title: str, names: list[str]) -> str:
     return f"{title} · {plural_commands(len(names))}"
 
 
+def group_examples_hint(names: list[str]) -> str:
+    """Подсказка, какой командой посмотреть примеры группы — `примеры: tgx
+    transcribe --help`.
+
+    Называет первую (реальную, есть у разборщика — см. `group_rows`) команду
+    группы: своей подкоманды-«примеров» у tgx нет, а `--help` — это и есть
+    документированный способ посмотреть подробности по команде (см. README:
+    «детали по команде — `tgx <команда> --help`»)."""
+    return f"примеры: tgx {names[0]} --help" if names else ""
+
+
 def overview(parser: argparse.ArgumentParser) -> None:
     """The no-arguments landing screen: banner plus a grouped command map.
 
@@ -4406,7 +4417,7 @@ def overview(parser: argparse.ArgumentParser) -> None:
         # Панелей в конвейере нет, но группы и их размер — те же: строкой на
         # группу, чтобы `tgx | grep` видел ту же карту, что и терминал.
         for title, names in rows:
-            print(f"{group_note(title, names)}: {', '.join(names)}")
+            print(f"{group_note(title, names)}: {', '.join(names)} · {group_examples_hint(names)}")
         parser.print_help()
         return
     if not tgx_splash.play(os.environ.get("TGX_EFFECT") or "beams"):
@@ -4431,7 +4442,11 @@ def overview(parser: argparse.ArgumentParser) -> None:
         for name in names:
             text = helps[name]
             grid.add_row(name, Text(text[:49] + "…" if len(text) > 50 else text, style=render.PALETTE["muted"]))
-        panels.append(Panel(grid, title=Text(f" {group_note(title, names)} ", style=f"bold {render.ACCENT}"), title_align="left", border_style="#2C3E50", padding=(0, 1)))
+        panels.append(Panel(
+            grid,
+            title=Text(f" {group_note(title, names)} ", style=f"bold {render.ACCENT}"), title_align="left",
+            subtitle=Text(f" {group_examples_hint(names)} ", style=render.PALETTE["muted"]), subtitle_align="left",
+            border_style="#2C3E50", padding=(0, 1)))
     console.print(Columns(panels, equal=False, expand=False))
     hint = Text()
     hint.append("  tgx ui", style=f"bold {render.ACCENT}")

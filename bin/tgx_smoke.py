@@ -1332,6 +1332,68 @@ def group_count_regression() -> None:
           f"голос · {was} " in ghost_plain and f"голос · {was} " in ghost_rich)
 
 
+def group_examples_hint_regression() -> None:
+    """У шапки каждой группы, помимо числа команд, есть подсказка, какой
+    командой посмотреть примеры этой группы — иначе видно, сколько в группе
+    команд, но не видно, с чего начать. Подсказка называет настоящую команду
+    группы, а не выдуманный синтаксис, и стоит в обеих ветках вывода."""
+    import argparse
+    import contextlib
+    import io
+    import subprocess
+    import sys
+
+    from rich.console import Console
+
+    import tgx
+    import tgx_render as render
+    import tgx_splash
+
+    parser = tgx.build_parser()
+    helps = tgx.subcommand_help(parser)
+    rows = [(title, [n for n in names if n in helps]) for title, names in tgx.GROUPS]
+
+    def plain_text() -> str:
+        buf = io.StringIO()
+        render.set_plain(True)
+        try:
+            with contextlib.redirect_stdout(buf):
+                tgx.overview(parser)
+        finally:
+            render.set_plain(False)
+        return buf.getvalue()
+
+    def rich_text() -> str:
+        buf = io.StringIO()
+        saved = render._CONSOLE, render.pretty, tgx_splash.play
+        render._CONSOLE = Console(file=buf, width=200, no_color=True)
+        render.pretty = lambda: True
+        tgx_splash.play = lambda *a, **k: True      # заставка в тесте только мешает
+        try:
+            tgx.overview(parser)
+        finally:
+            render._CONSOLE, render.pretty, tgx_splash.play = saved
+        return buf.getvalue()
+
+    plain, rich_out = plain_text(), rich_text()
+    for title, names in rows:
+        if not names:
+            continue
+        hint = f"tgx {names[0]} --help"
+        check(f"в машинном выводе у группы «{title}» есть подсказка про примеры", hint in plain)
+        check(f"в терминале у панели «{title}» та же подсказка", hint in rich_out)
+
+    # Подсказка не выдумана: названная в ней команда действительно существует
+    # у разборщика и правда печатает подробности по группе.
+    first_title, first_names = next((t, n) for t, n in rows if n)
+    probe = subprocess.run(
+        [sys.executable, "tgx.py", first_names[0], "--help"],
+        cwd=Path(__file__).resolve().parent, capture_output=True, text=True,
+    )
+    check("названная в подсказке команда реально запускается",
+          probe.returncode == 0 and probe.stdout.strip().startswith("usage:"))
+
+
 def collapsed_quote_regression() -> None:
     """Свёрнутая цитата (Bot API 7.4) в терминале не сворачивается, но и молчать
     о ней нельзя: иначе длинная врезка выглядит обычным текстом."""
@@ -3502,6 +3564,7 @@ async def main() -> int:
     version_line_regression()
     command_count_line_regression()
     group_count_regression()
+    group_examples_hint_regression()
     collapsed_quote_regression()
     pay_regression()
     confirm_regression()
