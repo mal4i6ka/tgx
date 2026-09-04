@@ -323,6 +323,16 @@ async def cmd_me(args: argparse.Namespace) -> None:
         await client.disconnect()
 
 
+async def cmd_config(args: argparse.Namespace) -> None:
+    """Где tgx хранит api_id/api_hash и лежит ли этот файл на диске.
+
+    Не трогает сеть и не требует логина — `load_config()`/`save_config()`
+    читают и пишут тот же `CONFIG`, так что ответ здесь и есть источник
+    правды для остальных команд.
+    """
+    render.emit({"путь": str(CONFIG), "существует": CONFIG.exists()})
+
+
 async def cmd_dialogs(args: argparse.Namespace) -> None:
     client = await make_client()
     try:
@@ -4335,7 +4345,7 @@ GROUPS = [
     ("люди", ["contacts", "stories"]),
     ("звонки", ["call"]),
     ("безопасность", ["security"]),
-    ("аккаунт", ["auth", "me", "profile", "profile-get", "profile-edit", "profile-photo-set", "profile-photos", "profile-photo-delete"]),
+    ("аккаунт", ["auth", "me", "config", "profile", "profile-get", "profile-edit", "profile-photo-set", "profile-photos", "profile-photo-delete"]),
     ("чаты и папки", ["dialogs", "folders", "folder-upsert"]),
     ("сообщения", ["history", "search", "send", "edit", "delete", "forward", "react", "pin", "pinned", "todo", "todo-check", "todo-add", "format", "export", "message-get", "message-click"]),
     ("каналы и статистика", ["stats", "stickers"]),
@@ -5728,6 +5738,7 @@ def build_parser() -> argparse.ArgumentParser:
                    epilog="пример:\n  tgx auth\n",
                    formatter_class=argparse.RawDescriptionHelpFormatter).set_defaults(func=cmd_auth)
     sub.add_parser("me", help="show the logged-in account").set_defaults(func=cmd_me)
+    sub.add_parser("config", help="путь к файлу настроек и есть ли он на диске").set_defaults(func=cmd_config)
 
     d = sub.add_parser("dialogs", help="list chats, channels, groups, and users",
                        epilog="примеры:\n  tgx dialogs\n  tgx dialogs --limit 20\n",

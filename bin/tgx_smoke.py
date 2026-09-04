@@ -1415,6 +1415,47 @@ def group_examples_hint_regression() -> None:
           "пример" in probe.stdout and f"tgx {first_names[0]}" in probe.stdout)
 
 
+async def config_command_regression() -> None:
+    """`tgx config` называет путь к файлу настроек и прямо говорит, есть ли он
+    на диске — до этой команды расположение `config.json` можно было узнать
+    только чтением исходников. Обе ветки вывода должны сойтись на одном и том
+    же пути и одном и том же состоянии `.exists()`."""
+    import contextlib
+    import io
+
+    from rich.console import Console
+
+    import tgx
+    import tgx_render as render
+
+    path = str(tgx.CONFIG)
+    exists = tgx.CONFIG.exists()
+
+    buf = io.StringIO()
+    render.set_plain(True)
+    try:
+        with contextlib.redirect_stdout(buf):
+            await tgx.cmd_config(None)
+    finally:
+        render.set_plain(False)
+    payload = json.loads(buf.getvalue())
+    check("в машинном выводе — путь к файлу настроек", payload.get("путь") == path)
+    check("в машинном выводе — реальное состояние файла на диске", payload.get("существует") is exists)
+
+    buf = io.StringIO()
+    saved_console, saved_pretty = render._CONSOLE, render.pretty
+    render._CONSOLE = Console(file=buf, width=200, no_color=True)
+    render.pretty = lambda: True
+    try:
+        await tgx.cmd_config(None)
+    finally:
+        render._CONSOLE, render.pretty = saved_console, saved_pretty
+    shown = buf.getvalue()
+    check("в терминале тоже виден путь к файлу настроек", path in shown)
+    check("в терминале явно видно, есть ли файл",
+          ("yes" in shown) if exists else ("no" in shown))
+
+
 def collapsed_quote_regression() -> None:
     """Свёрнутая цитата (Bot API 7.4) в терминале не сворачивается, но и молчать
     о ней нельзя: иначе длинная врезка выглядит обычным текстом."""
@@ -3586,6 +3627,7 @@ async def main() -> int:
     command_count_line_regression()
     group_count_regression()
     group_examples_hint_regression()
+    await config_command_regression()
     collapsed_quote_regression()
     pay_regression()
     confirm_regression()
