@@ -1415,6 +1415,51 @@ def group_examples_hint_regression() -> None:
           "пример" in probe.stdout and f"tgx {first_names[0]}" in probe.stdout)
 
 
+def settings_path_line_regression() -> None:
+    """Карта команд заканчивается одной строкой с путём к файлу настроек — иначе
+    расположение `config.json` можно узнать только отдельной командой `tgx
+    config` или чтением исходников. Путь — тот же `tgx.CONFIG`, что и `tgx
+    config` называет источником правды, и строка стоит последней в обеих
+    ветках вывода (терминал и конвейер)."""
+    import contextlib
+    import io
+
+    from rich.console import Console
+
+    import tgx
+    import tgx_render as render
+    import tgx_splash
+
+    parser = tgx.build_parser()
+    expected = f"настройки: {tgx.CONFIG}"
+
+    buf = io.StringIO()
+    render.set_plain(True)
+    try:
+        with contextlib.redirect_stdout(buf):
+            tgx.overview(parser)
+    finally:
+        render.set_plain(False)
+    lines = [l for l in buf.getvalue().splitlines() if l.strip()]
+    check("в машинном выводе последняя строка карты — путь к настройкам",
+          bool(lines) and lines[-1] == expected)
+
+    buf = io.StringIO()
+    saved = render._CONSOLE, render.pretty, tgx_splash.play
+    render._CONSOLE = Console(file=buf, width=200, no_color=True)
+    render.pretty = lambda: True
+    tgx_splash.play = lambda *a, **k: True      # заставка в тесте только мешает
+    try:
+        tgx.overview(parser)
+    finally:
+        render._CONSOLE, render.pretty, tgx_splash.play = saved
+    shown = [l.strip() for l in buf.getvalue().splitlines() if l.strip()]
+    check("в терминале последняя строка карты — тот же путь к настройкам",
+          bool(shown) and shown[-1] == expected)
+    check("путь в карте совпадает с тем, что называет `tgx config`",
+          expected == f"настройки: {tgx.CONFIG}")
+
+
 async def config_command_regression() -> None:
     """`tgx config` называет путь к файлу настроек, прямо говорит, есть ли он
     на диске, и — если да — когда он менялся в последний раз. До этой команды
@@ -3641,6 +3686,7 @@ async def main() -> int:
     command_count_line_regression()
     group_count_regression()
     group_examples_hint_regression()
+    settings_path_line_regression()
     await config_command_regression()
     collapsed_quote_regression()
     pay_regression()

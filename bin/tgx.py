@@ -4419,6 +4419,16 @@ def group_examples_hint(names: list[str]) -> str:
     return f"примеры: tgx {names[0]} --help" if names else ""
 
 
+def config_note() -> str:
+    """Замыкающая строка карты команд — путь к файлу настроек: `настройки:
+    /home/user/.local/share/tgx/config.json`.
+
+    Тот же `CONFIG`, что и `tgx config` называет источником правды: не нужна
+    отдельная команда, чтобы просто узнать, где искать файл на диске.
+    """
+    return f"настройки: {CONFIG}"
+
+
 def overview(parser: argparse.ArgumentParser) -> None:
     """The no-arguments landing screen: banner plus a grouped command map.
 
@@ -4436,6 +4446,7 @@ def overview(parser: argparse.ArgumentParser) -> None:
         for title, names in rows:
             print(f"{group_note(title, names)}: {', '.join(names)} · {group_examples_hint(names)}")
         parser.print_help()
+        print(config_note())
         return
     if not tgx_splash.play(os.environ.get("TGX_EFFECT") or "beams"):
         tgx_splash.static()
@@ -4472,6 +4483,7 @@ def overview(parser: argparse.ArgumentParser) -> None:
     hint.append("   демо без входа в аккаунт", style=render.PALETTE["muted"])
     console.print(hint)
     console.print(Text("  tgx <команда> --help — подробности по любой команде\n", style=render.PALETTE["muted"]))
+    console.print(Text(f"  {config_note()}\n", style=render.PALETTE["muted"]))
 
 
 MEDIA_FILTERS = {
