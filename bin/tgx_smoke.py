@@ -1415,12 +1415,14 @@ def group_examples_hint_regression() -> None:
           "пример" in probe.stdout and f"tgx {first_names[0]}" in probe.stdout)
 
 
-def settings_path_line_regression() -> None:
+async def settings_path_line_regression() -> None:
     """Карта команд заканчивается одной строкой с путём к файлу настроек — иначе
     расположение `config.json` можно узнать только отдельной командой `tgx
-    config` или чтением исходников. Путь — тот же `tgx.CONFIG`, что и `tgx
-    config` называет источником правды, и строка стоит последней в обеих
-    ветках вывода (терминал и конвейер)."""
+    config` или чтением исходников. Путь сверяем не с тем же `tgx.CONFIG`,
+    переписанным ещё раз, а с тем, что и правда печатает сама команда `tgx
+    config` — иначе проверка ничего не гарантирует и не заметит, если карта и
+    команда когда-нибудь разойдутся. Строка стоит последней в обеих ветках
+    вывода (терминал и конвейер)."""
     import contextlib
     import io
 
@@ -1431,7 +1433,18 @@ def settings_path_line_regression() -> None:
     import tgx_splash
 
     parser = tgx.build_parser()
-    expected = f"настройки: {tgx.CONFIG}"
+
+    # Настоящий вызов `tgx config`, как в config_command_regression, — не
+    # повторное чтение tgx.CONFIG, а то, что команда реально отвечает.
+    config_buf = io.StringIO()
+    render.set_plain(True)
+    try:
+        with contextlib.redirect_stdout(config_buf):
+            await tgx.cmd_config(None)
+    finally:
+        render.set_plain(False)
+    config_path = json.loads(config_buf.getvalue())["путь"]
+    expected = f"настройки: {config_path}"
 
     buf = io.StringIO()
     render.set_plain(True)
@@ -1456,8 +1469,6 @@ def settings_path_line_regression() -> None:
     shown = [l.strip() for l in buf.getvalue().splitlines() if l.strip()]
     check("в терминале последняя строка карты — тот же путь к настройкам",
           bool(shown) and shown[-1] == expected)
-    check("путь в карте совпадает с тем, что называет `tgx config`",
-          expected == f"настройки: {tgx.CONFIG}")
 
 
 async def config_command_regression() -> None:
@@ -3686,7 +3697,7 @@ async def main() -> int:
     command_count_line_regression()
     group_count_regression()
     group_examples_hint_regression()
-    settings_path_line_regression()
+    await settings_path_line_regression()
     await config_command_regression()
     collapsed_quote_regression()
     pay_regression()
