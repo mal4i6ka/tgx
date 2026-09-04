@@ -1416,7 +1416,8 @@ def group_examples_hint_regression() -> None:
 
 
 async def settings_path_line_regression() -> None:
-    """Карта команд заканчивается одной строкой с путём и размером файла настроек — иначе
+    """Карта команд заканчивается одной строкой с путём, размером и местным временем
+    изменения файла настроек без секунд — иначе
     расположение `config.json` можно узнать только отдельной командой `tgx
     config` или чтением исходников. Путь сверяем не с тем же `tgx.CONFIG`,
     переписанным ещё раз, а с тем, что и правда печатает сама команда `tgx
@@ -1425,6 +1426,7 @@ async def settings_path_line_regression() -> None:
     вывода (терминал и конвейер)."""
     import contextlib
     import io
+    from datetime import datetime
 
     from rich.console import Console
 
@@ -1436,6 +1438,8 @@ async def settings_path_line_regression() -> None:
     original_config = tgx.CONFIG
     config_path = OUT / "overview-config.json"
     config_path.write_bytes(b"x" * 1536)
+    modified_at = 1_700_000_000
+    os.utime(config_path, (modified_at, modified_at))
     tgx.CONFIG = config_path
 
     # Настоящий вызов `tgx config`, как в config_command_regression, — не
@@ -1448,7 +1452,8 @@ async def settings_path_line_regression() -> None:
     finally:
         render.set_plain(False)
     reported_path = json.loads(config_buf.getvalue())["путь"]
-    expected = f"настройки: {reported_path} · 1.5 КБ"
+    changed = datetime.fromtimestamp(modified_at).strftime("%d.%m.%Y %H:%M")
+    expected = f"настройки: {reported_path} · 1.5 КБ · изменён {changed}"
 
     buf = io.StringIO()
     render.set_plain(True)
@@ -1458,7 +1463,7 @@ async def settings_path_line_regression() -> None:
     finally:
         render.set_plain(False)
     lines = [l for l in buf.getvalue().splitlines() if l.strip()]
-    check("в машинном выводе последняя строка карты — путь и размер настроек",
+    check("в машинном выводе последняя строка карты — путь, размер и время настроек",
           bool(lines) and lines[-1] == expected)
 
     buf = io.StringIO()
@@ -1472,7 +1477,7 @@ async def settings_path_line_regression() -> None:
         render._CONSOLE, render.pretty, tgx_splash.play = saved
         tgx.CONFIG = original_config
     shown = [l.strip() for l in buf.getvalue().splitlines() if l.strip()]
-    check("в терминале последняя строка карты — те же путь и размер настроек",
+    check("в терминале последняя строка карты — те же путь, размер и время настроек",
           bool(shown) and shown[-1] == expected)
 
 

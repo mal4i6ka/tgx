@@ -4420,16 +4420,18 @@ def group_examples_hint(names: list[str]) -> str:
 
 
 def config_note() -> str:
-    """Замыкающая строка карты команд — путь и вес файла настроек: `настройки:
-    /home/user/.local/share/tgx/config.json · 1.5 КБ`.
+    """Замыкающая строка карты команд — путь, вес и местное время изменения
+    файла настроек: `настройки: /home/user/.local/share/tgx/config.json · 1.5
+    КБ · изменён 14.11.2023 22:13`.
 
     Тот же `CONFIG`, что и `tgx config` называет источником правды: не нужна
     отдельная команда, чтобы просто узнать, где искать файл на диске.
     """
     note = f"настройки: {CONFIG}"
     if CONFIG.exists():
-        size = CONFIG.stat().st_size
-        note += f" · {_size(size) or '0 Б'}"
+        stat = CONFIG.stat()
+        changed = datetime.fromtimestamp(stat.st_mtime).strftime("%d.%m.%Y %H:%M")
+        note += f" · {_size(stat.st_size) or '0 Б'} · изменён {changed}"
     return note
 
 
