@@ -324,13 +324,19 @@ async def cmd_me(args: argparse.Namespace) -> None:
 
 
 async def cmd_config(args: argparse.Namespace) -> None:
-    """Где tgx хранит api_id/api_hash и лежит ли этот файл на диске.
+    """Где tgx хранит api_id/api_hash, лежит ли этот файл на диске и когда он
+    менялся в последний раз.
 
     Не трогает сеть и не требует логина — `load_config()`/`save_config()`
     читают и пишут тот же `CONFIG`, так что ответ здесь и есть источник
     правды для остальных команд.
     """
-    render.emit({"путь": str(CONFIG), "существует": CONFIG.exists()})
+    exists = CONFIG.exists()
+    payload: dict[str, Any] = {"путь": str(CONFIG), "существует": exists}
+    if exists:
+        mtime = datetime.fromtimestamp(CONFIG.stat().st_mtime)
+        payload["изменён"] = mtime.strftime("%d.%m.%Y %H:%M:%S")
+    render.emit(payload)
 
 
 async def cmd_dialogs(args: argparse.Namespace) -> None:

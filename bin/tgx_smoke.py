@@ -1416,12 +1416,14 @@ def group_examples_hint_regression() -> None:
 
 
 async def config_command_regression() -> None:
-    """`tgx config` называет путь к файлу настроек и прямо говорит, есть ли он
-    на диске — до этой команды расположение `config.json` можно было узнать
-    только чтением исходников. Обе ветки вывода должны сойтись на одном и том
-    же пути и одном и том же состоянии `.exists()`."""
+    """`tgx config` называет путь к файлу настроек, прямо говорит, есть ли он
+    на диске, и — если да — когда он менялся в последний раз. До этой команды
+    расположение `config.json` можно было узнать только чтением исходников.
+    Обе ветки вывода должны сойтись на одном и том же пути, одном и том же
+    состоянии `.exists()` и одной и той же дате изменения."""
     import contextlib
     import io
+    from datetime import datetime
 
     from rich.console import Console
 
@@ -1430,6 +1432,10 @@ async def config_command_regression() -> None:
 
     path = str(tgx.CONFIG)
     exists = tgx.CONFIG.exists()
+    mtime = (
+        datetime.fromtimestamp(tgx.CONFIG.stat().st_mtime).strftime("%d.%m.%Y %H:%M:%S")
+        if exists else None
+    )
 
     buf = io.StringIO()
     render.set_plain(True)
@@ -1441,6 +1447,10 @@ async def config_command_regression() -> None:
     payload = json.loads(buf.getvalue())
     check("в машинном выводе — путь к файлу настроек", payload.get("путь") == path)
     check("в машинном выводе — реальное состояние файла на диске", payload.get("существует") is exists)
+    if exists:
+        check("в машинном выводе — дата последнего изменения", payload.get("изменён") == mtime)
+    else:
+        check("в машинном выводе нет даты изменения, если файла нет", "изменён" not in payload)
 
     buf = io.StringIO()
     saved_console, saved_pretty = render._CONSOLE, render.pretty
@@ -1454,6 +1464,10 @@ async def config_command_regression() -> None:
     check("в терминале тоже виден путь к файлу настроек", path in shown)
     check("в терминале явно видно, есть ли файл",
           ("yes" in shown) if exists else ("no" in shown))
+    if exists:
+        check("в терминале тоже видна дата последнего изменения", mtime in shown)
+    else:
+        check("в терминале нет строки про изменение, если файла нет", "изменён" not in shown)
 
 
 def collapsed_quote_regression() -> None:
