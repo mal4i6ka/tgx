@@ -1416,7 +1416,7 @@ def group_examples_hint_regression() -> None:
 
 
 async def settings_path_line_regression() -> None:
-    """Карта команд заканчивается одной строкой с путём к файлу настроек — иначе
+    """Карта команд заканчивается одной строкой с путём и размером файла настроек — иначе
     расположение `config.json` можно узнать только отдельной командой `tgx
     config` или чтением исходников. Путь сверяем не с тем же `tgx.CONFIG`,
     переписанным ещё раз, а с тем, что и правда печатает сама команда `tgx
@@ -1433,6 +1433,10 @@ async def settings_path_line_regression() -> None:
     import tgx_splash
 
     parser = tgx.build_parser()
+    original_config = tgx.CONFIG
+    config_path = OUT / "overview-config.json"
+    config_path.write_bytes(b"x" * 1536)
+    tgx.CONFIG = config_path
 
     # Настоящий вызов `tgx config`, как в config_command_regression, — не
     # повторное чтение tgx.CONFIG, а то, что команда реально отвечает.
@@ -1443,8 +1447,8 @@ async def settings_path_line_regression() -> None:
             await tgx.cmd_config(None)
     finally:
         render.set_plain(False)
-    config_path = json.loads(config_buf.getvalue())["путь"]
-    expected = f"настройки: {config_path}"
+    reported_path = json.loads(config_buf.getvalue())["путь"]
+    expected = f"настройки: {reported_path} · 1.5 КБ"
 
     buf = io.StringIO()
     render.set_plain(True)
@@ -1454,7 +1458,7 @@ async def settings_path_line_regression() -> None:
     finally:
         render.set_plain(False)
     lines = [l for l in buf.getvalue().splitlines() if l.strip()]
-    check("в машинном выводе последняя строка карты — путь к настройкам",
+    check("в машинном выводе последняя строка карты — путь и размер настроек",
           bool(lines) and lines[-1] == expected)
 
     buf = io.StringIO()
@@ -1466,8 +1470,9 @@ async def settings_path_line_regression() -> None:
         tgx.overview(parser)
     finally:
         render._CONSOLE, render.pretty, tgx_splash.play = saved
+        tgx.CONFIG = original_config
     shown = [l.strip() for l in buf.getvalue().splitlines() if l.strip()]
-    check("в терминале последняя строка карты — тот же путь к настройкам",
+    check("в терминале последняя строка карты — те же путь и размер настроек",
           bool(shown) and shown[-1] == expected)
 
 

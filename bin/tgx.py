@@ -4420,13 +4420,17 @@ def group_examples_hint(names: list[str]) -> str:
 
 
 def config_note() -> str:
-    """Замыкающая строка карты команд — путь к файлу настроек: `настройки:
-    /home/user/.local/share/tgx/config.json`.
+    """Замыкающая строка карты команд — путь и вес файла настроек: `настройки:
+    /home/user/.local/share/tgx/config.json · 1.5 КБ`.
 
     Тот же `CONFIG`, что и `tgx config` называет источником правды: не нужна
     отдельная команда, чтобы просто узнать, где искать файл на диске.
     """
-    return f"настройки: {CONFIG}"
+    note = f"настройки: {CONFIG}"
+    if CONFIG.exists():
+        size = CONFIG.stat().st_size
+        note += f" · {_size(size) or '0 Б'}"
+    return note
 
 
 def overview(parser: argparse.ArgumentParser) -> None:
