@@ -4546,7 +4546,10 @@ class TgxApp(App):
             return
         messages.loading = False
         await messages.show(chat, history)
-        self.load_previews(chat)
+        # With asyncio's eager task factory the worker starts synchronously.
+        # Give Textual one refresh to finish mounting the freshly built bubbles;
+        # otherwise _fill_previews discards downloaded images as unmounted.
+        self.call_after_refresh(self.load_previews, chat)
         if self._read_timer is not None:
             self._read_timer.stop()
             self._read_timer = None

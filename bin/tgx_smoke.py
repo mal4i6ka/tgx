@@ -3725,6 +3725,7 @@ async def main() -> int:
     file_type_regression()
     # drive the UI under the same task factory the real terminal driver installs
     asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
+    os.environ["TGX_HOME"] = str(OUT / "tui-home")
     app = TgxApp(DemoBackend())
     async with app.run_test(size=(132, 40)) as pilot:
         await pilot.pause()
@@ -3773,6 +3774,7 @@ async def main() -> int:
         await asyncio.sleep(1.2)
         await pilot.pause()
         picture_bubbles = [r.bubble for r in messages.rows if r.bubble.has_image]
+        check("media preview is requested after history rows mount", app.backend.downloads >= 1)
         check("media preview mounted in a bubble", len(picture_bubbles) >= 1)
         if picture_bubbles:
             widget = picture_bubbles[0].query(".media").first()
@@ -4355,6 +4357,7 @@ async def main() -> int:
         await pilot.press("escape")
         await pilot.pause()
 
+    os.environ.pop("TGX_HOME", None)
     failed = [name for name, ok in checks if not ok]
     print(f"\n{len(checks) - len(failed)}/{len(checks)} checks passed · screenshots in {OUT}")
     return 1 if failed else 0
