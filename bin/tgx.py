@@ -1920,11 +1920,11 @@ async def cmd_rich(args: argparse.Namespace) -> None:
         # попасть в неё, отвечаем на её корневое сообщение.
         reply = types.InputReplyToMessage(reply_to_msg_id=args.topic) if args.topic else None
         # Слой 227 разрешил кнопки не только ботам — обычному аккаунту тоже.
+        # Разметку собирает сам Telethon: класс ряда в слоях 227 и 229 разный.
         markup = None
         if args.button:
-            rows = tgx_bots.parse_buttons(tgx_bots.join_buttons(args.button))
-            markup = types.ReplyInlineMarkup(
-                rows=[types.KeyboardButtonRow(buttons=r) for r in rows])
+            markup = client.build_reply_markup(
+                tgx_bots.parse_buttons(tgx_bots.join_buttons(args.button)))
         result = await client(functions.messages.SendMessageRequest(
             peer=chat, message="", random_id=helpers.generate_random_long(),
             rich_message=types.InputRichMessageMarkdown(

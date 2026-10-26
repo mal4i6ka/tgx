@@ -210,6 +210,7 @@ class _FakeClient:
 async def bots_regression() -> None:
     """Token storage, button syntax, and every step of the BotFather conversation."""
     import tgx_bots
+    import tgx_buttons
 
     # registry: tokens are credentials
     store = tgx_bots.Registry(fresh(OUT / "bots-probe.json"))
@@ -223,9 +224,8 @@ async def bots_regression() -> None:
 
     # buttons, including Mini Apps
     rows = tgx_bots.parse_buttons("Сайт=https://x.io, Приложение=webapp:https://app.x.io ; Копия=copy:промокод")
-    kinds = [type(button).__name__ for row in rows for button in row]
-    check("link and web-app buttons are built",
-          kinds == ["KeyboardButtonUrl", "KeyboardButtonWebView", "KeyboardButtonCopy"])
+    kinds = [tgx_buttons.kind(button) for row in rows for button in row]
+    check("link and web-app buttons are built", kinds == ["url", "web_view", "copy"])
     for bad, why in (("ПлохоеПриложение=webapp:http://insecure", "web app over http"),
                      ("Профиль=user:абв", "non-numeric profile id"),
                      ("Просто текст", "a button with no target")):
@@ -2318,8 +2318,8 @@ async def webapp_button_regression() -> None:
     """Кнопка, открывающая мини-приложение, — не callback. У Telethon для неё
     нет ветки в click(), и нажатие молча возвращает пустоту: со стороны «нажал,
     и ничего», хотя запрос никуда не уходил. Худший вид поломки — тихий."""
+    import tgx_buttons
     import tgx_inline as I
-    from telethon.tl import types
 
     class Thing:
         def __init__(self, **kw):
@@ -2328,8 +2328,8 @@ async def webapp_button_regression() -> None:
     def markup(*buttons):
         return Thing(rows=[Thing(buttons=list(buttons))])
 
-    web = types.KeyboardButtonWebView(text="Открыть", url="https://app/x")
-    plain = types.KeyboardButtonCallback(text="Обычная", data=b"x")
+    web = tgx_buttons.inline("Открыть", "web_view", url="https://app/x")
+    plain = tgx_buttons.inline("Обычная", "callback", data=b"x")
 
     class Fake(I.Inline):
         def __init__(self, message):
@@ -3871,6 +3871,64 @@ def shadowed_method_regression() -> None:
     check("ни один класс в bin/*.py не объявляет метод дважды", not offenders)
 
 
+def button_layer_regression() -> None:
+    """Кнопки читаются и собираются одинаково на слоях TL 227 и 229.
+
+    В слое 229 вид кнопки переехал из её класса в поле `type`, и сравнение по
+    имени класса перестало совпадать молча: «это приложение?» отвечало «нет» на
+    любую кнопку, ничего не падало. Поэтому проверяется не только сам переходник,
+    но и то, что мимо него к классам кнопок больше никто не ходит. Прогон идёт
+    на установленном Telethon; CI гоняет его на обеих версиях."""
+    import re
+
+    from telethon.tl import types
+
+    import tgx_buttons
+
+    for what, fields, key in (("url", {"url": "https://x.io"}, "url"),
+                              ("web_view", {"url": "https://app/x"}, "url"),
+                              ("callback", {"data": b"cb"}, "data"),
+                              ("switch_inline", {"query": "q", "same_peer": False}, "query"),
+                              ("copy", {"copy_text": "код"}, "copy_text"),
+                              ("user_profile", {"user_id": 42}, "user_id")):
+        button = tgx_buttons.inline("Надпись", what, **fields)
+        check(f"кнопка «{what}» собирается и узнаётся обратно",
+              tgx_buttons.kind(button) == what and tgx_buttons.field(button, key) == fields[key]
+              and tgx_buttons.field(button, "text") == "Надпись")
+    try:
+        tgx_buttons.inline("Игра", "game")
+        refused = False
+    except ValueError:
+        refused = True
+    check("вид, который tgx не собирает, отвергается вслух", refused)
+
+    # Кнопка-меню с приложением бывает только в обычной клавиатуре, и у неё свой
+    # запрос к серверу — ветку легко сломать, не заметив.
+    if tgx_buttons.TYPED:
+        menu = types.KeyboardButton(text="Меню",
+                                    type=types.ButtonTypeSimpleWebView(url="https://app/m"))
+    else:
+        menu = types.KeyboardButtonSimpleWebView(text="Меню", url="https://app/m")
+    check("кнопка-меню с приложением узнаётся", tgx_buttons.kind(menu) == "simple_web_view")
+    check("и её адрес читается", tgx_buttons.field(menu, "url") == "https://app/m")
+
+    layered = re.compile(r"\b(?:Input)?(?:KeyboardButton\w*|KeyboardInlineButton\w*"
+                         r"|(?:Inline)?ButtonType\w+)\b")
+    common = {"KeyboardButtonStyle", "KeyboardButtonRow"}      # одинаковы в обоих слоях
+    check("сторож находит обход в образце",
+          layered.findall("type(b).__name__ == 'KeyboardButtonWebView'") == ["KeyboardButtonWebView"])
+    strays: list[str] = []
+    for module in sorted(Path(__file__).resolve().parent.glob("*.py")):
+        if module.name in {"tgx_buttons.py", "tgx_smoke.py"}:
+            continue
+        for number, line in enumerate(module.read_text().splitlines(), 1):
+            strays += [f"{module.name}:{number} {name}"
+                       for name in layered.findall(line) if name not in common]
+    for stray in strays:
+        print(f"   мимо tgx_buttons: {stray}")
+    check("классы кнопок упоминает только tgx_buttons", not strays)
+
+
 async def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     scratch_regression()
@@ -3944,6 +4002,7 @@ async def main() -> int:
     thumbnail_choice_regression()
     file_type_regression()
     shadowed_method_regression()
+    button_layer_regression()
     # drive the UI under the same task factory the real terminal driver installs
     asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
     home = fresh(OUT / "tui-home")

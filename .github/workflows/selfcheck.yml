@@ -1,0 +1,77 @@
+# Самопроверка на каждый push в main и на каждый pull request.
+#
+# `bin/tgx_smoke.py` гоняет интерфейс на демо-бэкенде и сети не трогает, поэтому
+# ей не нужны ни аккаунт, ни ключи API, ни секреты репозитория. Выходит кодом 1
+# при первом же провале — этого достаточно, чтобы прогон покраснел.
+name: Самопроверка
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Новый push в ту же ветку отменяет прогон предыдущего — смотреть на устаревший
+# результат незачем.
+concurrency:
+  group: selfcheck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: tgx_smoke · ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Оба края того, что разрешает requirements.txt: самая старая Telethon и то,
+    # что получит свежая установка сегодня. Кнопки в слоях 227 и 229 устроены по-
+    # разному, и проверить переходник можно только на обоих.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: нижняя граница
+            telethon: telethon==1.44.0
+          - label: свежая установка
+            telethon: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # Без ffmpeg проверки видео не падают, а молча пропускаются — зелёный
+      # прогон тогда ничего бы о них не говорил.
+      - name: ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg
+
+      # Установка ровно по README: если она сломается, первым узнает CI, а не
+      # человек, клонировавший репозиторий.
+      - name: Зависимости
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -q -r requirements.txt ${{ matrix.telethon }}
+          .venv/bin/python -c "import telethon; print('Telethon', telethon.__version__)"
+
+      # TGX_HOME — пустая временная папка: ни сессии, ни настроек, ни кэша
+      # превью с чужой машины.
+      - name: Самопроверка
+        env:
+          TGX_HOME: ${{ runner.temp }}/tgx-home
+        run: .venv/bin/python bin/tgx_smoke.py "${{ runner.temp }}/tgx-shots"
+
+      # Скриншоты интерфейса — первое, что хочется увидеть, когда проверка упала.
+      - name: Скриншоты упавшего прогона
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tgx-shots-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/tgx-shots
+          retention-days: 7

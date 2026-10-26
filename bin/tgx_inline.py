@@ -163,24 +163,28 @@ class Inline:
         коннектору, — и держать её надо в одном месте: разъедется здесь, и
         каждая начнёт молчать по-своему.
         """
-        return type(button).__name__ in {"KeyboardButtonWebView",
-                                         "KeyboardButtonSimpleWebView"}
+        import tgx_buttons
+
+        return tgx_buttons.kind(button) in {"web_view", "simple_web_view"}
 
     async def web_button_url(self, peer: Any, message: Any, button: Any, *,
                              platform: str = "") -> str:
         """Подписанный адрес приложения из уже найденной кнопки."""
         from telethon.tl import functions, types
 
+        import tgx_buttons
+
         bot = await self.client.get_input_entity(
             getattr(message, "sender_id", None) or getattr(message, "via_bot_id", None))
         params = types.DataJSON(data=json.dumps({"bg_color": "#121212"}))
         platform = platform or PLATFORM
-        if type(button).__name__ == "KeyboardButtonSimpleWebView":
+        url = tgx_buttons.field(button, "url")
+        if tgx_buttons.kind(button) == "simple_web_view":
             result = await self._call(functions.messages.RequestSimpleWebViewRequest(
-                bot=bot, platform=platform, url=button.url, theme_params=params))
+                bot=bot, platform=platform, url=url, theme_params=params))
         else:
             result = await self._call(functions.messages.RequestWebViewRequest(
-                peer=peer, bot=bot, platform=platform, url=button.url,
+                peer=peer, bot=bot, platform=platform, url=url,
                 theme_params=params))
         return getattr(result, "url", "")
 
@@ -221,9 +225,11 @@ class Inline:
             button = lines[row].buttons[col]
 
         if not self.is_web_button(button):
+            import tgx_buttons
+
             raise InlineError(
                 f"кнопка «{getattr(button, 'text', '')}» — это "
-                f"{type(button).__name__}, а не запуск приложения; "
+                f"{tgx_buttons.kind(button)}, а не запуск приложения; "
                 f"обычные кнопки жмёт `tgx message-click`")
         return {"кнопка": getattr(button, "text", None),
                 "адрес": await self.web_button_url(peer, message, button,

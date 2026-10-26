@@ -307,9 +307,7 @@ def parse_buttons(spec: str) -> list[list[Any]]:
     Mini App; the rest are named explicitly. Anything unprefixed and non-http is
     treated as callback data, which only a running bot can answer.
     """
-    from telethon.tl.types import (KeyboardButtonCallback, KeyboardButtonCopy,
-                                   KeyboardButtonSwitchInline, KeyboardButtonUrl,
-                                   KeyboardButtonUserProfile, KeyboardButtonWebView)
+    import tgx_buttons
 
     rows: list[list[Any]] = []
     for line in (spec or "").split(";"):
@@ -326,23 +324,23 @@ def parse_buttons(spec: str) -> list[list[Any]]:
             kind, _, rest = target.partition(":")
             kind = kind.lower()
             if target.startswith(("http://", "https://", "tg://")):
-                row.append(KeyboardButtonUrl(label, target, style=style))
+                row.append(tgx_buttons.inline(label, "url", url=target, style=style))
             elif kind == "webapp":
                 if not rest.startswith("https://"):
                     raise BotError(f"веб-приложению «{label}» нужен https-адрес")
-                row.append(KeyboardButtonWebView(label, rest, style=style))
+                row.append(tgx_buttons.inline(label, "web_view", url=rest, style=style))
             elif kind == "cb":
-                row.append(KeyboardButtonCallback(label, rest.encode(), style=style))
+                row.append(tgx_buttons.inline(label, "callback", data=rest.encode(), style=style))
             elif kind == "switch":
-                row.append(KeyboardButtonSwitchInline(label, rest, same_peer=False))
+                row.append(tgx_buttons.inline(label, "switch_inline", query=rest, same_peer=False))
             elif kind == "copy":
-                row.append(KeyboardButtonCopy(label, rest))
+                row.append(tgx_buttons.inline(label, "copy", copy_text=rest))
             elif kind == "user":
                 if not rest.isdigit():
                     raise BotError(f"кнопке профиля «{label}» нужен числовой id")
-                row.append(KeyboardButtonUserProfile(label, int(rest)))
+                row.append(tgx_buttons.inline(label, "user_profile", user_id=int(rest)))
             else:
-                row.append(KeyboardButtonCallback(label, target.encode(), style=style))
+                row.append(tgx_buttons.inline(label, "callback", data=target.encode(), style=style))
         if row:
             rows.append(row)
     return rows

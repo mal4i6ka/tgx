@@ -1,5 +1,7 @@
 # tgx — Telegram CLI + TUI
-Telethon>=1.43            # Telegram MTProto client
+Telethon>=1.44,<1.46      # Telegram MTProto client; проверено на 1.44 (слой 227) и
+                          # 1.45 (229). На 1.43 tgx падает, а новый слой может опять
+                          # переделать типы — потолок поднимать вместе с CI
 textual>=8.0              # full-screen TUI (tgx ui)
 rich>=14.0                # coloured CLI output
 terminaltexteffects>=0.15 # animated splash (tgx banner / tgx ui)
