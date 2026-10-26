@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from telethon import TelegramClient, helpers
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import (MessageNotModifiedError, ReactionsTooManyError,
+                             SessionPasswordNeededError)
 from telethon.tl import functions, types
 from telethon.tl.types import Channel, Chat, User
 
@@ -365,8 +366,13 @@ class PeerError(RuntimeError):
     """Чат не найден — с тем, что искали, и на что это похоже."""
 
 
+# Слова, которыми называют переписку с собой («Избранное»). Telethon понимает
+# только точные «me» и «self», а пишут их и с собачкой, и с большой буквы.
+SELF_PEERS = {"me", "self"}
+
+
 async def resolve_peer(client: TelegramClient, peer: str) -> Any:
-    """@имя, телефон, числовой id или название чата.
+    """@имя, телефон, числовой id, название чата или «me» — переписка с собой.
 
     Чужую ошибку не прячем. Обрыв связи, FloodWait и отозванная сессия выглядят
     как «чат не найден», только если их проглотить, — и тогда сообщение уводит
@@ -376,6 +382,12 @@ async def resolve_peer(client: TelegramClient, peer: str) -> Any:
     query = (peer or "").strip()
     if not query:
         raise PeerError("не указан чат")
+
+    # «Избранное» решается первым и без поиска: «me» — слово короткое и лежит
+    # внутри чужих названий («Merlin Global…»), так что любой поиск по куску
+    # названия уводит заметку в посторонний чат.
+    if query.lstrip("@").lower() in SELF_PEERS:
+        return await client.get_entity("me")
 
     # Числовой id надо передать числом: строку Telethon ищет как имя и не находит.
     attempts: list[Any] = [int(query)] if query.lstrip("-").isdigit() else []
@@ -2868,8 +2880,65 @@ async def cmd_export(args: argparse.Namespace) -> None:
         await client.disconnect()
 
 
+def split_reactions(tokens: list[str] | str | None) -> list[str]:
+    """Реакции из аргументов: «❤ 🥰 😘», «❤,🥰,😘» и «"❤ 🥰 😘"» — одно и то же.
+
+    Разделителями считаем пробел и запятую: внутри эмодзи их не бывает даже у
+    составных — у ❤‍🔥 и 👨‍💻 посередине служебный U+200D. А вот склеенную
+    строку «❤🥰😘» на части не берёмся: дробление по символам как раз на этом
+    U+200D и порвало бы их пополам.
+    """
+    if tokens is None:
+        return []
+    if isinstance(tokens, str):
+        tokens = [tokens]
+    out: list[str] = []
+    for token in tokens:
+        out.extend(token.replace(",", " ").split())
+    return out
+
+
+async def reactions_per_message(client: TelegramClient) -> int:
+    """Сколько реакций Telegram берёт на одно сообщение от одного человека.
+
+    Предел не наш, а два числа из `help.getAppConfig`: обычному аккаунту одна,
+    Premium — три. Спрашиваем их только чтобы объяснить отказ: иначе каждая
+    реакция стоила бы двух лишних запросов на ровном месте.
+    """
+    config = await client(functions.help.GetAppConfigRequest(hash=0))
+    values = {item.key: getattr(item.value, "value", None)
+              for item in getattr(config.config, "value", [])}
+    me = await client.get_me()
+    key = ("reactions_user_max_premium" if getattr(me, "premium", False)
+           else "reactions_user_max_default")
+    try:
+        return int(values.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def too_many_reactions(client: TelegramClient, emojis: list[str]) -> str:
+    """`REACTIONS_TOO_MANY` отвечает на два разных случая, и путать их нельзя.
+
+    Либо человек прислал больше реакций, чем ему позволено, либо на сообщении
+    уже набралось предельное число разных эмодзи — и тогда укорачивать свой
+    список бессмысленно. Одно сообщение на оба случая отправило бы не туда.
+    """
+    limit = await reactions_per_message(client)
+    if limit and len(emojis) > limit:
+        return (f"Telegram берёт от одного человека не больше {limit} реакций на сообщение, "
+                f"а передано {len(emojis)}. Уместятся первые {limit}: {' '.join(emojis[:limit])}")
+    return ("на сообщении уже столько разных реакций, сколько Telegram разрешает — "
+            "новую эмодзи туда не добавить")
+
+
 async def cmd_react(args: argparse.Namespace) -> None:
-    """Своя реакция, список чужих и снятие чужих — последнее требует прав админа."""
+    """Свои реакции, список чужих и снятие чужих — последнее требует прав админа.
+
+    Эмодзи принимается несколько, и все они уходят **одним** вызовом: Telegram
+    не добавляет реакцию к уже стоящим, а заменяет весь набор целиком, поэтому
+    семь вызовов подряд оставили бы на сообщении только последнюю реакцию.
+    """
     client = await make_client()
     try:
         await ensure_login(client)
@@ -2900,10 +2969,24 @@ async def cmd_react(args: argparse.Namespace) -> None:
                 render.emit({"ok": True, "cleared": args.remove_from, "message_id": args.id})
             return
 
-        reaction = [] if args.clear else [types.ReactionEmoji(emoticon=args.emoji)]
-        await client(functions.messages.SendReactionRequest(
-            peer=peer, msg_id=args.id, reaction=reaction, add_to_recent=not args.clear))
-        render.emit({"ok": True, "message_id": args.id, "emoji": None if args.clear else args.emoji})
+        emojis = split_reactions(args.emoji)
+        if not args.clear and not emojis:
+            raise SystemExit("нечего ставить: укажите эмодзи или --clear, чтобы снять свою реакцию")
+        reaction = [] if args.clear else [types.ReactionEmoji(emoticon=e) for e in emojis]
+        try:
+            await client(functions.messages.SendReactionRequest(
+                peer=peer, msg_id=args.id, reaction=reaction, add_to_recent=not args.clear))
+        except ReactionsTooManyError:
+            raise SystemExit(await too_many_reactions(client, emojis)) from None
+        except MessageNotModifiedError:
+            # Тот же набор второй раз Telegram считает отказом, а для человека
+            # это успех: на сообщении уже стоит ровно то, что он просил. Для
+            # набора случай частый — повторить команду проще, чем вспомнить.
+            render.emit({"ok": True, "message_id": args.id, "unchanged": True,
+                         "emoji": None if args.clear else " ".join(emojis)})
+            return
+        render.emit({"ok": True, "message_id": args.id,
+                     "emoji": None if args.clear else " ".join(emojis)})
     finally:
         await client.disconnect()
 
@@ -7312,10 +7395,14 @@ def build_parser() -> argparse.ArgumentParser:
     mc.add_argument("--limit", type=int, default=10, help="max new messages to return")
     mc.set_defaults(func=cmd_message_click)
 
-    rc = sub.add_parser("react", help="поставить или убрать реакцию на сообщение")
+    rc = sub.add_parser("react", help="поставить или убрать реакции на сообщении",
+                        epilog="примеры:\n  tgx react @chat 42 ❤\n"
+                               "  tgx react @chat 42 ❤ 🥰 😘\n  tgx react @chat 42 --clear\n",
+                        formatter_class=argparse.RawDescriptionHelpFormatter)
     rc.add_argument("peer")
     rc.add_argument("id", type=int)
-    rc.add_argument("emoji", nargs="?", default="👍")
+    rc.add_argument("emoji", nargs="*", default=["👍"],
+                    help="одна или несколько реакций; сколько влезет — зависит от Premium")
     rc.add_argument("--clear", action="store_true", help="убрать свою реакцию")
     rc.add_argument("--who", action="store_true", help="показать, кто и чем отреагировал")
     rc.add_argument("--remove-from", metavar="КТО",

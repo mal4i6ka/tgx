@@ -139,6 +139,11 @@ def _check_peer(chat: Chat) -> None:
     if not ALLOWED_PEERS:
         return
     names = {str(chat.id), (chat.username or "").lower(), (chat.name or "").lower()}
+    # «me» в списке — это разрешение на «Избранное»: другого имени у переписки с
+    # собой нет, а её открывают агенту чаще всего. Номер сверяется вместе с
+    # видом чата: у пользователя и канала номера из разных пространств.
+    if chat.kind == "user" and getattr(getattr(_backend, "me", None), "id", None) == chat.id:
+        names |= tgx.SELF_PEERS
     if not (names & ALLOWED_PEERS):
         raise TgxError(f"чат «{chat.name}» вне списка TGX_MCP_PEERS")
 
@@ -162,7 +167,19 @@ def msg_json(msg: Msg) -> dict[str, Any]:
 
 
 async def resolve(peer: str) -> Chat:
-    """Find a chat by @username, id, or part of its title."""
+    """Find a chat by @username, id, name — or `me` for the chat with yourself.
+
+    Which address means which chat is decided in one place, `tgx.resolve_peer`:
+    `me` is the chat with yourself, an exact own title beats a stranger's
+    handle, a part of a title is the last resort. A second copy of that rule
+    drifted here: `me` fell through to the search by part of a title, matched
+    «Merlin Global. Денежные переводы в Израиле» and quietly aimed an agent's
+    note at a stranger's channel — worse than a refusal.
+
+    Exact id and @username still come from the dialog list: both are unique, so
+    nothing can be shadowed, and an id this connector printed itself must not be
+    guessed at over the network as somebody else's.
+    """
     global _chats_cache
     client = await backend()
     needle = str(peer).strip()
@@ -176,24 +193,34 @@ async def resolve(peer: str) -> Chat:
         if str(chat.id) == bare or (chat.username or "").lower() == bare:
             _check_peer(chat)
             return chat
+
+    try:
+        entity = await tgx.resolve_peer(client.client, needle)
+    except tgx.PeerError as exc:
+        raise TgxError(str(exc)) from exc
+    except Exception as exc:        # флуд-вейт и обрыв — не «чат не найден»
+        raise TgxError(f"не разобрал адрес «{peer}»: {exc}") from exc
+
+    # Свой диалог знает больше голой сущности: непрочитанное, закрепление, темы
+    # форума. Номер сам по себе не доказательство — у пользователя и у канала
+    # они из разных пространств, поэтому сверяется ещё и вид чата.
+    kind = client._kind(entity)
+    ident = int(getattr(entity, "id", 0) or 0)
     for chat in _chats_cache:
-        if bare in (chat.name or "").lower():
+        if ident and chat.id == ident and chat.kind == kind:
             _check_peer(chat)
             return chat
-
-    try:                                    # not in the dialog list — ask Telegram
-        entity = await client.client.get_entity(needle)
-    except Exception as exc:
-        raise TgxError(f"не нашёл чат «{peer}»: {exc}") from exc
     chat = Chat(
-        id=int(getattr(entity, "id", 0) or 0),
+        id=ident,
         name=getattr(entity, "title", None) or " ".join(
             p for p in [getattr(entity, "first_name", "") or "", getattr(entity, "last_name", "") or ""] if p
-        ).strip() or str(getattr(entity, "id", "")),
-        kind=client._kind(entity),
+        ).strip() or str(ident),
+        kind=kind,
         username=getattr(entity, "username", None) or "",
         entity=entity,
         can_post=client._can_post(entity),
+        forum=bool(getattr(entity, "forum", False)),
+        contact=bool(getattr(entity, "contact", False)),
     )
     _check_peer(chat)
     return chat
@@ -407,13 +434,18 @@ async def send_file(peer: str, paths: list[str], caption: str = "", reply_to: in
 
 
 @server.tool(annotations=WRITE, description=(
-    "Set your reaction on a message, or clear it by passing an empty emoji."))
+    "Set your reactions on a message. `emoji` takes one ('\u2764') or several, separated by "
+    "spaces or commas ('\u2764 \U0001f970 \U0001f618'); an empty string clears them. Telegram replaces the "
+    "whole set rather than adding to it, and allows at most one reaction per message "
+    "(three with Premium)."))
 async def react(peer: str, message_id: int, emoji: str = "") -> dict[str, Any]:
     _check_writes()
     client = await backend()
     chat = await resolve(peer)
-    await client.react(chat, int(message_id), emoji.strip() or None)
-    return {"ok": True, "chat": chat.name, "message_id": int(message_id), "emoji": emoji.strip() or None}
+    emojis = tgx.split_reactions(emoji)
+    await client.react(chat, int(message_id), emojis)
+    return {"ok": True, "chat": chat.name, "message_id": int(message_id),
+            "emoji": " ".join(emojis) or None}
 
 
 @server.tool(annotations=WRITE, description=(

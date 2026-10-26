@@ -47,6 +47,45 @@ def check(label: str, ok: bool) -> None:
     print(f"{'✓' if ok else '✗'} {label}")
 
 
+def fresh(path: Path) -> Path:
+    """Путь без следов прошлого прогона; возвращает его же, чтобы звать по месту.
+
+    Папка для скриншотов живёт между запусками (по умолчанию `/tmp/tgx-shots`),
+    поэтому всё, что прогон в неё положил, следующему достаётся готовым. И тогда
+    проверки, которые ловят именно **первое** обращение — скачивание превью,
+    права на только что созданном файле, — замолкают: кэш уже тёплый, файл уже
+    есть. Зелёными они при этом остаются, что хуже падения.
+
+    Убираем только то, что самопроверка создала сама, и по имени: папку ей
+    задают аргументом командной строки, и чистить её целиком нельзя — там может
+    оказаться чужое.
+    """
+    import shutil
+
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():                     # симлинк на папку сюда не дойдёт
+        shutil.rmtree(path)
+    return path
+
+
+def scratch_regression() -> None:
+    """`fresh` обязана убирать и файл, и папку с содержимым: на ней держится
+    независимость прогона от предыдущего, а не сработавшая молча уборка
+    выглядит точно так же, как успех."""
+    leftover = OUT / "fresh-probe.txt"
+    leftover.write_text("наследие прошлого прогона")
+    check("fresh убирает файл", not fresh(leftover).exists())
+
+    nested = OUT / "fresh-probe-dir"
+    (nested / "глубже").mkdir(parents=True, exist_ok=True)
+    (nested / "глубже" / "кэш.jpg").write_bytes(b"\xff\xd8")
+    check("fresh убирает папку с содержимым", not fresh(nested).exists())
+
+    missing = OUT / "fresh-probe-missing"
+    check("fresh не спотыкается о то, чего нет", fresh(missing) == missing)
+
+
 def formatting_regression() -> None:
     """Entity offsets are counted in UTF-16 units — one emoji before a bold run is
     enough to shift everything if the conversion is wrong."""
@@ -173,7 +212,7 @@ async def bots_regression() -> None:
     import tgx_bots
 
     # registry: tokens are credentials
-    store = tgx_bots.Registry(OUT / "bots-probe.json")
+    store = tgx_bots.Registry(fresh(OUT / "bots-probe.json"))
     store.save({})
     store.add(tgx_bots.Bot(username="probe_bot", name="Проба", token="123456789:AAE-secret-value-0123456789abcdef"))
     mode = oct(store.path.stat().st_mode)[-3:]
@@ -1136,6 +1175,15 @@ def command_surface_regression() -> None:
     check("у bot rich есть блоки", "--blocks" in flags.get("bot_rich", set()))
     check("у react есть снятие чужих реакций",
           "--remove-from" in flags.get("react", set()))
+    # Реакции уходят набором, потому что Telegram заменяет его целиком: если
+    # `emoji` снова станет одиночным, семь вызовов подряд оставят последнюю.
+    react = next(leaf for path, leaf, _, _ in tgx_autotools.leaves(parser) if path == ("react",))
+    check("react берёт несколько эмодзи за один вызов",
+          next(a.nargs for a in react._actions if a.dest == "emoji") == "*")
+    check("реакции делятся и по пробелу, и по запятой",
+          tgx.split_reactions(["❤ 🥰", "😘,💋"]) == ["❤", "🥰", "😘", "💋"])
+    check("составная эмодзи не разваливается на части",
+          tgx.split_reactions(["❤\u200d🔥"]) == ["❤\u200d🔥"])
     check("у poll create есть несколько правильных ответов",
           "--quiz" in flags.get("poll_create", set()))
     check("у send есть эффект", "--effect" in flags.get("send", set()))
@@ -1423,9 +1471,15 @@ async def settings_path_line_regression() -> None:
     переписанным ещё раз, а с тем, что и правда печатает сама команда `tgx
     config` — иначе проверка ничего не гарантирует и не заметит, если карта и
     команда когда-нибудь разойдутся. Строка стоит последней в обеих ветках
-    вывода (терминал и конвейер)."""
+    вывода (терминал и конвейер).
+
+    Путь у пробника нарочно длиннее двухсот знаков: сверяется последняя строка,
+    и стоило ей не влезть в консоль стенда, как сверялся хвост переноса. Длину
+    задавал сам вызывающий — папкой для скриншотов, — и проверка падала, ничего
+    не сообщая про саму карту команд."""
     import contextlib
     import io
+    import shutil
     from datetime import datetime
 
     from rich.console import Console
@@ -1436,7 +1490,18 @@ async def settings_path_line_regression() -> None:
 
     parser = tgx.build_parser()
     original_config = tgx.CONFIG
-    config_path = OUT / "overview-config.json"
+    # Пробник живёт в своей временной папке, а не в папке прогона: путь к той
+    # задают аргументом командной строки, и проверка строки настроек не должна
+    # зависеть ни от того, что в папке осталось, ни от того, какой она длины.
+    probe_home = Path(tempfile.mkdtemp(prefix="tgx-overview-"))
+    # Длину набираем нарочно за двести знаков — это ровно тот случай, на котором
+    # консоль с прибитой `width=200` переносила строку, и проверка сверяла хвост
+    # переноса вместо самой строки. Теперь стенд всегда работает в этом режиме.
+    config_dir = probe_home
+    while len(str(config_dir / "overview-config.json")) < 220:
+        config_dir = config_dir / "длинная-вложенная-папка"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "overview-config.json"
     config_path.write_bytes(b"x" * 1536)
     modified_at = 1_700_000_000
     os.utime(config_path, (modified_at, modified_at))
@@ -1468,7 +1533,10 @@ async def settings_path_line_regression() -> None:
 
     buf = io.StringIO()
     saved = render._CONSOLE, render.pretty, tgx_splash.play
-    render._CONSOLE = Console(file=buf, width=200, no_color=True)
+    # Ширину берём по содержимому: проверяются текст строки и её положение, а
+    # перенос по краю консоли — свойство стенда, которое подменяет и то и
+    # другое (`shown[-1]` становится хвостом переноса), и притом молча.
+    render._CONSOLE = Console(file=buf, width=max(200, len(expected) + 4), no_color=True)
     render.pretty = lambda: True
     tgx_splash.play = lambda *a, **k: True      # заставка в тесте только мешает
     try:
@@ -1476,6 +1544,7 @@ async def settings_path_line_regression() -> None:
     finally:
         render._CONSOLE, render.pretty, tgx_splash.play = saved
         tgx.CONFIG = original_config
+        shutil.rmtree(probe_home, ignore_errors=True)
     shown = [l.strip() for l in buf.getvalue().splitlines() if l.strip()]
     check("в терминале последняя строка карты — те же путь, размер и время настроек",
           bool(shown) and shown[-1] == expected)
@@ -2959,6 +3028,111 @@ async def peer_ambiguity_regression() -> None:
     check("регистр в названии не важен", got == "мой форум")
 
 
+async def self_peer_regression() -> None:
+    """«me» — это переписка с собой («Избранное»), а не чужой чат, внутри названия
+    которого есть «me». В коннекторе MCP адрес доходил до поиска по куску названия
+    и совпадал с «Merlin Global. Денежные переводы в Израиле»: заметка агента
+    уходила в посторонний канал. Тихое попадание не туда опаснее отказа, поэтому
+    правило адресации теперь одно на все поверхности — `tgx.resolve_peer`."""
+    import tgx
+    import tgx_mcp
+    from telethon.tl.types import Channel, User
+    from tgx_tui import Chat, TelegramBackend
+
+    me_entity = User(id=777000777, is_self=True, first_name="Александр")
+    merlin = Channel(id=1700811690, title="Merlin Global. Денежные переводы в Израиле",
+                     photo=None, date=None, broadcast=True)
+    notes = Channel(id=5001, title="Заметки", photo=None, date=None, megagroup=True)
+    notes_long = Channel(id=5002, title="Заметки о работе", photo=None, date=None, megagroup=True)
+
+    class Dialog:
+        def __init__(self, entity, name):
+            self.entity, self.name = entity, name
+
+    class Client:
+        """Отвечает только на точное значение — как Telethon: «me» значит себя."""
+
+        def __init__(self):
+            self.asked = []
+
+        async def get_entity(self, value):
+            self.asked.append(value)
+            if str(value).lower() in ("me", "self"):
+                return me_entity
+            raise ValueError(f'Cannot find any entity corresponding to "{value}"')
+
+        def iter_dialogs(self, limit=None):
+            async def gen():
+                for entity in (merlin, notes_long, notes):
+                    yield Dialog(entity, entity.title)
+            return gen()
+
+    class Backend:
+        _kind = TelegramBackend._kind
+        _can_post = staticmethod(TelegramBackend._can_post)
+
+        def __init__(self):
+            self.client, self.me = Client(), me_entity
+
+        async def dialogs(self, limit=None):
+            # «Заметки о работе» стоит раньше «Заметок»: поиск по куску названия
+            # отдавал первое совпадение, а значит — не тот чат.
+            return [Chat(id=merlin.id, name=merlin.title, kind="channel", entity=merlin),
+                    Chat(id=notes_long.id, name=notes_long.title, kind="group", entity=notes_long),
+                    Chat(id=notes.id, name=notes.title, kind="group", entity=notes, unread=7),
+                    Chat(id=4330416518, name="AllCrew Cockpit", kind="group", username="allcrew")]
+
+    fake = Backend()
+    saved = (tgx_mcp._backend, list(tgx_mcp._chats_cache), set(tgx_mcp.ALLOWED_PEERS))
+    try:
+        tgx_mcp._backend, tgx_mcp._chats_cache, tgx_mcp.ALLOWED_PEERS = fake, [], set()
+
+        chat = await tgx_mcp.resolve("me")
+        check("«me» в коннекторе — переписка с собой",
+              chat.id == me_entity.id and chat.kind == "user")
+        check("а не посторонний канал с «me» внутри названия", "Merlin" not in chat.name)
+        check("и спрошено именно о себе", fake.client.asked == ["me"])
+
+        for alias in ("self", "@me", "ME"):
+            check(f"«{alias}» ведёт туда же", (await tgx_mcp.resolve(alias)).id == me_entity.id)
+
+        exact = await tgx_mcp.resolve("Заметки")
+        check("точное название важнее куска названия", exact.id == notes.id)
+        check("и чат берётся из своего списка, со всеми сведениями", exact.unread == 7)
+
+        check("@адрес из списка чатов разрешается без сети",
+              (await tgx_mcp.resolve("@allcrew")).id == 4330416518)
+        check("id, напечатанный самим коннектором, остаётся тем же чатом",
+              (await tgx_mcp.resolve("1700811690")).id == merlin.id)
+
+        tgx_mcp.ALLOWED_PEERS = {"allcrew"}
+        refused = ""
+        try:
+            await tgx_mcp.resolve("me")
+        except tgx_mcp.TgxError as exc:
+            refused = str(exc)
+        check("список TGX_MCP_PEERS закрывает и «Избранное»", "вне списка" in refused)
+        tgx_mcp.ALLOWED_PEERS = {"me"}
+        check("а «me» в списке — открывает его",
+              (await tgx_mcp.resolve("me")).id == me_entity.id)
+    finally:
+        tgx_mcp._backend, tgx_mcp._chats_cache, tgx_mcp.ALLOWED_PEERS = saved
+
+    # Та же адресация в командной строке — это её правило коннектор и зовёт.
+    class CliClient(Client):
+        async def get_entity(self, value):
+            self.asked.append(value)
+            if str(value).lower() in ("me", "self"):
+                return "я сам"
+            return f"глобально:{value}"
+
+    for alias in ("me", "self", "@me", "ME"):
+        client = CliClient()
+        got = await tgx.resolve_peer(client, alias)
+        check(f"в командной строке «{alias}» — тоже переписка с собой",
+              got == "я сам" and client.asked == ["me"])
+
+
 def markdown_to_blocks_regression() -> None:
     """Форма текста внутри блока выяснена опытом на живом сервере: строка даёт
     TextPlain, массив — TextConcat, {"type": "bold", …} — TextBold, узлы
@@ -3453,7 +3627,7 @@ def article_regression() -> None:
     check("images become img nodes",
           nodes[8]["children"][0]["attrs"]["src"] == "https://x.io/cat.png")
 
-    probe = OUT / "telegraph-probe.json"
+    probe = fresh(OUT / "telegraph-probe.json")
     original = tgx_article.token_path
     tgx_article.token_path = lambda: probe
     try:
@@ -3535,7 +3709,7 @@ async def preview_cache_regression() -> None:
 
     backend = TelegramBackend.__new__(TelegramBackend)
     backend._raw, backend._paths, backend.client = {}, {}, None
-    cache = OUT / "cache-probe"
+    cache = fresh(OUT / "cache-probe")
     cache.mkdir(parents=True, exist_ok=True)
     chat = Chat(id=7, name="probe")
 
@@ -3653,8 +3827,53 @@ def thumbnail_choice_regression() -> None:
     check("audio has no preview", TelegramBackend._pick_thumb(message2) is None)
 
 
+def shadowed_method_regression() -> None:
+    """Python keeps only the last definition, so a method written twice in one class
+    loses its earlier body without a word. Шесть живых реализаций из TelegramBackend
+    однажды так и лежали мёртвыми внутри DemoBackend — их перекрывали offline-заглушки
+    ниже. Чистый `ast` по исходникам: без интерфейса и без сети."""
+    import ast
+
+    def shadowed(source: str) -> list[str]:
+        """Имена, объявленные в теле класса дважды, если хотя бы одно из них — метод."""
+        found: list[str] = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            where: dict[str, list[int]] = {}
+            methods: set[str] = set()
+            for stmt in node.body:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    names = [stmt.name]
+                    methods.add(stmt.name)
+                elif isinstance(stmt, ast.Assign):
+                    names = [t.id for t in stmt.targets if isinstance(t, ast.Name)]
+                elif (isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
+                      and stmt.value is not None):
+                    names = [stmt.target.id]
+                else:
+                    continue
+                for name in names:
+                    where.setdefault(name, []).append(stmt.lineno)
+            found += [f"{node.name}.{name} (строки {', '.join(str(n) for n in lines)})"
+                      for name, lines in where.items() if len(lines) > 1 and name in methods]
+        return found
+
+    # Сначала о самой проверке: она должна ловить подделку, иначе тихо станет пустой.
+    check("проверка затенения находит дубликат в образце",
+          shadowed("class C:\n    def a(self): ...\n    def a(self): ...\n") != [])
+
+    offenders: list[str] = []
+    for module in sorted((Path(__file__).resolve().parent).glob("*.py")):
+        offenders += [f"{module.name}: {hit}" for hit in shadowed(module.read_text())]
+    for hit in offenders:
+        print(f"   затенено: {hit}")
+    check("ни один класс в bin/*.py не объявляет метод дважды", not offenders)
+
+
 async def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
+    scratch_regression()
     await eager_task_regression()
     await preview_cache_regression()
     folder_and_paging_regression()
@@ -3687,6 +3906,7 @@ async def main() -> int:
     await chanadmin_regression()
     groups_regression()
     await peer_ambiguity_regression()
+    await self_peer_regression()
     markdown_to_blocks_regression()
     blocks_media_regression()
     media_label_regression()
@@ -3723,9 +3943,12 @@ async def main() -> int:
     await bots_regression()
     thumbnail_choice_regression()
     file_type_regression()
+    shadowed_method_regression()
     # drive the UI under the same task factory the real terminal driver installs
     asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
-    os.environ["TGX_HOME"] = str(OUT / "tui-home")
+    home = fresh(OUT / "tui-home")
+    check("прошлый прогон не оставил тёплый кэш превью", not home.exists())
+    os.environ["TGX_HOME"] = str(home)
     app = TgxApp(DemoBackend())
     async with app.run_test(size=(132, 40)) as pilot:
         await pilot.pause()
@@ -4047,6 +4270,17 @@ async def main() -> int:
         await asyncio.sleep(0.7)
         await pilot.pause()
         check("reaction is cleared", not any(mine for _, _, mine in target.reactions))
+
+        # Набор из нескольких реакций интерфейс не собирает — это умеет CLI, но
+        # идёт он через тот же метод бэкенда, и проверять надо именно его.
+        await app.backend.react(app.current, target.id, ["❤", "🥰", "😘"])
+        stored = next(m for m in await app.backend.history(app.current, 80) if m.id == target.id)
+        check("несколько реакций ложатся набором",
+              [e for e, _, mine in stored.reactions if mine] == ["❤", "🥰", "😘"])
+        await app.backend.react(app.current, target.id, [])
+        stored = next(m for m in await app.backend.history(app.current, 80) if m.id == target.id)
+        check("пустой набор снимает свои реакции",
+              not any(mine for _, _, mine in stored.reactions))
 
         # ── edit ─────────────────────────────────────────────────────────
         own = next(m for m in reversed(messages.msgs) if m.out and m.text)

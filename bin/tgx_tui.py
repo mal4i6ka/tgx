@@ -712,14 +712,23 @@ class TelegramBackend:
             sent = sent[-1]
         return await self.to_msg(sent)
 
-    async def react(self, chat: Chat, msg_id: int, emoji: str | None) -> None:
-        """Set (or with emoji=None clear) your reaction on a message."""
+    async def react(self, chat: Chat, msg_id: int, emojis: Sequence[str]) -> None:
+        """Set your reactions on a message; an empty list clears them.
+
+        Набор уходит одним вызовом, потому что Telegram его заменяет целиком, а
+        не дополняет: отправленные по одной реакции оставили бы лишь последнюю.
+        """
+        from telethon.errors import MessageNotModifiedError
         from telethon.tl import functions, types
 
-        reaction = [types.ReactionEmoji(emoticon=emoji)] if emoji else []
-        await self.client(functions.messages.SendReactionRequest(
-            peer=chat.entity, msg_id=int(msg_id), reaction=reaction, add_to_recent=bool(emoji),
-        ))
+        reaction = [types.ReactionEmoji(emoticon=e) for e in emojis]
+        try:
+            await self.client(functions.messages.SendReactionRequest(
+                peer=chat.entity, msg_id=int(msg_id), reaction=reaction,
+                add_to_recent=bool(reaction),
+            ))
+        except MessageNotModifiedError:
+            pass        # уже ровно так: просили состояние, а не событие
 
     async def edit(self, chat: Chat, msg_id: int, text: str, parse_mode: str | None = "md",
                    link_preview: bool = True) -> Msg:
@@ -1630,87 +1639,6 @@ class DemoBackend:
 
     VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 
-    async def send_file(
-        self,
-        chat: Chat,
-        paths: Sequence[str],
-        caption: str = "",
-        reply_to: int | None = None,
-        comment_to: int | None = None,
-        as_document: bool = False,
-        voice: bool = False,
-        video_note: bool = False,
-        silent: bool = False,
-        progress: Callable[[int, int], None] | None = None,
-    ) -> Msg:
-        """Send one file, or several as an album. Telegram decides photo/video/audio
-        from the content; the flags force a document, a voice note or a round video."""
-        files = [str(Path(p).expanduser()) for p in paths]
-        if not files:
-            raise ValueError("нечего отправлять")
-        streaming = not as_document and any(tgx_media.is_video_file(f) for f in files)
-        poster = None
-        if streaming and len(files) == 1:
-            poster = tgx_media.poster_frame(Path(files[0]))
-        sent = await self.client.send_file(
-            chat.entity,
-            files if len(files) > 1 else files[0],
-            caption=caption or None,
-            thumb=str(poster) if poster else None,
-            force_document=as_document,
-            voice_note=voice,
-            video_note=video_note,
-            supports_streaming=streaming,
-            silent=silent or None,
-            reply_to=reply_to,
-            comment_to=comment_to,
-            progress_callback=progress,
-        )
-        if isinstance(sent, list):
-            sent = sent[-1]
-        return await self.to_msg(sent)
-
-    async def react(self, chat: Chat, msg_id: int, emoji: str | None) -> None:
-        """Set (or with emoji=None clear) your reaction on a message."""
-        from telethon.tl import functions, types
-
-        reaction = [types.ReactionEmoji(emoticon=emoji)] if emoji else []
-        await self.client(functions.messages.SendReactionRequest(
-            peer=chat.entity, msg_id=int(msg_id), reaction=reaction, add_to_recent=bool(emoji),
-        ))
-
-    async def edit(self, chat: Chat, msg_id: int, text: str, parse_mode: str | None = "md",
-                   link_preview: bool = True) -> Msg:
-        body, entities = tgx_format.parse(text, parse_mode or "none")
-        edited = await self.client.edit_message(
-            chat.entity, int(msg_id), body, parse_mode=None,
-            formatting_entities=entities or None, link_preview=link_preview,
-        )
-        return await self.to_msg(edited)
-
-    async def delete(self, chat: Chat, msg_ids: Sequence[int], revoke: bool = True) -> int:
-        """Delete your own messages. `revoke` removes them for everyone."""
-        await self.client.delete_messages(chat.entity, [int(i) for i in msg_ids], revoke=revoke)
-        return len(msg_ids)
-
-    async def forward(self, source: Chat, msg_ids: Sequence[int], target: Chat, silent: bool = False) -> int:
-        await self.client.forward_messages(
-            target.entity, [int(i) for i in msg_ids], from_peer=source.entity, silent=silent or None
-        )
-        return len(msg_ids)
-
-    async def press_button(self, chat: Chat, msg_id: int, row: int, col: int) -> str:
-        """Press an inline button and return whatever the bot answered."""
-        msg = await self.client.get_messages(chat.entity, ids=int(msg_id))
-        if msg is None or not getattr(msg, "buttons", None):
-            raise ValueError("в этом сообщении нет кнопок")
-        result = await msg.click(row, col)
-        for attr in ("message", "text"):
-            answer = getattr(result, attr, None)
-            if isinstance(answer, str) and answer:
-                return answer
-        return "нажато"
-
     async def comments(self, chat: Chat, post_id: int, limit: int = 60) -> list[Msg]:
         await asyncio.sleep(0.05)
         return list(self._comments.setdefault((chat.id, post_id), [
@@ -2018,13 +1946,12 @@ class DemoBackend:
     async def leave(self, chat: Chat) -> None:
         self._chats = [c for c in self._chats if c.id != chat.id]
 
-    async def react(self, chat: Chat, msg_id: int, emoji: str | None) -> None:
+    async def react(self, chat: Chat, msg_id: int, emojis: Sequence[str]) -> None:
         for message in self._history.get(chat.id, []):
             if message.id != msg_id:
                 continue
             others = [r for r in message.reactions if not r[2]]
-            mine = [(emoji, 1, True)] if emoji else []
-            message.reactions = tuple(others + mine)
+            message.reactions = tuple(others + [(e, 1, True) for e in emojis])
 
     async def edit(self, chat: Chat, msg_id: int, text: str, parse_mode: str | None = "md",
                    link_preview: bool = True) -> Msg:
@@ -5049,7 +4976,7 @@ class TgxApp(App):
         if chat is None:
             return
         try:
-            await self.backend.react(chat, msg.id, emoji)
+            await self.backend.react(chat, msg.id, [emoji] if emoji else [])
         except Exception as exc:
             self.notify(f"реакция не поставилась: {exc}", severity="error", timeout=8)
             return
