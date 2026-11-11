@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rich Messages — Bot API 10.1/10.2 (June–July 2026).
+"""Rich Messages — Bot API 10.1–10.4 (June–November 2026).
 
 A rich message is a *document-grade* message: headings, tables, task lists,
 footnotes, collapsible blocks, formulas, media galleries. Only bots can send
@@ -29,6 +29,10 @@ MAX_CHARS = 32768
 MAX_BLOCKS = 500
 MAX_MEDIA = 50
 MAX_TABLE_COLUMNS = 20
+# Цитата в ответе (ReplyParameters): строкой — до 1024 символов; кусками
+# богатого текста (Bot API 10.4, quote_rich_texts) — до 32 кусков и тех же 1024.
+MAX_QUOTE_CHARS = 1024
+MAX_QUOTE_RICH_TEXTS = 32
 
 RICH_SYNTAX = """**жирный**   *курсив*   ~~зачёркнутый~~   ==выделенный==   ||спойлер||
 `код`   ```python … ```   $x^2 + y^2$   ---
@@ -198,8 +202,21 @@ def send_rich(
     is_rtl: bool = False,
     skip_entity_detection: bool = False,
     draft: bool = False,
+    quote: str = "",
+    quote_rich_texts: Sequence[Any] | None = None,
+    ephemeral_to: int | None = None,
+    ephemeral_callback: str | None = None,
+    replace_callback_message: bool = False,
 ) -> dict[str, Any]:
-    """Send one rich message. `draft=True` streams it as a partial message."""
+    """Send one rich message. `draft=True` streams it as a partial message.
+
+    `quote` / `quote_rich_texts` цитируют кусок сообщения, на которое отвечаем;
+    второе — для цитаты из богатого сообщения (Bot API 10.4).
+
+    `ephemeral_to` — сообщение видит только этот пользователь. `ephemeral_callback`
+    — id нажатия кнопки: с Bot API 10.4 ответ на нажатие можно сделать эфемерным
+    без `receiver_user_id`, его увидит только нажавший, и `chat_id` тогда не нужен.
+    """
     given = [bool(markdown.strip()), bool(html.strip()), bool(blocks)]
     if sum(given) != 1:
         raise RichError("нужно ровно одно из: markdown, html или blocks")
@@ -221,7 +238,14 @@ def send_rich(
     if skip_entity_detection:
         rich["skip_entity_detection"] = True
 
-    payload: dict[str, Any] = {"chat_id": chat_id, "rich_message": rich}
+    payload: dict[str, Any] = {"rich_message": rich}
+    if chat_id:
+        payload["chat_id"] = chat_id
+    ephemeral = ephemeral_parameters(ephemeral_to, ephemeral_callback, replace_callback_message)
+    if ephemeral:
+        payload["ephemeral_message_parameters"] = ephemeral
+    elif not chat_id:
+        raise RichError("нужен чат — без него можно только эфемерно ответить на нажатие кнопки")
     if topic:
         payload["message_thread_id"] = int(topic)   # тема форума на стороне Bot API
     keyboard = buttons_json(buttons)
@@ -231,8 +255,11 @@ def send_rich(
         payload["disable_notification"] = True
     if protect:
         payload["protect_content"] = True
+    if quote or quote_rich_texts:
+        if not reply_to:
+            raise RichError("цитата бывает только в ответе — укажите, на какое сообщение")
     if reply_to:
-        payload["reply_parameters"] = {"message_id": int(reply_to)}
+        payload["reply_parameters"] = reply_parameters(int(reply_to), quote, quote_rich_texts)
     method = "sendRichMessageDraft" if draft else "sendRichMessage"
     uploads = {m["id"]: m.pop("_upload") for m in rich.get("media", []) if m.get("_upload")}
     # Блок ссылается на attach://имя — файл кладётся в ту же форму. Ссылка лежит
@@ -255,6 +282,64 @@ def send_rich(
     return call(token, method, payload)
 
 
+def ephemeral_parameters(receiver: int | None = None, callback: str | None = None,
+                         replace: bool = False) -> dict[str, Any] | None:
+    """EphemeralMessageParameters: кому показать сообщение, которого не видят остальные.
+
+    До Bot API 10.4 `receiver_user_id` был обязательным. Теперь достаточно
+    `callback_query_id` — тогда сообщение увидит только тот, кто нажал кнопку.
+    Подменить им исходное сообщение (`replace_callback_query_message`) можно
+    только в ответ на нажатие.
+    """
+    if replace and not callback:
+        raise RichError("подменить исходное сообщение можно только в ответ на нажатие кнопки")
+    if receiver is None and not callback:
+        return None
+    params: dict[str, Any] = {}
+    if receiver is not None:
+        params["receiver_user_id"] = int(receiver)
+    if callback:
+        params["callback_query_id"] = str(callback)
+    if replace:
+        params["replace_callback_query_message"] = True
+    return params
+
+
+def reply_parameters(message_id: int, quote: str = "",
+                     quote_rich_texts: Sequence[Any] | None = None) -> dict[str, Any]:
+    """ReplyParameters с цитатой — строкой или кусками богатого текста (Bot API 10.4).
+
+    Сервер отвергает цитату, которой нет в исходном сообщении, поэтому здесь
+    проверяются только документированные пределы.
+    """
+    params: dict[str, Any] = {"message_id": int(message_id)}
+    if quote and quote_rich_texts:
+        raise RichError("цитата — либо строкой, либо кусками богатого текста, не обоими")
+    if quote:
+        if len(quote) > MAX_QUOTE_CHARS:
+            raise RichError(f"цитата длиннее {MAX_QUOTE_CHARS} символов")
+        params["quote"] = quote
+    if quote_rich_texts:
+        pieces = [as_text(piece) for piece in quote_rich_texts]
+        if len(pieces) > MAX_QUOTE_RICH_TEXTS:
+            raise RichError(f"в цитате больше {MAX_QUOTE_RICH_TEXTS} кусков текста")
+        if sum(len(_plain(piece)) for piece in pieces) > MAX_QUOTE_CHARS:
+            raise RichError(f"цитата длиннее {MAX_QUOTE_CHARS} символов")
+        params["quote_rich_texts"] = pieces
+    return params
+
+
+def _plain(value: Any) -> str:
+    """Видимый текст исходящего RichText — строки, словаря {"text": …} или списка."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return _plain(value.get("text", ""))
+    if isinstance(value, (list, tuple)):
+        return "".join(_plain(part) for part in value)
+    return ""
+
+
 # ── rendering what arrives ───────────────────────────────────────────────────
 # Rich messages reuse Telegram's Instant View model: blocks are PageBlock*, and
 # their text is the familiar TextPlain / TextBold / TextConcat tree.
@@ -262,6 +347,11 @@ HEADING_LEVELS = {"PageBlockTitle": 1, "PageBlockSubtitle": 2, "PageBlockHeader"
                   "PageBlockSubheader": 3, "PageBlockKicker": 3,
                   "PageBlockHeading1": 1, "PageBlockHeading2": 2, "PageBlockHeading3": 3,
                   "PageBlockHeading4": 4, "PageBlockHeading5": 5, "PageBlockHeading6": 6}
+
+# Номер карты и адрес TON (Bot API 10.4: RichTextBankCardNumber, RichTextTonAddress)
+# сервер размечает сам. Имена в слое MTProto ещё не устоялись, поэтому узнаём по
+# окончанию: текст внутри у них есть всегда, его и рисуем — цветом ссылки.
+SENSITIVE_TEXTS = ("BankCard", "BankCardNumber", "TonAddress")
 
 TEXT_STYLES = {"TextBold": "bold", "TextItalic": "italic", "TextUnderline": "underline",
                "TextStrike": "strike", "TextMarked": "reverse"}
@@ -296,7 +386,7 @@ def rich_text(node: Any, colors: dict[str, str] | None = None) -> Any:
         inner.stylize(Style(color=code_color))
     elif kind == "TextUrl":
         inner.stylize(Style(color=accent, underline=True, link=getattr(node, "url", None)))
-    elif kind in {"TextEmail", "TextPhone", "TextAnchor"}:
+    elif kind in {"TextEmail", "TextPhone", "TextAnchor"} or kind.endswith(SENSITIVE_TEXTS):
         inner.stylize(Style(color=accent))
     elif kind == "TextSpoiler":
         inner = Text("░" * max(1, len(inner.plain)), style=muted)
@@ -430,6 +520,12 @@ def as_text(value: Any) -> Any:
     ниже, и одноимённая функция молча его затирала.
     """
     return value
+
+
+def ton_address(address: str, text: Any = None) -> dict[str, Any]:
+    """Адрес TON внутри богатого текста (Bot API 10.4, RichTextTonAddress)."""
+    return {"type": "ton_address", "text": as_text(text if text is not None else address),
+            "address": address}
 
 
 def paragraph(text: Any) -> dict[str, Any]:

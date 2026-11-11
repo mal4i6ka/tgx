@@ -4145,7 +4145,8 @@ async def cmd_bot(args: argparse.Namespace) -> None:
                 buttons=tgx_bots.join_buttons(args.button), silent=args.silent,
                 protect=args.protect,
                 draft=args.draft, media=media, is_rtl=args.rtl, topic=args.topic,
-                skip_entity_detection=args.no_autolinks)
+                skip_entity_detection=args.no_autolinks,
+                reply_to=args.reply_to, quote=args.quote, ephemeral_to=args.ephemeral_to)
 
         result = await asyncio.to_thread(publish)
         if blocks:
@@ -5713,6 +5714,11 @@ def build_parser() -> argparse.ArgumentParser:
     b_rich.add_argument("--rtl", action="store_true", help="справа налево")
     b_rich.add_argument("--no-autolinks", action="store_true",
                         help="не превращать ссылки и упоминания в сущности автоматически")
+    b_rich.add_argument("--reply-to", type=int, help="id сообщения, на которое ответить")
+    b_rich.add_argument("--quote", default="",
+                        help="процитировать кусок сообщения из --reply-to (до 1024 символов)")
+    b_rich.add_argument("--ephemeral-to", type=int, metavar="USER_ID",
+                        help="эфемерно: сообщение увидит только этот пользователь")
 
     bot_sub.add_parser("rich-syntax", help="шпаргалка по разметке богатых сообщений")
 

@@ -359,8 +359,60 @@ def rich_message_regression() -> None:
         except tgx_rich.RichError:
             clashed = True
         check("markdown and html cannot be given together", clashed)
+
+        # Bot API 10.4: цитата кусками богатого текста и эфемерный ответ на нажатие
+        sent.clear()
+        tgx_rich.send_rich("123:TOKEN", "@news", "ответ", reply_to=5,
+                           quote_rich_texts=["первый ", {"type": "bold", "text": "кусок"}])
+        check("a rich quote travels as quote_rich_texts",
+              sent[-1][1]["reply_parameters"] == {"message_id": 5, "quote_rich_texts": [
+                  "первый ", {"type": "bold", "text": "кусок"}]})
+        tgx_rich.send_rich("123:TOKEN", "@news", "ответ", reply_to=5, quote="кусок")
+        check("a plain quote travels as quote", sent[-1][1]["reply_parameters"]["quote"] == "кусок")
+
+        sent.clear()
+        tgx_rich.send_rich("123:TOKEN", "", "только тебе", ephemeral_callback="777")
+        method, payload = sent[-1]
+        check("an ephemeral reply to a button press needs no chat_id",
+              "chat_id" not in payload
+              and payload["ephemeral_message_parameters"] == {"callback_query_id": "777"})
+        tgx_rich.send_rich("123:TOKEN", "-100777", "тебе", ephemeral_to=42)
+        check("an ephemeral message names its receiver",
+              sent[-1][1]["ephemeral_message_parameters"] == {"receiver_user_id": 42}
+              and sent[-1][1]["chat_id"] == "-100777")
+
+        for kwargs, why in (({"chat_id": ""}, "no chat and no button press"),
+                            ({"quote": "кусок"}, "a quote without a reply"),
+                            ({"reply_to": 5, "quote": "x" * 1025}, "a quote over 1024 characters"),
+                            ({"reply_to": 5, "quote_rich_texts": ["x"] * 33}, "more than 32 quote pieces"),
+                            ({"reply_to": 5, "quote": "a", "quote_rich_texts": ["a"]}, "both kinds of quote"),
+                            ({"ephemeral_to": 1, "replace_callback_message": True},
+                             "replacing a message without a button press")):
+            chat = kwargs.pop("chat_id", "@news")
+            refused = False
+            try:
+                tgx_rich.send_rich("123:TOKEN", chat, "текст", **kwargs)
+            except tgx_rich.RichError:
+                refused = True
+            check(f"refuses {why}", refused)
+
+        check("a TON address is a rich text piece",
+              tgx_rich.ton_address("UQAbc") == {"type": "ton_address", "text": "UQAbc",
+                                                "address": "UQAbc"})
     finally:
         tgx_rich.call = original
+
+    class TextTonAddress:                      # как это может прийти из слоя MTProto
+        def __init__(self, text):
+            self.text = text
+
+    class TextPlain:
+        def __init__(self, text):
+            self.text = text
+
+    shown = tgx_rich.rich_text(TextTonAddress(TextPlain("UQAbc")))
+    check("a TON address in a received rich message keeps its text and is coloured",
+          shown.plain == "UQAbc" and any(span.style for span in shown.spans))
 
 
 async def business_regression() -> None:
