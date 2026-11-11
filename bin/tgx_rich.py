@@ -186,6 +186,61 @@ def call_with_files(token: str, method: str, payload: dict[str, Any],
     return answer["result"]
 
 
+def rich_payload(markdown: str = "", html: str = "", blocks: Sequence[dict[str, Any]] | None = None,
+                 media: Sequence[dict[str, Any]] = (), is_rtl: bool = False,
+                 skip_entity_detection: bool = False) -> dict[str, Any]:
+    """`InputRichMessage`: ровно одно из markdown, html или blocks — так велит Bot API.
+
+    Тело лежит отдельно от отправки, потому что его ждут два метода:
+    `sendRichMessage` и `editMessageText`. Правка богатого сообщения — это то же
+    самое тело под другим методом, и пределы в ней надо проверять так же.
+    """
+    given = [bool(markdown.strip()), bool(html.strip()), bool(blocks)]
+    if sum(given) != 1:
+        raise RichError("нужно ровно одно из: markdown, html или blocks")
+    if markdown:
+        check_limits(markdown, media)
+
+    rich: dict[str, Any] = {}
+    if markdown:
+        rich["markdown"] = markdown
+    elif html:
+        rich["html"] = html
+    else:
+        check_blocks(blocks or [])
+        rich["blocks"] = list(blocks or [])
+    if media:
+        rich["media"] = list(media)
+    if is_rtl:
+        rich["is_rtl"] = True
+    if skip_entity_detection:
+        rich["skip_entity_detection"] = True
+    return rich
+
+
+def take_uploads(rich: dict[str, Any]) -> dict[str, Any]:
+    """Вынуть из тела файлы, которые поедут в той же форме, под их именами.
+
+    Блок ссылается на attach://имя, и ссылка лежит в поле, названном по типу
+    блока: у документа в document, у видео в video. Пока искали только в
+    document, у видеоблока имя выходило пустым, и в форму уезжало поле без
+    имени: сервер отвечал 400 с пустым телом.
+    """
+    uploads = {m["id"]: m.pop("_upload") for m in rich.get("media", []) if m.get("_upload")}
+    for block in rich.get("blocks", []) or []:
+        source = block.pop("_upload", None)
+        if source is None:
+            continue
+        holder = block.get(block.get("type") or "")
+        reference = str(holder.get("media", "")) if isinstance(holder, dict) else ""
+        name = reference.removeprefix("attach://")
+        if not name:
+            raise RichError(f"блок «{block.get('type')}» ждёт файл, но ссылки "
+                            f"attach:// в нём нет")
+        uploads[name] = source
+    return uploads
+
+
 def send_rich(
     token: str,
     chat_id: str,
@@ -217,26 +272,7 @@ def send_rich(
     — id нажатия кнопки: с Bot API 10.4 ответ на нажатие можно сделать эфемерным
     без `receiver_user_id`, его увидит только нажавший, и `chat_id` тогда не нужен.
     """
-    given = [bool(markdown.strip()), bool(html.strip()), bool(blocks)]
-    if sum(given) != 1:
-        raise RichError("нужно ровно одно из: markdown, html или blocks")
-    if markdown:
-        check_limits(markdown, media)
-
-    rich: dict[str, Any] = {}
-    if markdown:
-        rich["markdown"] = markdown
-    elif html:
-        rich["html"] = html
-    else:
-        check_blocks(blocks or [])
-        rich["blocks"] = list(blocks or [])
-    if media:
-        rich["media"] = list(media)
-    if is_rtl:
-        rich["is_rtl"] = True
-    if skip_entity_detection:
-        rich["skip_entity_detection"] = True
+    rich = rich_payload(markdown, html, blocks, media, is_rtl, skip_entity_detection)
 
     payload: dict[str, Any] = {"rich_message": rich}
     if chat_id:
@@ -261,25 +297,50 @@ def send_rich(
     if reply_to:
         payload["reply_parameters"] = reply_parameters(int(reply_to), quote, quote_rich_texts)
     method = "sendRichMessageDraft" if draft else "sendRichMessage"
-    uploads = {m["id"]: m.pop("_upload") for m in rich.get("media", []) if m.get("_upload")}
-    # Блок ссылается на attach://имя — файл кладётся в ту же форму. Ссылка лежит
-    # в поле, названном по типу блока: у документа в document, у видео в video.
-    # Пока искали только в document, у видеоблока имя выходило пустым, и в форму
-    # уезжало поле без имени: сервер отвечал 400 с пустым телом.
-    for block in rich.get("blocks", []) or []:
-        source = block.pop("_upload", None)
-        if source is None:
-            continue
-        holder = block.get(block.get("type") or "")
-        reference = str(holder.get("media", "")) if isinstance(holder, dict) else ""
-        name = reference.removeprefix("attach://")
-        if not name:
-            raise RichError(f"блок «{block.get('type')}» ждёт файл, но ссылки "
-                            f"attach:// в нём нет")
-        uploads[name] = source
+    uploads = take_uploads(rich)
     if uploads:
         return call_with_files(token, method, payload, uploads)
     return call(token, method, payload)
+
+
+def edit_rich(
+    token: str,
+    chat_id: str,
+    message_id: int,
+    markdown: str = "",
+    *,
+    html: str = "",
+    blocks: Sequence[dict[str, Any]] | None = None,
+    media: Sequence[dict[str, Any]] = (),
+    buttons: str = "",
+    is_rtl: bool = False,
+    skip_entity_detection: bool = False,
+) -> dict[str, Any]:
+    """Переписать уже отправленное богатое сообщение.
+
+    Отдельного метода для этого в Bot API нет: правится оно тем же
+    `editMessageText`, которому вместо `text` даётся `rich_message` («Use this
+    method to edit text, rich and game messages»). Поэтому тело здесь ровно то
+    же, что у отправки, — меняется метод и адрес сообщения.
+
+    Сервер правит только сообщения без клавиатуры или со встроенной: обычную
+    клавиатуру под сообщением заменить нельзя, и он откажет. Текст в богатое и
+    обратно превращать можно — тело метода одно.
+    """
+    if not chat_id:
+        raise RichError("нужен чат, в котором лежит сообщение")
+    if not message_id:
+        raise RichError("нужен id сообщения, которое правим")
+    rich = rich_payload(markdown, html, blocks, media, is_rtl, skip_entity_detection)
+    payload: dict[str, Any] = {"chat_id": chat_id, "message_id": int(message_id),
+                               "rich_message": rich}
+    keyboard = buttons_json(buttons)
+    if keyboard:
+        payload["reply_markup"] = keyboard
+    uploads = take_uploads(rich)
+    if uploads:
+        return call_with_files(token, "editMessageText", payload, uploads)
+    return call(token, "editMessageText", payload)
 
 
 def ephemeral_parameters(receiver: int | None = None, callback: str | None = None,

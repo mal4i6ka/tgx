@@ -1937,10 +1937,25 @@ async def cmd_rich(args: argparse.Namespace) -> None:
         if args.button:
             markup = client.build_reply_markup(
                 tgx_bots.parse_buttons(tgx_bots.join_buttons(args.button)))
+        body = types.InputRichMessageMarkdown(
+            markdown=markdown, rtl=False, noautolink=False, files=files or [])
+        # Слой 227 принимает rich_message и в EditMessageRequest, так что своё
+        # богатое сообщение можно переписать тем же телом. Тихо и в тему
+        # отправляют один раз — у правки этих полей нет, и сервер их не ждёт.
+        if args.edit:
+            spare = [name for name, value in (("--silent", args.silent),
+                                              ("--topic", args.topic)) if value]
+            if spare:
+                raise SystemExit("с --edit не сочетается: " + ", ".join(spare)
+                                 + " — правка меняет только содержимое сообщения")
+            await client(functions.messages.EditMessageRequest(
+                peer=chat, id=args.edit, rich_message=body, reply_markup=markup))
+            render.emit({"ok": True, "chat": args.peer, "message_id": args.edit,
+                         "edited": True})
+            return
         result = await client(functions.messages.SendMessageRequest(
             peer=chat, message="", random_id=helpers.generate_random_long(),
-            rich_message=types.InputRichMessageMarkdown(
-                markdown=markdown, rtl=False, noautolink=False, files=files or []),
+            rich_message=body,
             reply_to=reply, reply_markup=markup, silent=args.silent or None))
         sent_id = 0
         for update in getattr(result, "updates", None) or []:
@@ -4151,7 +4166,26 @@ async def cmd_bot(args: argparse.Namespace) -> None:
                 f"-100{peer.id}" if entity_kind(peer) in {"channel", "group"} else str(peer.id))
         finally:
             await client.disconnect()
+        # Правка меняет только содержимое: кому, когда и в ответ на что — всё это
+        # у сообщения уже решено, и сервер такие поля в editMessageText не ждёт.
+        # Молча их проглотить хуже, чем сказать: человек будет думать, что
+        # отправил тихо или в тему, а на деле ни того, ни другого не случилось.
+        if args.edit:
+            spare = [name for name, value in (
+                ("--draft", args.draft), ("--silent", args.silent),
+                ("--protect", args.protect), ("--reply-to", args.reply_to),
+                ("--quote", args.quote), ("--ephemeral-to", args.ephemeral_to),
+                ("--topic", args.topic)) if value]
+            if spare:
+                raise SystemExit("с --edit не сочетается: " + ", ".join(spare)
+                                 + " — правка меняет только содержимое сообщения")
+
         def publish() -> Any:
+            if args.edit:
+                return tgx_rich.edit_rich(
+                    bot.token, chat_id, args.edit, "" if blocks else markdown, blocks=blocks,
+                    buttons=tgx_bots.join_buttons(args.button), media=media,
+                    is_rtl=args.rtl, skip_entity_detection=args.no_autolinks)
             return tgx_rich.send_rich(
                 bot.token, chat_id, "" if blocks else markdown, blocks=blocks,
                 buttons=tgx_bots.join_buttons(args.button), silent=args.silent,
@@ -4163,8 +4197,9 @@ async def cmd_bot(args: argparse.Namespace) -> None:
         result = await asyncio.to_thread(publish)
         if blocks:
             render.note(tgx_rich.BLOCKS_ARE_WRITE_ONLY)
-        render.emit({"ok": True, "message_id": result.get("message_id"), "chat": chat_id,
-                     "as": bot.username, "draft": args.draft})
+        render.emit({"ok": True, "message_id": result.get("message_id") or args.edit,
+                     "chat": chat_id, "as": bot.username,
+                     "edited": bool(args.edit), "draft": args.draft})
         return
 
     if command == "post":
@@ -5731,6 +5766,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="процитировать кусок сообщения из --reply-to (до 1024 символов)")
     b_rich.add_argument("--ephemeral-to", type=int, metavar="USER_ID",
                         help="эфемерно: сообщение увидит только этот пользователь")
+    b_rich.add_argument("--edit", type=int, metavar="ID",
+                        help="переписать уже отправленное сообщение с этим id, а не слать новое")
 
     bot_sub.add_parser("rich-syntax", help="шпаргалка по разметке богатых сообщений")
 
@@ -6935,6 +6972,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help="картинка внутрь документа; ссылка в тексте — tg://photo?id=ИМЯ. "
                            "Если ссылки нет, картинка встаёт в начало")
     rich.add_argument("--silent", action="store_true")
+    rich.add_argument("--edit", type=int, metavar="ID",
+                      help="переписать своё сообщение с этим id, а не слать новое")
     rich.set_defaults(func=cmd_rich)
 
     tr = sub.add_parser("transcribe", help="расшифровать голосовое или кружок в текст",

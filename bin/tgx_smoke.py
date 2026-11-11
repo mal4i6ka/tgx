@@ -1039,6 +1039,80 @@ async def resolve_peer_regression() -> None:
     check("пустой чат отвергается сразу", "не указан чат" in refused)
 
 
+def rich_edit_regression() -> None:
+    """Богатое сообщение можно не только отправить, но и переписать.
+
+    Отдельного метода в Bot API для этого нет: правит его тот же
+    `editMessageText`, которому вместо `text` дают `rich_message`. Без этого tgx
+    умел собрать документ и не умел исправить в нём опечатку — создать и
+    бросить. Тело у отправки и правки общее, иначе пределы разъедутся.
+    """
+    import tgx_rich
+
+    sent: list[tuple[str, dict]] = []
+    original = tgx_rich.call
+    tgx_rich.call = lambda token, method, payload: sent.append((method, payload)) or {"message_id": 7}
+    try:
+        tgx_rich.edit_rich("123:TOKEN", "@news", 42, "# Исправлено")
+        method, payload = sent[-1]
+        check("правка идёт тем же editMessageText", method == "editMessageText")
+        check("адрес сообщения на месте",
+              payload["chat_id"] == "@news" and payload["message_id"] == 42)
+        check("тело уехало как rich_message, а не text",
+              payload["rich_message"] == {"markdown": "# Исправлено"} and "text" not in payload)
+
+        tgx_rich.edit_rich("123:TOKEN", "@news", 42, html="<b>вот так</b>")
+        check("html-форма правится тоже",
+              sent[-1][1]["rich_message"] == {"html": "<b>вот так</b>"})
+
+        tgx_rich.edit_rich("123:TOKEN", "@news", 42, blocks=[tgx_rich.paragraph("абзац")],
+                           buttons="Сайт=https://x.io")
+        payload = sent[-1][1]
+        check("блочная форма правится тоже", "blocks" in payload["rich_message"])
+        check("клавиатура уходит вместе с правкой",
+              "inline_keyboard" in (payload.get("reply_markup") or {}))
+
+        # Пределы и взаимоисключения у правки те же, что у отправки: тело одно.
+        for kwargs, why in (({"markdown": ""}, "пустое тело"),
+                            ({"markdown": "текст", "html": "<b>и то</b>"}, "два тела сразу"),
+                            ({"markdown": "x" * (tgx_rich.MAX_CHARS + 1)}, "текст сверх предела")):
+            refused = False
+            try:
+                tgx_rich.edit_rich("123:TOKEN", "@news", 42, **kwargs)
+            except tgx_rich.RichError:
+                refused = True
+            check(f"правка отказывает: {why}", refused)
+
+        for chat, message_id, why in (("", 42, "без чата"), ("@news", 0, "без id сообщения")):
+            refused = False
+            try:
+                tgx_rich.edit_rich("123:TOKEN", chat, message_id, "текст")
+            except tgx_rich.RichError:
+                refused = True
+            check(f"правка отказывает: {why}", refused)
+    finally:
+        tgx_rich.call = original
+
+    check("тело собирается общей функцией",
+          tgx_rich.rich_payload("# Один\n\nдва", is_rtl=True)
+          == {"markdown": "# Один\n\nдва", "is_rtl": True})
+
+    # Файлы вынимаются из тела отдельно — и у отправки, и у правки одинаково.
+    body = {"media": [{"id": "cover", "_upload": "/tmp/cover.png"}]}
+    check("файл вынимается из тела под своим именем",
+          tgx_rich.take_uploads(body) == {"cover": "/tmp/cover.png"}
+          and "_upload" not in body["media"][0])
+
+    # Своё богатое сообщение правится по MTProto: слой 227 принимает
+    # rich_message и в EditMessageRequest, не только в SendMessageRequest.
+    import inspect
+
+    from telethon.tl import functions
+
+    fields = inspect.signature(functions.messages.EditMessageRequest.__init__).parameters
+    check("MTProto правит богатое сообщение тем же полем", "rich_message" in fields)
+
+
 def rich_blocks_regression() -> None:
     """Блочная форма Bot API 10.2–10.3: единственный способ положить кнопки и файл
     ВНУТРЬ документа. Сборщики отдают готовый JSON, поэтому проверяются им же."""
@@ -3778,6 +3852,33 @@ def rich_render_regression() -> None:
     check("a divider is drawn", "─────" in rendered)
     check("blocks are separated by blank lines", "\n\n" in rendered)
 
+    # Блок, которого отрисовщик не знает, рисуется пустотой — и сообщение молча
+    # теряет кусок, без всякого следа. Перебираем все блоки слоя, чтобы такой не
+    # завёлся: их число растёт вместе со слоем, а requirements разрешают две
+    # версии Telethon, и CI гоняет обе.
+    names = sorted(n for n in dir(types) if n.startswith("PageBlock"))
+    check("блоков в слое больше тридцати", len(names) > 30)
+    probe = types.TextPlain("проба")
+    plain_item = types.PageListItemText(text=probe)
+    numbered = types.PageListOrderedItemText(num="1", text=probe)
+    mute = []
+    for name in names:
+        block = getattr(types, name).__new__(getattr(types, name))
+        for field, value in (("text", probe), ("title", probe), ("caption", probe),
+                             ("name", "якорь"), ("url", "https://x.io"),
+                             ("rows", []), ("blocks", [])):
+            if not hasattr(block, field):
+                setattr(block, field, value)
+        if not hasattr(block, "items"):
+            block.items = [numbered if "Ordered" in name else plain_item]
+        holder = types.RichMessage.__new__(types.RichMessage)
+        holder.blocks = [block]
+        if not tgx_rich.render_message(holder).plain.strip():
+            mute.append(name.replace("PageBlock", ""))
+    if mute:
+        print(f"  рисуются пустотой: {mute}")
+    check("каждый блок слоя что-то рисует", not mute)
+
 
 def article_regression() -> None:
     """Markdown must land on the narrow tag set Telegraph accepts — and the token
@@ -4224,6 +4325,7 @@ async def main() -> int:
     direct_bot_regression()
     multipart_regression()
     rich_blocks_regression()
+    rich_edit_regression()
     poll_regression()
     date_entity_regression()
     command_surface_regression()
