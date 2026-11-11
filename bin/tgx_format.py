@@ -334,6 +334,11 @@ SERVICE_ACTIONS: dict[str, Any] = {
     # боты и мини-приложения
     "BotAllowed": lambda a: _label("бот допущен", getattr(a, "domain", "") or getattr(getattr(a, "app", None), "title", "") or ""),
     "WebViewDataSent": lambda a: _label("данные из мини-приложения", getattr(a, "text", "")),
+    "WebViewDataSentMe": lambda a: _label("данные из мини-приложения", getattr(a, "text", "")),
+    # Сообщества — слой 229. На 227 таких типов нет, и записи просто не находят
+    # себе действия: таблица по именам этим и хороша.
+    "ChangeCommunity": "[сменилось сообщество]",
+    "ChatJoinedViaCommunity": "[вступил через сообщество]",
     "RequestedPeer": "[передан выбранный чат]",
     "RequestedPeerSentMe": "[передан выбранный чат]",
     "SecureValuesSent": "[переданы документы]",
