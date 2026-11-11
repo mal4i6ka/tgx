@@ -2439,6 +2439,33 @@ async def msgextra_regression() -> None:
     check("и простая строка тоже годится", rows[1]["папка"] == "Простая строка")
     check("описание — с обёртки", rows[0]["описание"] == "все новые")
 
+    # Просмотренное содержимое и прочитанный чат — разные вещи, и отправитель
+    # видит второе: пока не сказать отдельно, точка у голосового остаётся. У
+    # канала для этого свой метод, и он требует сам канал — вариант из messages
+    # адресует сообщение одним id, без чата, и там не годится.
+    from telethon.tl import types as T
+
+    fake_private = Fake()
+    marked = await fake_private.read_contents(None, [11, 12])
+    sent = fake_private.sent[0]
+    check("в личном чате зовётся messages-вариант",
+          type(sent).__name__ == "ReadMessageContentsRequest"
+          and not hasattr(sent, "channel"))
+    check("и уходят все названные сообщения", list(sent.id) == [11, 12])
+    check("ответ говорит, сколько отмечено", marked["сообщений"] == 2)
+
+    fake_channel = Fake()
+    await fake_channel.read_contents(T.InputPeerChannel(channel_id=7, access_hash=9), [5])
+    sent = fake_channel.sent[0]
+    check("у канала зовётся channels-вариант", hasattr(sent, "channel"))
+    check("и канал в запросе тот самый", sent.channel.channel_id == 7)
+
+    try:
+        await Fake().read_contents(None, [])
+        check("пустой список должен ругаться", False)
+    except M.MsgError as exc:
+        check("и объяснять, что нужно", "сообщение" in str(exc))
+
 
 async def webapp_button_regression() -> None:
     """Кнопка, открывающая мини-приложение, — не callback. У Telethon для неё
