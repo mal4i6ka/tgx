@@ -4367,7 +4367,12 @@ class TgxApp(App):
         bar.account = await self.backend.whoami()
         bar.live = True
         if self.media_backend != "off" and not tgx_media.available():
-            self.notify(f"превью выключены: нет {tgx_media.missing()} — pip install -r requirements.txt", timeout=8)
+            # Пусто — значит пакеты на месте, а размера окна не дал терминал:
+            # советовать тут pip означало бы отправить чинить не то.
+            absent = tgx_media.missing()
+            self.notify(
+                f"превью выключены: нет {absent} — pip install -r requirements.txt" if absent
+                else "превью выключены: терминал не сообщил размер окна", timeout=8)
         await self.refresh_dialogs(first=True)
         self.backend.watch(self._incoming, self._typing)
 

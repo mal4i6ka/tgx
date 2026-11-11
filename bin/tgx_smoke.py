@@ -3833,6 +3833,79 @@ def file_type_regression() -> None:
           tgx_media.open_external(Path("/nonexistent/tgx-probe.jpg")) is not None)
 
 
+def media_probe_regression() -> None:
+    """Терминал, не сказавший размер окна, гасит превью — а не весь `tgx ui`.
+
+    `import textual_image.widget` зовёт `get_cell_size()` прямо на уровне модуля,
+    а та делит пиксельную ширину окна на число колонок. В pty, которому никто не
+    задал `TIOCSWINSZ` (запуск из скрипта, демо под запись), обе величины нули —
+    импорт вылетает `ZeroDivisionError`. Это не `ModuleNotFoundError`, поэтому он
+    проходил сквозь `available()` и `probe()` и уносил с собой весь запуск.
+    Живой pty отсюда не поднять, так что импорт подменён: проверяется ровно то,
+    что из `available()` не вылетает ничего, кроме False.
+    """
+    import importlib.abc
+    import importlib.util
+
+    import tgx_media
+
+    WIDGET = "textual_image.widget"
+
+    class Boom(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+        """Загрузчик, который валит импорт `WIDGET` заданной ошибкой."""
+
+        def __init__(self, error: BaseException) -> None:
+            self.error = error
+
+        def find_spec(self, name, path=None, target=None):
+            return importlib.util.spec_from_loader(name, self) if name == WIDGET else None
+
+        def create_module(self, spec):
+            return None
+
+        def exec_module(self, module):
+            raise self.error
+
+    def attempt(error: BaseException) -> tuple[str, bool, str, str]:
+        """Что скажут available()/probe()/missing(), когда импорт падает так.
+
+        Первым — то, что вылетело из них наружу (пусто, если ничего). Ловим это
+        здесь, чтобы регрессия стала красной проверкой с текстом ошибки, а не
+        оборванным на середине прогоном.
+        """
+        tgx_media._MISSING.clear()
+        tgx_media._BROKEN = False
+        for name in [n for n in sys.modules if n == WIDGET or n.startswith(WIDGET + ".")]:
+            del sys.modules[name]          # иначе импорт возьмёт готовый модуль
+        finder = Boom(error)
+        sys.meta_path.insert(0, finder)
+        try:
+            return "", tgx_media.available(), tgx_media.probe("auto"), tgx_media.missing()
+        except BaseException as exc:
+            return repr(exc), True, "", ""
+        finally:
+            sys.meta_path.remove(finder)
+
+    saved = {n: m for n, m in sys.modules.items() if n.startswith("textual_image")}
+    was_missing, was_broken = set(tgx_media._MISSING), tgx_media._BROKEN
+    try:
+        leak, alive, where, absent = attempt(ZeroDivisionError("division by zero"))
+        check(f"молчащий терминал ничем не стреляет из available() {leak}".strip(), not leak)
+        check("он гасит превью, а не весь tgx ui", alive is False)
+        check("probe() в этом случае отвечает off", where == "off")
+        check("ставить при этом нечего — пакеты в совете не поминаются", absent == "")
+
+        leak, alive, _, absent = attempt(ModuleNotFoundError("No module named 'PIL'", name="PIL"))
+        check("а ненайденный пакет по-прежнему назван по имени",
+              not leak and alive is False and absent == "PIL")
+    finally:
+        sys.modules.update(saved)
+        tgx_media._MISSING.clear()
+        tgx_media._MISSING.update(was_missing)
+        tgx_media._BROKEN = was_broken
+    check("после подмены превью снова на месте", tgx_media.available())
+
+
 def thumbnail_choice_regression() -> None:
     """A preview must download a thumbnail — never the full-size photo."""
     from telethon.tl import types
@@ -4053,6 +4126,7 @@ async def main() -> int:
     await bots_regression()
     thumbnail_choice_regression()
     file_type_regression()
+    media_probe_regression()
     shadowed_method_regression()
     button_layer_regression()
     # drive the UI under the same task factory the real terminal driver installs

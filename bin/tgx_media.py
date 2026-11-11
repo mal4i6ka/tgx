@@ -21,6 +21,8 @@ BACKENDS = ("auto", "tgp", "sixel", "halfcell", "unicode", "off")
 CELL_ASPECT = 2.0
 
 _MISSING: set[str] = set()
+# Импорт сорвался, но не из-за отсутствующего пакета — см. available().
+_BROKEN = False
 
 
 def cache_dir() -> Path:
@@ -29,17 +31,43 @@ def cache_dir() -> Path:
 
 
 def available() -> bool:
+    """Есть ли чем рисовать картинки — и спросить об этом можно безопасно.
+
+    `import textual_image.widget` не просто подтягивает модуль: на уровне модуля
+    он зовёт `get_cell_size()`, а та делит пиксельную ширину окна на число
+    колонок. Терминал, который размер окна не сообщил (pty без `TIOCSWINSZ` —
+    так tgx запускают из скриптов и из-под записи), отдаёт нули, и импорт
+    вылетает `ZeroDivisionError`. Он не `ModuleNotFoundError`, поэтому раньше
+    проходил отсюда насквозь и убивал весь `tgx ui` сырым следом — вместо того
+    чтобы тихо остаться без превью. Любая поломка здесь значит одно и то же:
+    картинок не будет, — поэтому ловим всё.
+
+    Разделена только причина, потому что совет пользователю разный: ненайденный
+    пакет `missing()` называет по имени (его ставят через pip), а молчащему
+    терминалу ставить нечего, и называть там нечего тоже.
+    """
+    global _BROKEN
     try:
         import PIL  # noqa: F401
         import textual_image.widget  # noqa: F401
     except ModuleNotFoundError as exc:
         _MISSING.add(exc.name or "?")
         return False
+    except Exception:
+        _BROKEN = True
+        return False
     return True
 
 
 def missing() -> str:
-    return ", ".join(sorted(_MISSING)) or "pillow, textual-image"
+    """Чего не хватает для превью — или пустая строка, когда ставить нечего.
+
+    Пусто значит, что пакеты на месте, а импорт сорвался по вине терминала:
+    совет «поставь зависимости» в этом случае только сбивал бы с толку.
+    """
+    if _MISSING:
+        return ", ".join(sorted(_MISSING))
+    return "" if _BROKEN else "pillow, textual-image"
 
 
 def probe(backend: str = "auto") -> str:
