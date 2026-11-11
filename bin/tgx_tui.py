@@ -1303,6 +1303,18 @@ class TelegramBackend:
     async def mark_read(self, chat: Chat) -> None:
         await self.client.send_read_acknowledge(chat.entity)
 
+    async def mark_contents_viewed(self, chat: Chat, msg_id: int) -> None:
+        """Сказать отправителю, что голосовое прослушано, а кружок просмотрен.
+
+        Прочитанный чат этого не говорит: `send_read_acknowledge` двигает только
+        границу прочитанного, а точка у голосового гаснет от другого вызова.
+        Какой именно — у канала свой, — уже разобрано в `tgx_msgextra`; берём
+        оттуда, чтобы правило жило в одном месте.
+        """
+        import tgx_msgextra
+
+        await tgx_msgextra.Extra(self.client).read_contents(chat.entity, [msg_id])
+
     async def download(self, chat: Chat, msg_id: int, dest_dir: Path, progress: Callable[[int, int], None] | None = None) -> str | None:
         msg = self._raw.get((chat.id, msg_id))
         if msg is None:
@@ -1989,6 +2001,9 @@ class DemoBackend:
 
     async def mark_read(self, chat: Chat) -> None:
         chat.unread = 0
+
+    async def mark_contents_viewed(self, chat: Chat, msg_id: int) -> None:
+        """Демо никому ничего не сообщает — отправителя тут нет."""
 
     async def download(self, chat: Chat, msg_id: int, dest_dir: Path, progress: Callable[[int, int], None] | None = None) -> str | None:
         return await self.thumbnail(chat, msg_id, dest_dir)
@@ -4891,6 +4906,14 @@ class TgxApp(App):
         if not msg.out:
             self.notify("править можно только свои сообщения", timeout=3)
             return
+        if msg.rich is not None:
+            # У богатого сообщения в msg.text пусто, и прежний отказ говорил
+            # «нет текста» — неправда: текст есть, он просто не плоский. Вернуть
+            # из блоков исходную разметку нельзя, сервер её не отдаёт, поэтому
+            # правка идёт новой разметкой целиком, а это дело CLI.
+            self.notify(f"богатое сообщение правится целиком, новой разметкой: "
+                        f"tgx rich ЧАТ --file новый.md --edit {msg.id}", timeout=10)
+            return
         if not msg.text:
             self.notify("у сообщения нет текста для правки", timeout=3)
             return
@@ -5053,6 +5076,7 @@ class TgxApp(App):
             self.notify("картинка недоступна", timeout=3)
             return
         note = "это кадр из видео, терминал его не проигрывает" if is_video(msg.media) else ""
+        await self._mark_viewed(msg.id)
         self.push_screen(MediaScreen(Path(path), f"{msg.sender or ''} · {msg.text or msg.media}", self.media_backend, note))
 
     @work(group="open")
@@ -5089,6 +5113,7 @@ class TgxApp(App):
         if error:
             self.notify(f"не открылось: {error}", severity="error", timeout=10)
         else:
+            await self._mark_viewed(msg.id)
             self.notify(f"открыл {Path(path).name}", timeout=4)
 
     @work(group="read")
@@ -5100,6 +5125,20 @@ class TgxApp(App):
     async def action_mark_read(self) -> None:
         if self.current is not None:
             await self._mark_read(self.current)
+
+    async def _mark_viewed(self, msg_id: int) -> None:
+        """Отметить содержимое просмотренным — молча.
+
+        Это вежливость к отправителю, а не действие пользователя: он открыл
+        вложение и ждёт вложение, а не отчёт об отметке. Падать и ругаться
+        из-за неё незачем, поэтому ошибку глотаем.
+        """
+        if self.current is None:
+            return
+        try:
+            await self.backend.mark_contents_viewed(self.current, msg_id)
+        except Exception:
+            pass
 
     async def _mark_read(self, chat: Chat) -> None:
         try:
