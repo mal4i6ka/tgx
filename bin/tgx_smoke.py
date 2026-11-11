@@ -2340,6 +2340,104 @@ def ai_compose_regression() -> None:
     check("без тона возвращаем пустоту", A._tone("") is None)
 
 
+async def qr_login_regression() -> None:
+    """Вход по QR: код рисуется из матрицы полблоками, а ожидание не отпускает.
+
+    Две вещи легко сделать молча неправильно. Полярность: нарисовать тёмные
+    модули чернилами значит отдать сканеру негатив, и он не прочтёт код — без
+    ошибки, просто никогда. И истечение токена: он живёт меньше минуты, и если
+    счесть таймаут отказом, вход сорвётся на ровном месте.
+    """
+    import asyncio
+
+    import tgx_qr as Q
+
+    check("кодировщик на месте", Q.available())
+
+    url = "tg://login?token=AQAAAAABBBBBCCCCC"
+    drawn = Q.render(url, border=2)
+    lines = drawn.splitlines()
+    check("код нарисован", len(lines) > 8)
+    check("строки одной ширины", len({len(x) for x in lines}) == 1)
+    check("знаки только полблочные", set(drawn) <= set("█▀▄ \n"))
+
+    # Рисунок должен быть точным отпечатком матрицы, а не похожим на неё:
+    # разбираем его обратно в модули и сверяем с самим кодировщиком.
+    import segno
+
+    matrix = [[bool(c) for c in row] for row in segno.make(url, error="l").matrix]
+    back: list[list[bool]] = []
+    for line in lines:
+        upper, lower = [], []
+        for ch in line:
+            upper.append(ch in "█▀")
+            lower.append(ch in "█▄")
+        back.append(upper)
+        back.append(lower)
+    # чернила = светлый модуль, поэтому обратно это «не тёмный»
+    inner = [[not cell for cell in row[2:-2]] for row in back[2:2 + len(matrix)]]
+    check("рисунок — точный отпечаток матрицы", inner == matrix)
+
+    border_row = lines[0]
+    check("зона тишины по краю светлая", set(border_row) == {"█"})
+
+    inverted = Q.render(url, border=2, invert=True)
+    check("инверсия меняет рисунок", inverted != drawn)
+    check("и меняет именно полярность",
+          set(inverted.splitlines()[0]) == {" "})
+
+    check("один и тот же токен рисуется одинаково", Q.render(url) == Q.render(url))
+    check("разные токены — разные коды", Q.render(url) != Q.render(url + "X"))
+
+    # --- ожидание: истёкший код сменяется, а не считается отказом ---
+    class Qr:
+        def __init__(self, outcomes):
+            self.url = "tg://login?token=FIRST"
+            self.outcomes = list(outcomes)
+            self.recreated = 0
+
+        async def wait(self, timeout=None):
+            outcome = self.outcomes.pop(0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        async def recreate(self):
+            self.recreated += 1
+            self.url = f"tg://login?token=AGAIN{self.recreated}"
+
+    class Client:
+        def __init__(self, qr):
+            self.qr = qr
+            self.signed_with = None
+
+        async def qr_login(self):
+            return self.qr
+
+        async def sign_in(self, password=None):
+            self.signed_with = password
+            return "вошёл по паролю"
+
+    shown: list[str] = []
+    qr = Qr([asyncio.TimeoutError(), "вошёл"])
+    client = Client(qr)
+    who = await Q.login(client, show=shown.append, ask_password=lambda: "")
+    check("истёкший код не роняет вход", who == "вошёл")
+    check("а заменяется новым", qr.recreated == 1)
+    check("и новый код тоже показан", len(shown) == 2 and shown[0] != shown[1])
+
+    from telethon.errors import SessionPasswordNeededError
+
+    asked = []
+    qr2 = Qr([SessionPasswordNeededError(request=None)])
+    client2 = Client(qr2)
+    who2 = await Q.login(client2, show=lambda code: None,
+                         ask_password=lambda: asked.append(1) or "тайна")
+    check("двухфакторная доводится до пароля", who2 == "вошёл по паролю")
+    check("пароль спросили один раз", asked == [1])
+    check("и отдали серверу как есть", client2.signed_with == "тайна")
+
+
 async def msgextra_regression() -> None:
     """Голоса в опросе задаются номерами, а сервер ждёт байты вариантов — их
     нельзя угадать, надо взять из самого сообщения. Промах здесь означал бы
@@ -4002,6 +4100,44 @@ def folder_and_paging_regression() -> None:
     check("background page adds the missing chats", any(c.id == 3 for c in merged))
 
 
+async def viewed_contents_regression() -> None:
+    """Открыть вложение и отметить его просмотренным — разные вещи.
+
+    Прочитанный чат вторую не заменяет: `send_read_acknowledge` двигает границу
+    прочитанного, а точка у голосового у отправителя гаснет от другого запроса.
+    Полноэкранный клиент умел открыть кружок и ничего об этом не сказать — с
+    той стороны выходило «получено и проигнорировано».
+    """
+    from tgx_tui import Chat, DemoBackend, TelegramBackend
+
+    sent = []
+
+    class Client:
+        async def __call__(self, request):
+            sent.append(request)
+            return None
+
+    backend = TelegramBackend.__new__(TelegramBackend)
+    backend.client = Client()
+    await backend.mark_contents_viewed(Chat(id=7, name="проба"), 42)
+    check("клиент говорит серверу о просмотре", len(sent) == 1)
+    check("и именно про это сообщение", list(sent[0].id) == [42])
+    check("в личном чате — вариант без канала", not hasattr(sent[0], "channel"))
+
+    from telethon.tl import types as T
+
+    sent.clear()
+    channel = Chat(id=8, name="канал", kind="channel",
+                   entity=T.InputPeerChannel(channel_id=8, access_hash=1))
+    await backend.mark_contents_viewed(channel, 5)
+    check("у канала — свой вариант запроса", hasattr(sent[0], "channel"))
+
+    # Демо никому не пишет, но и падать не должно: иначе v и o роняли бы
+    # клиент на демо-данных, где отправителя попросту нет.
+    await DemoBackend().mark_contents_viewed(Chat(id=1, name="демо"), 1)
+    check("в демо отметка безвредна", True)
+
+
 async def preview_cache_regression() -> None:
     """Previews must come from the cache, and interrupted downloads must not
     leave a zero-byte file that makes the same message refetch on every open."""
@@ -4306,6 +4442,7 @@ async def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     scratch_regression()
     await eager_task_regression()
+    await viewed_contents_regression()
     await preview_cache_regression()
     folder_and_paging_regression()
     video_regression()
@@ -4322,6 +4459,7 @@ async def main() -> int:
     security_regression()
     calls_regression()
     ai_compose_regression()
+    await qr_login_regression()
     await msgextra_regression()
     await webapp_button_regression()
     palette_regression()

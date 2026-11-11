@@ -50,6 +50,7 @@ import tgx_pay
 import tgx_pending
 import tgx_poll
 import tgx_profile
+import tgx_qr
 import tgx_rich
 import tgx_transcribe
 import tgx_render as render
@@ -316,10 +317,41 @@ async def ensure_login(client: TelegramClient) -> None:
         await client.sign_in(password=password)
 
 
+async def qr_login(client: TelegramClient, *, invert: bool = False) -> None:
+    """Показать код и ждать, пока его отсканируют с телефона.
+
+    Код печатается прямо в вывод, а не через `render.emit`: это рисунок, его
+    незачем заворачивать в панель, и в `--plain` он должен остаться ровно
+    таким же — сканеру безразлично, что терминал думает о цвете.
+    """
+    if not tgx_qr.available():
+        raise SystemExit(tgx_qr.QR_MISSING)
+
+    def show(code: str) -> None:
+        print(code, flush=True)
+        print("Отсканируйте код: Telegram → Настройки → Устройства → "
+              "Подключить устройство.\nКод живёт меньше минуты; истёкший "
+              "сменится сам, ждите здесь.", flush=True)
+
+    try:
+        await tgx_qr.login(client, invert=invert, show=show,
+                           ask_password=lambda: getpass.getpass("2FA password: "))
+    except tgx_qr.QrError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 async def cmd_auth(args: argparse.Namespace) -> None:
     client = await make_client()
     try:
-        await ensure_login(client)
+        if getattr(args, "qr", False):
+            # Уже вошедшему код не нужен: ждать сканирования, которого никто
+            # не сделает, незачем.
+            if await client.is_user_authorized():
+                render.note("вход уже есть — код не нужен")
+            else:
+                await qr_login(client, invert=args.invert)
+        else:
+            await ensure_login(client)
         me = await client.get_me()
         render.emit({"ok": True, "id": me.id, "username": me.username, "name": entity_title(me)})
     finally:
@@ -5902,9 +5934,14 @@ def build_parser() -> argparse.ArgumentParser:
     bn.add_argument("--list", action="store_true", help="показать доступные эффекты")
     bn.set_defaults(func=cmd_banner)
 
-    sub.add_parser("auth", help="log in and save local Telegram session",
-                   epilog="пример:\n  tgx auth\n",
-                   formatter_class=argparse.RawDescriptionHelpFormatter).set_defaults(func=cmd_auth)
+    au = sub.add_parser("auth", help="log in and save local Telegram session",
+                        epilog="примеры:\n  tgx auth\n  tgx auth --qr\n",
+                        formatter_class=argparse.RawDescriptionHelpFormatter)
+    au.add_argument("--qr", action="store_true",
+                    help="войти по QR-коду, а не по телефону и коду из СМС")
+    au.add_argument("--invert", action="store_true",
+                    help="инвертировать код — для терминала со светлым фоном")
+    au.set_defaults(func=cmd_auth)
     sub.add_parser("me", help="show the logged-in account").set_defaults(func=cmd_me)
     sub.add_parser("config", help="путь к файлу настроек и есть ли он на диске").set_defaults(func=cmd_config)
 
