@@ -3500,6 +3500,7 @@ async def cmd_msgx(args: argparse.Namespace) -> None:
             "drop-answer": lambda: ex.drop_answer(peer, args.id, args.option),
             "unread-votes": lambda: ex.unread_votes(peer, limit=args.limit),
             "read-votes": lambda: ex.read_votes(peer),
+            "read-contents": lambda: ex.read_contents(peer, args.id),
             "pin-saved": lambda: ex.pin_saved(args.who, pinned=args.state == "on"),
             "pinned-saved": lambda: ex.pinned_saved(),
             "order-pinned": lambda: ex.order_pinned(args.who),
@@ -4986,6 +4987,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     m_rvt = mx_sub.add_parser("read-votes", help="отметить голоса прочитанными")
     m_rvt.add_argument("peer")
+
+    m_rc = mx_sub.add_parser("read-contents",
+                             help="отметить голосовое прослушанным, одноразовое медиа просмотренным")
+    m_rc.add_argument("peer")
+    m_rc.add_argument("id", type=int, nargs="+", help="id сообщений; можно несколько")
 
     m_ps = mx_sub.add_parser("pin-saved", help="закрепить под-чат избранного")
     m_ps.add_argument("who")

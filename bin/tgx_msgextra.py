@@ -621,6 +621,32 @@ class Extra:
             peer=peer, top_msg_id=topic or None))
         return {"голоса": "отмечены прочитанными"}
 
+    async def read_contents(self, peer: Any, ids: Any) -> dict[str, Any]:
+        """Отметить содержимое сообщений просмотренным.
+
+        Прочитанный чат и просмотренное содержимое — разные вещи, и отправитель
+        видит именно второе. Голосовое остаётся непрослушанным, кружок
+        непросмотренным, одноразовая фотография неоткрытой до тех пор, пока
+        клиент не скажет об этом отдельным вызовом. tgx дочитывал чат целиком, а
+        точка у голосового у собеседника так и оставалась: с его стороны выходило,
+        что сообщение получено и проигнорировано.
+        """
+        from telethon.tl import functions, types
+
+        ids = [int(x) for x in (ids or [])]
+        if not ids:
+            raise MsgError("нечего отмечать: укажите хотя бы одно сообщение")
+        # У канала свой метод, и он требует сам канал. Вариант из messages
+        # адресует сообщение одним id, без чата, — для канала он не годится,
+        # потому что там нумерация своя.
+        if isinstance(peer, (types.Channel, types.InputPeerChannel)):
+            await self._call(functions.channels.ReadMessageContentsRequest(
+                channel=peer, id=ids))
+        else:
+            await self._call(functions.messages.ReadMessageContentsRequest(id=ids))
+        return {"сообщений": len(ids), "содержимое": "отмечено просмотренным"}
+
+    # --- закрепления и папки ---
     # --- закрепления и папки ---
 
     async def pin_saved(self, who: Any, *, pinned: bool = True) -> dict[str, Any]:
