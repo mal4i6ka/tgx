@@ -64,6 +64,18 @@ def minor_units(currency: str, amount: float) -> int:
     return int(round(amount * 100))
 
 
+def major_units(currency: str, minor: Any) -> float:
+    """`1250` в USD → 12.5. Обратная к `minor_units`.
+
+    Сервер присылает суммы только в минимальных единицах, а читать их человеку.
+    Делить всё на сто нельзя: в звёздах и в иенах 50 — это и есть 50, и
+    служебное сообщение об оплате превратилось бы в полста копеек.
+    """
+    if (currency or "").upper() in ZERO_DECIMAL:
+        return float(minor or 0)
+    return round((minor or 0) / 100, 2)
+
+
 def describe_transaction(row: Any) -> dict[str, Any]:
     """Одна операция — плоской записью, без разбора всех видов партнёров."""
     partner = getattr(row, "peer", None)

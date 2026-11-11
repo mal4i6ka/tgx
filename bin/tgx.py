@@ -241,6 +241,17 @@ def rich_body(msg: Any) -> str:
         return "[богатое сообщение]"
 
 
+def service_body(msg: Any) -> str:
+    """Служебное сообщение словами.
+
+    «Вступил по ссылке», «закрепили сообщение», «списали звёзды» — у таких
+    сообщений нет ни текста, ни вложения, поэтому в ленте и в выгрузке они были
+    пустой строкой. Сам разбор живёт в `tgx_format`, потому что полноэкранный
+    клиент показывает ровно те же строки.
+    """
+    return tgx_format.service_label(getattr(msg, "action", None))
+
+
 def msg_to_obj(msg: Any) -> dict[str, Any]:
     sender = getattr(msg, "sender", None)
     dt = msg.date
@@ -251,8 +262,9 @@ def msg_to_obj(msg: Any) -> dict[str, Any]:
         "date": dt.isoformat() if dt else None,
         "sender_id": getattr(msg, "sender_id", None),
         "sender": entity_title(sender) if sender else None,
-        "text": msg.message or rich_body(msg) or media_label(msg),
+        "text": msg.message or rich_body(msg) or media_label(msg) or service_body(msg),
         "media": media_label(msg) or None,
+        "service": service_body(msg) or None,
         "rich": bool(getattr(msg, "rich_message", None)) or None,
         "views": getattr(msg, "views", None),
         "forwards": getattr(msg, "forwards", None),

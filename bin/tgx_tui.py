@@ -1526,9 +1526,14 @@ def _dur(seconds: Any) -> str:
 
 
 def service_label(action: Any) -> str:
-    name = type(action).__name__.replace("MessageAction", "")
-    words = "".join(f" {c.lower()}" if c.isupper() else c for c in name).strip()
-    return f"— {words or 'service message'} —"
+    """Служебное сообщение в ленте — теми же словами, что и в CLI.
+
+    Раньше здесь имя типа просто разбиралось на английские слова и выходило
+    «— chat add user —»: понять, кого добавили и на сколько списали звёзды, было
+    нельзя. Ярлыки лежат в `tgx_format`, оттуда их берёт и выгрузка.
+    """
+    label = tgx_format.service_label(action).strip("[]")
+    return f"— {label or 'служебное сообщение'} —"
 
 
 # ── demo backend ─────────────────────────────────────────────────────────────
