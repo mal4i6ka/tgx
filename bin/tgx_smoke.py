@@ -3344,6 +3344,116 @@ def media_label_regression() -> None:
     check("без подписи в тексте оказывается вложение", bare["text"] == "[стикер 🔥]")
 
 
+def service_label_regression() -> None:
+    """Служебное сообщение — тоже сообщение. Без разбора `action` в ленте и в
+    выгрузке на его месте оставалась пустая строка: кто вступил, что закрепили,
+    за что списали звёзды — всё одинаково никак."""
+    import tgx as T
+    import tgx_format as F
+    import tgx_tui as U
+    from datetime import datetime, timezone
+    from telethon.tl import types
+
+    # Главная гарантия: ни одно действие этого слоя не остаётся без слов.
+    # requirements разрешают две версии Telethon, CI гоняет обе — значит
+    # проверка держит оба набора действий, а не тот, что стоял при написании.
+    actions = sorted(n for n in dir(types) if n.startswith("MessageAction"))
+    check("действий в слое больше пятидесяти", len(actions) > 50)
+    silent, broken = [], []
+    for name in actions:
+        cls = getattr(types, name)
+        bare = cls.__new__(cls)               # без полей: сервер их тоже не всегда шлёт
+        try:
+            if not F.service_label(bare):
+                silent.append(name)
+        except Exception:
+            broken.append(name)
+    if silent or broken:                      # чтобы падение было с именами, а не «не равно»
+        print(f"  молчат: {silent[:8]}   падают: {broken[:8]}")
+    check("каждое действие слоя читается словами", not silent)
+    check("пустое действие никого не ломает", not broken)
+
+    check("обычному сообщению ярлык не выдумывается", F.service_label(None) == "")
+
+    # Подробности важнее названия типа: без них «тема изменена» ничего не говорит.
+    check("видно новое название чата",
+          F.service_label(types.MessageActionChatEditTitle(title="Проектная"))
+          == "[название: «Проектная»]")
+    check("одного добавленного не называют числом",
+          F.service_label(types.MessageActionChatAddUser(users=[5])) == "[добавлен в чат]")
+    check("нескольких добавленных считают",
+          F.service_label(types.MessageActionChatAddUser(users=[5, 6, 7]))
+          == "[в чат добавлено: 3]")
+    check("тему закрыли, а не просто изменили",
+          F.service_label(types.MessageActionTopicEdit(closed=True)) == "[тема закрыта]")
+    check("переименование темы видно",
+          "«Багов нет»" in F.service_label(types.MessageActionTopicEdit(title="Багов нет")))
+
+    # Длительность: час звонка не должен выглядеть как «60:00».
+    check("у звонка видно длину",
+          F.service_label(types.MessageActionPhoneCall(call_id=1, duration=83))
+          == "[звонок: 1:23]")
+    check("пропущенный видеозвонок назван пропущенным",
+          F.service_label(types.MessageActionPhoneCall(
+              call_id=1, video=True, reason=types.PhoneCallDiscardReasonMissed()))
+          == "[видеозвонок: пропущен]")
+    check("час разговора — с часами",
+          F.service_label(types.MessageActionGroupCall(
+              call=types.InputGroupCall(id=1, access_hash=1), duration=3600))
+          == "[групповой звонок: 1:00:00]")
+
+    # Деньги приходят в минимальных единицах, и делить их на сто можно не везде.
+    check("звёзды не делятся на сто",
+          F.service_label(types.MessageActionPaymentSent(currency="XTR", total_amount=50))
+          == "[оплачено: 50 звёзд]")
+    check("доллары делятся",
+          F.service_label(types.MessageActionPaymentSent(currency="USD", total_amount=1250))
+          == "[оплачено: 12.5 USD]")
+    check("иены не делятся",
+          F.service_label(types.MessageActionPaymentSent(currency="JPY", total_amount=500))
+          == "[оплачено: 500 JPY]")
+    check("цена платных сообщений видна",
+          F.service_label(types.MessageActionPaidMessagesPrice(stars=15))
+          == "[платные сообщения: 15 звёзд]")
+
+    check("выключенный таймер — это не «0 с»",
+          F.service_label(types.MessageActionSetMessagesTTL(period=0))
+          == "[таймер удаления выключен]")
+    check("включённый таймер — словами",
+          F.service_label(types.MessageActionSetMessagesTTL(period=86400))
+          == "[таймер удаления: 1 д]")
+    check("своё служебное сообщение сервера печатается как есть",
+          F.service_label(types.MessageActionCustomAction(message="Платёж проверен"))
+          == "[Платёж проверен]")
+
+    # Действие из будущего слоя: тип Telethon ещё не знает, строка всё равно есть.
+    class MessageActionSomethingBrandNew:
+        pass
+
+    future = F.service_label(MessageActionSomethingBrandNew())
+    check("незнакомое действие читается именем", future == "[something brand new]")
+
+    # Лента и выгрузка: раньше здесь был пустой text.
+    date = datetime(2026, 11, 11, tzinfo=timezone.utc)
+    pinned = types.MessageService(id=7, peer_id=types.PeerChat(1), date=date,
+                                  action=types.MessageActionPinMessage())
+    row = T.msg_to_obj(pinned)
+    check("служебное больше не пустая строка", row["text"] == "[закреплено сообщение]")
+    check("и лежит отдельным полем", row["service"] == "[закреплено сообщение]")
+    check("вложения у него нет", row["media"] is None)
+
+    plain = types.Message(id=8, peer_id=types.PeerChat(1), date=date, message="просто текст")
+    plain_row = T.msg_to_obj(plain)
+    check("обычному сообщению поле не дописывают", plain_row["service"] is None)
+    check("и текст его не трогают", plain_row["text"] == "просто текст")
+
+    # Полноэкранный клиент берёт те же слова — иначе CLI и TUI расходятся.
+    framed = U.service_label(types.MessageActionPinMessage())
+    check("в ленте TUI то же самое, но без скобок", framed == "— закреплено сообщение —")
+    check("по-русски, а не chat add user",
+          "add user" not in U.service_label(types.MessageActionChatAddUser(users=[1, 2])))
+
+
 async def inline_regression() -> None:
     """Инлайн-бот отдаёт разнородные результаты: у одних заголовок, у других
     только вложение. Печатать надо всё, но без пустых полей — иначе список
@@ -4020,6 +4130,7 @@ async def main() -> int:
     markdown_to_blocks_regression()
     blocks_media_regression()
     media_label_regression()
+    service_label_regression()
     await inline_regression()
     await safety_regression()
     notify_regression()

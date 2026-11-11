@@ -158,6 +158,230 @@ def describe_date(entity: Any) -> str:
 
 
 
+# ── служебные сообщения ──────────────────────────────────────────────────────
+# Телеграм присылает их как сообщение без текста: вся суть лежит в поле
+# `action`. Разбор идёт по имени типа, а не по самому типу, и это осознанно:
+# действия прибавляются с каждым слоем MTProto, а requirements разрешают сразу
+# две версии Telethon. Прямая ссылка на `types.MessageActionTodoCompletions`
+# уронила бы импорт на той версии, где такого типа ещё нет, — по имени же новое
+# действие просто попадает в общий случай и всё равно читается словами.
+
+
+def _label(what: str, detail: Any = "") -> str:
+    """[что] или [что: подробность] — без болтающихся двоеточий."""
+    detail = "" if detail is None else str(detail).strip()
+    return f"[{what}: {detail}]" if detail else f"[{what}]"
+
+
+def _mmss(seconds: Any) -> str:
+    """Длительность. С часами, иначе групповой звонок длится «60:00»."""
+    total = int(seconds or 0)
+    if not total:
+        return ""
+    if total >= 3600:
+        return f"{total // 3600}:{total // 60 % 60:02d}:{total % 60:02d}"
+    return f"{total // 60}:{total % 60:02d}"
+
+
+def _period(seconds: Any) -> str:
+    """Срок словами: сервер присылает его в секундах, а читать его человеку."""
+    total = int(seconds or 0)
+    if total <= 0:
+        return ""
+    for size, unit in ((86400, "д"), (3600, "ч"), (60, "мин")):
+        if total >= size:
+            return f"{total // size} {unit}"
+    return f"{total} с"
+
+
+def _money(currency: Any, amount: Any) -> str:
+    """Сумма из минимальных единиц — в человеческую, с валютой.
+
+    Какие валюты без дробной части, уже знает `tgx_pay`; импорт отложенный,
+    чтобы модуль форматирования не тянул платежи ради одной строки.
+    """
+    import tgx_pay
+
+    code = str(currency or "").upper()
+    value = tgx_pay.major_units(code, amount or 0)
+    if code == "XTR":
+        return f"{value:g} звёзд"
+    return f"{value:g} {code}".strip()
+
+
+def _added(action: Any) -> str:
+    count = len(getattr(action, "users", None) or [])
+    return _label("в чат добавлено", count) if count > 1 else "[добавлен в чат]"
+
+
+def _call(action: Any) -> str:
+    kind = "видеозвонок" if getattr(action, "video", False) else "звонок"
+    reason = type(getattr(action, "reason", None)).__name__
+    if "Missed" in reason:
+        return _label(kind, "пропущен")
+    if "Busy" in reason:
+        return _label(kind, "занято")
+    return _label(kind, _mmss(getattr(action, "duration", 0)))
+
+
+def _conference(action: Any) -> str:
+    if getattr(action, "missed", False):
+        return "[конференция пропущена]"
+    return _label("конференция", _mmss(getattr(action, "duration", 0)))
+
+
+def _scheduled(action: Any) -> str:
+    when = getattr(action, "schedule_date", None)
+    return _label("звонок назначен", when.strftime("%d.%m.%Y %H:%M") if when else "")
+
+
+def _topic_edit(action: Any) -> str:
+    closed = getattr(action, "closed", None)
+    hidden = getattr(action, "hidden", None)
+    title = getattr(action, "title", None)
+    if closed is not None:
+        return "[тема закрыта]" if closed else "[тема открыта]"
+    if hidden is not None:
+        return "[тема скрыта]" if hidden else "[тема показана]"
+    if title:
+        return _label("тема переименована", f"«{title}»")
+    return "[тема изменена]"
+
+
+def _ttl(action: Any) -> str:
+    span = _period(getattr(action, "period", 0))
+    return _label("таймер удаления", span) if span else "[таймер удаления выключен]"
+
+
+def _star_gift(action: Any) -> str:
+    if getattr(action, "refunded", False):
+        return "[подарок возвращён]"
+    stars = getattr(getattr(action, "gift", None), "stars", None)
+    return _label("подарок", f"{stars} звёзд" if stars else "")
+
+
+def _unique_gift(action: Any) -> str:
+    gift = getattr(action, "gift", None)
+    title = getattr(gift, "title", None)
+    number = getattr(gift, "num", None)
+    detail = f"«{title}» #{number}" if title and number else (title or "")
+    return _label("уникальный подарок", detail)
+
+
+def _suggested_post(action: Any) -> str:
+    if getattr(action, "rejected", False):
+        comment = getattr(action, "reject_comment", None)
+        return _label("предложенный пост отклонён", comment or "")
+    return "[предложенный пост одобрен]"
+
+
+# Имя типа без префикса MessageAction → что показать. Значение либо готовая
+# строка, либо функция от действия, когда в нём есть что показать подробнее.
+SERVICE_ACTIONS: dict[str, Any] = {
+    # чат и его жизнь
+    "ChatCreate": lambda a: _label("группа создана", f"«{a.title}»" if getattr(a, "title", None) else ""),
+    "ChannelCreate": lambda a: _label("канал создан", f"«{a.title}»" if getattr(a, "title", None) else ""),
+    "ChatEditTitle": lambda a: _label("название", f"«{getattr(a, 'title', '')}»"),
+    "ChatEditPhoto": "[фото чата обновлено]",
+    "ChatDeletePhoto": "[фото чата удалено]",
+    "ChatAddUser": _added,
+    "ChatDeleteUser": "[удалён из чата]",
+    "ChatJoinedByLink": "[вступил по ссылке]",
+    "ChatJoinedByRequest": "[вступил по заявке]",
+    "ChatMigrateTo": "[группа стала супергруппой]",
+    "ChannelMigrateFrom": lambda a: _label("выросла из группы", f"«{getattr(a, 'title', '')}»"),
+    "ChangeCreator": "[сменился владелец]",
+    "NewCreatorPending": "[передача владения ждёт подтверждения]",
+    "PinMessage": "[закреплено сообщение]",
+    "HistoryClear": "[история очищена]",
+    "ScreenshotTaken": "[сделан снимок экрана]",
+    "ContactSignUp": "[зарегистрировался в Telegram]",
+    "CustomAction": lambda a: _label(getattr(a, "message", "") or "служебное сообщение"),
+    "NoForwardsToggle": lambda a: "[пересылка запрещена]" if getattr(a, "new_value", False) else "[пересылка разрешена]",
+    "NoForwardsRequest": "[просят запретить пересылку]",
+    "ManagedBotCreated": "[создан управляемый бот]",
+    # звонки
+    "PhoneCall": _call,
+    "GroupCall": lambda a: _label("групповой звонок", _mmss(getattr(a, "duration", 0))),
+    "GroupCallScheduled": _scheduled,
+    "InviteToGroupCall": lambda a: _label("приглашение в звонок", len(getattr(a, "users", None) or []) or ""),
+    "ConferenceCall": _conference,
+    # темы форума
+    "TopicCreate": lambda a: _label("тема создана", f"«{getattr(a, 'title', '')}»"),
+    "TopicEdit": _topic_edit,
+    # деньги, звёзды, подарки
+    "PaymentSent": lambda a: _label("оплачено", _money(getattr(a, "currency", ""), getattr(a, "total_amount", 0))),
+    "PaymentSentMe": lambda a: _label("оплата получена", _money(getattr(a, "currency", ""), getattr(a, "total_amount", 0))),
+    "PaymentRefunded": lambda a: _label("возврат платежа", _money(getattr(a, "currency", ""), getattr(a, "total_amount", 0))),
+    "PaidMessagesPrice": lambda a: _label("платные сообщения", f"{getattr(a, 'stars', 0)} звёзд"),
+    "PaidMessagesRefunded": lambda a: _label("возврат за платные сообщения", f"{getattr(a, 'stars', 0)} звёзд"),
+    "GiftPremium": lambda a: _label("подарен Premium", f"{getattr(a, 'days', 0)} дн." if getattr(a, "days", None) else ""),
+    "GiftCode": lambda a: _label("подарочный код Premium", f"{getattr(a, 'days', 0)} дн." if getattr(a, "days", None) else ""),
+    "GiftStars": lambda a: _label("подарено звёзд", getattr(a, "stars", "") or ""),
+    "GiftTon": "[подарен TON]",
+    "PrizeStars": lambda a: _label("приз", f"{getattr(a, 'stars', 0)} звёзд"),
+    "StarGift": _star_gift,
+    "StarGiftUnique": _unique_gift,
+    "StarGiftPurchaseOffer": "[предложение выкупить подарок]",
+    "StarGiftPurchaseOfferDeclined": "[предложение о подарке отклонено]",
+    "GiveawayLaunch": "[розыгрыш начался]",
+    "GiveawayResults": lambda a: _label("розыгрыш окончен", f"победителей {getattr(a, 'winners_count', 0)}"),
+    "BoostApply": lambda a: _label("бустов", getattr(a, "boosts", "") or ""),
+    # оформление и приватность
+    "SetMessagesTTL": _ttl,
+    "SetChatTheme": lambda a: _label("тема оформления", getattr(a, "theme", "")) if getattr(a, "theme", "") else "[тема оформления сброшена]",
+    "SetChatWallPaper": "[обои чата]",
+    # боты и мини-приложения
+    "BotAllowed": lambda a: _label("бот допущен", getattr(a, "domain", "") or getattr(getattr(a, "app", None), "title", "") or ""),
+    "WebViewDataSent": lambda a: _label("данные из мини-приложения", getattr(a, "text", "")),
+    "RequestedPeer": "[передан выбранный чат]",
+    "RequestedPeerSentMe": "[передан выбранный чат]",
+    "SecureValuesSent": "[переданы документы]",
+    "SecureValuesSentMe": "[переданы документы]",
+    # прочее
+    "GameScore": lambda a: _label("счёт в игре", getattr(a, "score", "") or ""),
+    "GeoProximityReached": lambda a: _label("рядом", f"{getattr(a, 'distance', 0)} м"),
+    "SuggestProfilePhoto": "[предложено фото профиля]",
+    "SuggestBirthday": "[предложено указать день рождения]",
+    "TodoAppendTasks": lambda a: _label("в список добавлено задач", len(getattr(a, "list", None) or []) or ""),
+    "TodoCompletions": lambda a: _label("отмечено выполненным", len(getattr(a, "completed", None) or []) or ""),
+    "PollAppendAnswer": "[в опрос добавлен вариант]",
+    "PollDeleteAnswer": "[из опроса убран вариант]",
+    "SuggestedPostApproval": _suggested_post,
+    "SuggestedPostRefund": "[возврат за предложенный пост]",
+    "SuggestedPostSuccess": "[предложенный пост опубликован]",
+    "Empty": "[служебное сообщение]",
+}
+
+
+def _spaced(name: str) -> str:
+    """`TodoCompletions` → `todo completions`. Запасной вид для нового действия."""
+    return "".join(f" {c.lower()}" if c.isupper() else c for c in name).strip()
+
+
+def service_label(action: Any) -> str:
+    """Служебное сообщение одной строкой.
+
+    У такого сообщения нет ни текста, ни вложения, поэтому в ленте оно было
+    пустой строкой: кто вступил, что закрепили, за что списали звёзды — всё
+    одинаково никак, а в выгрузке на его месте оставалась дырка. Описываем
+    словами, как и вложение, и никогда не возвращаем пустоту: действие, которого
+    этот Telethon ещё не знает, читается хотя бы именем.
+    """
+    if action is None:
+        return ""
+    name = type(action).__name__.replace("MessageAction", "")
+    known = SERVICE_ACTIONS.get(name)
+    try:
+        if callable(known):
+            return known(action) or _label(_spaced(name))
+        if known:
+            return known
+    except Exception:
+        pass                                   # подробность не вышла — хватит имени
+    return _label(_spaced(name) or "служебное сообщение")
+
+
 STYLES = {
     "MessageEntityBold": "bold",
     "MessageEntityItalic": "italic",
