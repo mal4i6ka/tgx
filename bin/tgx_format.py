@@ -167,6 +167,14 @@ def describe_date(entity: Any) -> str:
 # действие просто попадает в общий случай и всё равно читается словами.
 
 
+def _nano(amount: Any) -> str:
+    """Сумма в нанотонах — словами: 1500000000 → «1.5 TON»."""
+    try:
+        return f"{int(amount) / 1_000_000_000:g} TON"
+    except (TypeError, ValueError):
+        return ""
+
+
 def _label(what: str, detail: Any = "") -> str:
     """[что] или [что: подробность] — без болтающихся двоеточий."""
     detail = "" if detail is None else str(detail).strip()
@@ -339,6 +347,11 @@ SERVICE_ACTIONS: dict[str, Any] = {
     # себе действия: таблица по именам этим и хороша.
     "ChangeCommunity": "[сменилось сообщество]",
     "ChatJoinedViaCommunity": "[вступил через сообщество]",
+    # Кошелёк и платные сообщения — слой 233.
+    "GramTransfer": lambda a: _label("перевод TON", _nano(getattr(a, "amount", None))),
+    "WalletTonConnectRequest": lambda a: _label(
+        "запрос к кошельку", getattr(a, "dapp_name", "") or ""),
+    "NoPaidMessagesTokenUsed": "[открыт по ссылке бесплатной переписки]",
     "RequestedPeer": "[передан выбранный чат]",
     "RequestedPeerSentMe": "[передан выбранный чат]",
     "SecureValuesSent": "[переданы документы]",

@@ -129,6 +129,7 @@ tgx todo-add @chat 4321 "ретро"
 
 ```bash
 tgx transcribe status                    # доступна ли и сколько бесплатных осталось
+tgx transcribe langs [ЧАТ]               # на каких языках расшифровывает (слой 233)
 tgx transcribe get @чат 295429           # голосовое или кружок → текст
 tgx transcribe rate @чат 295429 3874… good
 ```
@@ -368,6 +369,7 @@ App Store и Play Market (нужен чек от магазина, с насто
 ```bash
 tgx pay balance                 # баланс звёзд
 tgx pay balance --ton           # он же в TON
+tgx pay rates                   # курсы валют по версии Telegram (слой 233)
 tgx pay history --outbound      # история операций
 tgx pay receipt @чат 123        # чек по оплаченному сообщению
 tgx pay show "https://t.me/$…"  # что просит счёт — без оплаты
@@ -659,6 +661,7 @@ tgx guard journal
 
 ```bash
 tgx forum on @группа --tabs on      # включить форум (только владелец)
+tgx forum sidebar @группа on        # темы боковой панелью (слой 233, Telethon 1.46)
 tgx forum topics @группа            # список; --search ищет по названию
 tgx forum icons                     # иконки, доступные без Premium
 tgx forum create @группа "Релизы" --color зелёный
@@ -1911,6 +1914,9 @@ tgx bot similar мойбот
 tgx bot referrals мойбот 150      # партнёрам 15%
 tgx bot can-write мойбот
 tgx bot free-name новыйбот
+tgx bot free-name второйадрес --additional   # как ещё один адрес живого бота (слой 233)
+tgx bot username-add мойбот второйадрес      # дать боту ещё один адрес (слой 233)
+tgx bot username-remove мойбот второйадрес   # и убрать его
 ```
 
 Доля партнёра считается **в тысячных**, а не в процентах: `150` — это 15%.
@@ -1940,6 +1946,9 @@ tgx contacts forget-saved   # заставить забыть
 tgx contacts add-phone "+79261234567:Иван:Петров"
 tgx contacts statuses          # кто когда был в сети, одним запросом
 tgx contacts invite-token      # ссылка «добавь меня» без раскрытия номера
+tgx contacts free-chat-token   # ссылка, по которой вам пишут без платы (слой 233);
+                               # --revoke гасит прежнюю, --temporary — со сроком
+tgx contacts free-chat-use @кто ССЫЛКА   # принять чужую такую ссылку
 tgx contacts nearby 55.75 37.61            # только смотрим
 tgx contacts nearby 55.75 37.61 --show-me 60   # и показываем себя на час
 tgx contacts forget-top @кто-то   # убрать из «часто пишете»

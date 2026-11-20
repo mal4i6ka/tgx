@@ -194,6 +194,8 @@ def media_label(msg: Any) -> str:
         return ""  # ссылка и так видна в тексте
     if isinstance(media, types.MessageMediaUnsupported):
         return "[вложение, которого этот клиент не знает]"
+    if type(media).__name__ == "MessageMediaWidget":   # слой 233; на 229 типа нет
+        return "[виджет — HTML, в терминале не рисуется]"
 
     document = getattr(media, "document", None)
     if document is None:
@@ -1340,7 +1342,7 @@ async def cmd_contacts(args: argparse.Namespace) -> None:
 
         MORE = {"add-phone", "forget-phones", "accept", "ids", "statuses", "saved",
                 "forget-saved", "invite-token", "nearby", "forget-top", "sponsored",
-                "block-list"}
+                "block-list", "free-chat-token", "free-chat-use"}
         if cmd in MORE:
             actions = {
                 "add-phone": lambda: more.add_by_phone(
@@ -1352,6 +1354,9 @@ async def cmd_contacts(args: argparse.Namespace) -> None:
                 "saved": lambda: more.saved(),
                 "forget-saved": lambda: more.forget_saved(),
                 "invite-token": lambda: more.invite_token(),
+                "free-chat-token": lambda: more.free_chat_token(
+                    revoke=args.revoke, temporary=args.temporary),
+                "free-chat-use": lambda: more.use_free_chat_token(args.who, args.token),
                 "nearby": lambda: more.nearby(args.lat, args.lon, minutes=args.show_me or 0),
                 "forget-top": lambda: more.forget_top(args.who, args.category),
                 "sponsored": lambda: more.sponsored(args.query),
@@ -1425,6 +1430,10 @@ async def cmd_pay(args: argparse.Namespace) -> None:
 
         if args.paycmd == "balance":
             render.emit(await pay.balance(ton=args.ton))
+            return
+
+        if args.paycmd == "rates":
+            print_table(await pay.currency_rates(), ["валюта", "курс"], title="курсы валют")
             return
 
         if args.paycmd == "history":
@@ -2008,6 +2017,11 @@ async def cmd_transcribe(args: argparse.Namespace) -> None:
             render.emit(await worker.status())
             return
 
+        if args.trcmd == "langs":
+            where = await resolve_peer(client, args.chat) if args.chat else None
+            render.emit(await worker.languages(where))
+            return
+
         peer = await resolve_peer(client, args.chat)
         if args.trcmd == "rate":
             render.emit({"ok": True, **await worker.rate(
@@ -2101,6 +2115,10 @@ async def cmd_forum(args: argparse.Namespace) -> None:
 
         if command == "tabs":
             render.emit({"ok": True, **await forum.set_tabs(peer, args.state == "on")})
+            return
+
+        if command == "sidebar":
+            render.emit({"ok": True, **await forum.set_sidebar(peer, args.state == "on")})
             return
 
         if command == "as-messages":
@@ -2508,7 +2526,7 @@ async def cmd_channel_edit(args: argparse.Namespace) -> None:
             if value is not None:
                 await client(req(ch, bool_from_arg(value))); changes[attr] = bool_from_arg(value)
         if args.forum is not None:
-            await client(functions.channels.ToggleForumRequest(ch, bool_from_arg(args.forum), bool_from_arg(args.forum_tabs) if args.forum_tabs is not None else False)); changes["forum"] = bool_from_arg(args.forum)
+            await tgx_forum.Forum(client).toggle(ch, bool_from_arg(args.forum), tabs=bool_from_arg(args.forum_tabs) if args.forum_tabs is not None else None); changes["forum"] = bool_from_arg(args.forum)
         render.emit({"ok": True, "changes": changes})
     finally:
         await client.disconnect()
@@ -4060,7 +4078,7 @@ async def cmd_bot(args: argparse.Namespace) -> None:
     if command in {"previews-info", "preview-add", "preview-remove", "preview-swap",
                    "preview-order", "similar", "popular", "free-name",
                    "username", "usernames-order", "referrals", "emoji-permission",
-                   "can-write"}:
+                   "can-write", "username-add", "username-remove"}:
         # витрина и настройки спрашиваются от вашего имени, сброс команд — от бота
         shop = lambda c: tgx_bots.Shop(c)
         actions = {
@@ -4073,7 +4091,9 @@ async def cmd_bot(args: argparse.Namespace) -> None:
                                                               args.lang or ""),
             "similar": lambda c: shop(c).similar(args.username),
             "popular": lambda c: shop(c).popular(args.limit),
-            "free-name": lambda c: shop(c).free_name(args.username),
+            "free-name": lambda c: shop(c).free_name(args.username, additional=args.additional),
+            "username-add": lambda c: shop(c).add_username(args.username, args.name),
+            "username-remove": lambda c: shop(c).remove_username(args.username, args.name),
             "username": lambda c: shop(c).username(args.username, args.name,
                                                    on=args.state == "on"),
             "usernames-order": lambda c: shop(c).order_usernames(args.username, args.name),
@@ -5693,6 +5713,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     b_fn = bot_sub.add_parser("free-name", help="свободен ли адрес для бота")
     b_fn.add_argument("username")
+    b_fn.add_argument("--additional", action="store_true",
+                      help="как ещё один адрес уже существующего бота (слой 233)")
+
+    for name, help_text in (("username-add", "дать боту ещё один адрес"),
+                            ("username-remove", "убрать дополнительный адрес бота")):
+        parser = bot_sub.add_parser(name, help=help_text + " (слой 233, Telethon 1.46)")
+        parser.add_argument("username")
+        parser.add_argument("name")
 
     b_un = bot_sub.add_parser("username", help="включить или выключить один из адресов")
     b_un.add_argument("username")
@@ -6585,6 +6613,14 @@ def build_parser() -> argparse.ArgumentParser:
     ct_sub.add_parser("saved", help="что Telegram запомнил из вашей телефонной книги")
     ct_sub.add_parser("forget-saved", help="заставить его это забыть")
     ct_sub.add_parser("invite-token", help="ссылка «добавь меня» без раскрытия номера")
+    ct_fct = ct_sub.add_parser("free-chat-token",
+                               help="ссылка, по которой вам пишут без платы за сообщения (слой 233)")
+    ct_fct.add_argument("--revoke", action="store_true", help="погасить прежнюю и выдать новую")
+    ct_fct.add_argument("--temporary", action="store_true", help="ссылка со сроком")
+    ct_fcu = ct_sub.add_parser("free-chat-use",
+                               help="принять чужую такую ссылку (слой 233)")
+    ct_fcu.add_argument("who", help="чья ссылка: @имя или id")
+    ct_fcu.add_argument("token", help="ссылка или сам токен")
 
     k_nb = ct_sub.add_parser("nearby", help="кто рядом")
     k_nb.add_argument("lat", type=float)
@@ -6666,6 +6702,7 @@ def build_parser() -> argparse.ArgumentParser:
     pay_sub = pay.add_subparsers(dest="paycmd", required=True)
     pay.set_defaults(func=cmd_pay)
 
+    pay_sub.add_parser("rates", help="курсы валют по версии Telegram (слой 233)")
     y_bal = pay_sub.add_parser("balance", help="баланс звёзд или TON")
     y_bal.add_argument("--ton", action="store_true", help="криптовалюта вместо звёзд")
 
@@ -7039,6 +7076,8 @@ def build_parser() -> argparse.ArgumentParser:
     t_rate.add_argument("verdict", choices=["good", "bad"])
 
     tr_sub.add_parser("status", help="доступна ли расшифровка и сколько бесплатных осталось")
+    t_langs = tr_sub.add_parser("langs", help="на каких языках расшифровывает (слой 233)")
+    t_langs.add_argument("chat", nargs="?", help="без чата — общий список")
 
     fr = sub.add_parser("forum", help="форумы и темы: создание, иконки, закрепление, порядок",
                         epilog="примеры:\n  tgx forum topics @mychat\n  tgx forum create @mychat \"Обсуждение\"\n",
@@ -7103,6 +7142,10 @@ def build_parser() -> argparse.ArgumentParser:
     f_tabs = fr_sub.add_parser("tabs", help="вкладки вместо списка тем")
     f_tabs.add_argument("chat")
     f_tabs.add_argument("state", choices=["on", "off"])
+
+    f_side = fr_sub.add_parser("sidebar", help="темы боковой панелью (слой 233, Telethon 1.46)")
+    f_side.add_argument("chat")
+    f_side.add_argument("state", choices=["on", "off"])
 
     f_asm = fr_sub.add_parser("as-messages", help="показывать форум сплошной лентой")
     f_asm.add_argument("chat")

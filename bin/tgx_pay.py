@@ -101,6 +101,22 @@ class Pay:
     def __init__(self, client: Any) -> None:
         self.client = client
 
+    async def currency_rates(self) -> list[dict[str, Any]]:
+        """Курсы валют, какими их считает Telegram (слой 233). Только чтение."""
+        from telethon.tl import functions
+
+        try:
+            request = functions.payments.GetCurrencyRatesRequest()
+        except AttributeError:
+            raise PayError("курсы валют появились в слое 233 — нужен Telethon 1.46: "
+                           ".venv/bin/pip install -U -r requirements.txt") from None
+        try:
+            result = await self.client(request)
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        return [{"валюта": getattr(r, "currency", ""), "курс": getattr(r, "rate", None)}
+                for r in getattr(result, "rates", None) or []]
+
     async def balance(self, *, ton: bool = False) -> dict[str, Any]:
         """Баланс звёзд или TON — тот же вызов, разный флаг."""
         from telethon.tl import functions, types
@@ -955,9 +971,20 @@ class Pay:
         state = await self.client(functions.account.GetPasswordRequest())
         if not getattr(state, "has_password", False):
             raise PayError("на аккаунте не включена двухэтапная проверка")
+        import inspect
+
+        check = srp.compute_check(state, secret)
+        request = functions.payments.GetStarGiftWithdrawalUrlRequest
         try:
-            result = await self.client(functions.payments.GetStarGiftWithdrawalUrlRequest(
-                stargift=self._saved(msg_id), password=srp.compute_check(state, secret)))
+            if "tmp_password" in inspect.signature(request.__init__).parameters:
+                # Слой 233: метод берёт не саму проверку SRP, а временный пароль,
+                # выданный в обмен на неё, — как оплата сохранённой картой.
+                temporary = await self.client(functions.account.GetTmpPasswordRequest(
+                    password=check, period=60))
+                result = await self.client(request(
+                    stargift=self._saved(msg_id), tmp_password=temporary.tmp_password))
+            else:
+                result = await self.client(request(stargift=self._saved(msg_id), password=check))
         except Exception as exc:
             raise self._explain(exc) from exc
         return {"подарок": int(msg_id), "ссылка": getattr(result, "url", None)}

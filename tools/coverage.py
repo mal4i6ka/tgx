@@ -55,6 +55,11 @@ NA = {  # неприменимо к терминальному клиенту �
  ("bots","InvokeWebViewCustomMethod"),("bots","SetJoinChatResults"),
  ("bots","GetRequestedWebViewButton"),("bots","RequestWebViewButton"),
  ("bots","CheckDownloadFileParams"),
+ # виджеты (слой 233) — HTML-страница внутри сообщения: в терминале её не
+ # нарисовать, а правка данных виджета и ответы на его запросы — дело бота
+ ("messages","EditWidgetData"),("messages","EditMessageWidgetData"),
+ ("messages","EditInlineBotMessageWidgetData"),("messages","SetBotWidgetQueryAnswer"),
+ ("messages","GetBotWidgetQueryAnswer"),("messages","GetWidgetPublicData"),
  # звук и видео звонка идут по WebRTC — из терминала не сыграть
  ("phone","AcceptCall"),("phone","ConfirmCall"),("phone","RequestCall"),
  ("phone","DiscardCall"),("phone","ReceivedCall"),("phone","SendSignalingData"),

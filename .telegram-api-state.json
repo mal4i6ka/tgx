@@ -1,8 +1,19 @@
 {
-  "bot_api_version": "10.4",
+  "layer": 233,
+  "telethon": "1.46.0",
+  "bot_api": "10.4",
+  "checked_at": "2026-11-20",
   "bot_api_release_date": "2026-11-09",
-  "checked_at": "2026-11-11",
   "changelog": "https://core.telegram.org/bots/api-changelog",
-  "sdk": {"name": "Telethon", "installed_range": ">=1.44,<1.46", "latest_on_pypi": "1.45.0", "layer": 229},
-  "previous_bot_api_version": "10.3"
+  "sdk": {
+    "name": "Telethon",
+    "installed_range": ">=1.44,<1.47",
+    "latest_on_pypi": "1.46.0",
+    "layer": 233
+  },
+  "previous": {
+    "layer": 229,
+    "telethon": "1.45.0",
+    "bot_api": "10.4"
+  }
 }
