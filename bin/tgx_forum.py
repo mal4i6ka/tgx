@@ -80,6 +80,30 @@ def topic_row(topic: Any) -> dict[str, Any]:
     }
 
 
+def sidebar_supported() -> bool:
+    """Знает ли установленный слой боковую панель тем (233, Telethon 1.46)."""
+    import inspect
+    from telethon.tl import functions
+
+    return "sidebar" in inspect.signature(functions.channels.ToggleForumRequest.__init__).parameters
+
+
+def toggle_forum_request(channel: Any, enabled: bool, *, tabs: bool | None = None,
+                         sidebar: bool | None = None) -> Any:
+    """`channels.toggleForum` под установленный слой.
+
+    В слое 233 у метода появилось обязательное поле `sidebar`, и вызов, собранный
+    под 229, падает ещё до сети — с TypeError вместо ответа сервера. На старом
+    слое поля нет, и передать его туда так же нельзя.
+    """
+    from telethon.tl import functions
+
+    fields: dict[str, Any] = {"channel": channel, "enabled": bool(enabled), "tabs": bool(tabs)}
+    if sidebar_supported():
+        fields["sidebar"] = bool(sidebar)
+    return functions.channels.ToggleForumRequest(**fields)
+
+
 class Forum:
     """Всё, что можно сделать с форумом и его темами."""
 
@@ -87,25 +111,44 @@ class Forum:
         self.client = client
 
     # ── сам форум ────────────────────────────────────────────────────────────
-    async def toggle(self, chat: Any, enabled: bool, tabs: bool | None = None) -> dict[str, Any]:
+    async def toggle(self, chat: Any, enabled: bool, tabs: bool | None = None,
+                     sidebar: bool | None = None) -> dict[str, Any]:
         """Включить форум в супергруппе или вернуть её обратно.
 
         Только владелец. Обычную группу Telegram сперва требует поднять до
         супергруппы — отдельным действием, здесь оно не подразумевается.
         """
-        from telethon.tl import functions
-
         entity = await self.client.get_input_entity(chat)
+        if sidebar is not None and not sidebar_supported():
+            raise ForumError("боковая панель тем появилась в слое 233 — нужен Telethon 1.46: "
+                             ".venv/bin/pip install -U -r requirements.txt")
+        if sidebar_supported() and (tabs is None or sidebar is None):
+            # Метод принимает оба вида разом, и несказанный уехал бы на сервер
+            # как «выключить». Поэтому несказанное берётся из того, что стоит.
+            try:
+                now = await self.client.get_entity(entity)
+            except Exception:
+                now = None
+            if tabs is None and getattr(now, "forum_tabs", None):
+                tabs = True
+            if sidebar is None and getattr(now, "forum_sidebar", None):
+                sidebar = True
         try:
-            await self.client(functions.channels.ToggleForumRequest(
-                channel=entity, enabled=bool(enabled), tabs=bool(tabs) if tabs is not None else False))
+            await self.client(toggle_forum_request(entity, enabled, tabs=tabs, sidebar=sidebar))
         except Exception as exc:
             raise self._explain(exc) from exc
-        return {"forum": bool(enabled), "tabs": tabs}
+        out = {"forum": bool(enabled), "tabs": tabs}
+        if sidebar_supported():
+            out["sidebar"] = sidebar
+        return out
 
     async def set_tabs(self, chat: Any, tabs: bool) -> dict[str, Any]:
         """Вкладки вместо списка тем. Тем же методом, но форум остаётся включён."""
         return await self.toggle(chat, True, tabs=tabs)
+
+    async def set_sidebar(self, chat: Any, sidebar: bool) -> dict[str, Any]:
+        """Темы боковой панелью (слой 233). Форум остаётся включён."""
+        return await self.toggle(chat, True, sidebar=sidebar)
 
     async def view_as_messages(self, chat: Any, enabled: bool) -> dict[str, Any]:
         """Показывать форум сплошной лентой. Настройка личная, но синхронная."""

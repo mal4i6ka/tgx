@@ -25,6 +25,10 @@ TOKEN_RE = re.compile(r"\b(\d{6,12}:[A-Za-z0-9_-]{30,})\b")
 TROUBLE = ("sorry", "invalid", "taken", "too many", "error", "can't", "cannot")
 
 
+NEEDS_233 = ("это появилось в слое 233 — нужен Telethon 1.46: "
+             ".venv/bin/pip install -U -r requirements.txt")
+
+
 class BotError(RuntimeError):
     """Something BotFather refused, with its own wording kept intact."""
 
@@ -758,12 +762,19 @@ class Shop:
         return [{"бот": getattr(u, "username", None), "имя": getattr(u, "first_name", None)}
                 for u in getattr(result, "users", None) or []]
 
-    async def free_name(self, username: str) -> dict[str, Any]:
+    async def free_name(self, username: str, *, additional: bool = False) -> dict[str, Any]:
+        """Свободен ли адрес. `additional` — как ещё один адрес уже живого бота."""
+        import inspect
         from telethon.tl import functions
 
+        fields: dict[str, Any] = {"username": username.lstrip("@")}
+        if additional:
+            if "additional" not in inspect.signature(
+                    functions.bots.CheckUsernameRequest.__init__).parameters:
+                raise BotError(NEEDS_233)
+            fields["additional"] = True
         try:
-            free = await self._call(functions.bots.CheckUsernameRequest(
-                username=username.lstrip("@")))
+            free = await self._call(functions.bots.CheckUsernameRequest(**fields))
         except BotError as exc:
             return {"адрес": username, "свободен": False, "почему": str(exc)}
         return {"адрес": username.lstrip("@"), "свободен": bool(free)}
@@ -775,6 +786,28 @@ class Shop:
         await self._call(functions.bots.ToggleUsernameRequest(
             bot=await self._bot(bot), username=name.lstrip("@"), active=on))
         return {"адрес": name.lstrip("@"), "включён": on}
+
+    async def add_username(self, bot: Any, name: str) -> dict[str, Any]:
+        """Дать боту ещё один адрес (слой 233). Проверка — `free-name --additional`."""
+        from telethon.tl import functions
+
+        try:
+            make = functions.bots.AddUsernameRequest
+        except AttributeError:
+            raise BotError(NEEDS_233) from None
+        ok = await self._call(make(bot=await self._bot(bot), username=name.lstrip("@")))
+        return {"адрес": name.lstrip("@"), "добавлен": bool(ok)}
+
+    async def remove_username(self, bot: Any, name: str) -> dict[str, Any]:
+        """Убрать дополнительный адрес бота (слой 233). Основной так не снять."""
+        from telethon.tl import functions
+
+        try:
+            make = functions.bots.RemoveUsernameRequest
+        except AttributeError:
+            raise BotError(NEEDS_233) from None
+        ok = await self._call(make(bot=await self._bot(bot), username=name.lstrip("@")))
+        return {"адрес": name.lstrip("@"), "убран": bool(ok)}
 
     async def order_usernames(self, bot: Any, names: list[str]) -> dict[str, Any]:
         from telethon.tl import functions
