@@ -4380,6 +4380,117 @@ def shadowed_method_regression() -> None:
     check("ни один класс в bin/*.py не объявляет метод дважды", not offenders)
 
 
+async def layer_233_regression() -> None:
+    """Слой 233 (Telethon 1.46) сменил два вызова так, что старый падает до сети.
+
+    `channels.toggleForum` получил обязательное `sidebar`, а вывод подарка берёт
+    временный пароль вместо проверки SRP. Обе ветки проверяются на установленном
+    слое — CI гоняет все, что разрешает requirements.txt, — а новые команды на
+    старом слое обязаны отказать словами, не дойдя до сети.
+    """
+    import inspect
+
+    from telethon.tl import functions, types
+
+    import tgx_bots
+    import tgx_contacts
+    import tgx_forum
+    import tgx_pay
+    import tgx_transcribe
+
+    new_layer = tgx_forum.sidebar_supported()
+    request = tgx_forum.toggle_forum_request(types.InputChannel(1, 2), True, tabs=True)
+    check("включение форума собирается на этом слое", bytes(request) != b"")
+    check("боковая панель уходит только туда, где она есть",
+          ("sidebar" in request.to_dict()) == new_layer)
+
+    sent: list = []
+
+    class Client:
+        """Отвечает ровно тем, чего ждёт вызов, и запоминает запросы."""
+
+        async def get_input_entity(self, peer):
+            return types.InputPeerChannel(1, 2)
+
+        async def get_entity(self, peer):
+            return types.Channel(id=1, title="x", photo=types.ChatPhotoEmpty(), date=None,
+                                 forum=True, **({"forum_sidebar": True} if new_layer else {}))
+
+        async def __call__(self, request):
+            sent.append(request)
+            name = type(request).__name__
+            if name == "GetPasswordRequest":
+                return types.account.Password(
+                    new_algo=types.PasswordKdfAlgoUnknown(),
+                    new_secure_algo=types.SecurePasswordKdfAlgoUnknown(),
+                    secure_random=b"", has_password=True)
+            if name == "GetTmpPasswordRequest":
+                return types.account.TmpPassword(tmp_password=b"tmp", valid_until=0)
+            if name == "GetStarGiftWithdrawalUrlRequest":
+                return types.payments.StarGiftWithdrawalUrl(url="https://fragment.com/x")
+            if name == "GetTranscriptionLangsRequest":
+                return ["ru", "en"]
+            if name == "GetCurrencyRatesRequest":
+                return types.payments.CurrencyRates(rates=[types.CurrencyRate("USD", 1.0)])
+            if name == "ExportNoPaidMessagesTokenRequest":
+                return types.ExportedNoPaidMessagesToken(token="t", url="https://t.me/x?t=t")
+            return True
+
+    async def run() -> None:
+        forum = tgx_forum.Forum(Client())
+        await forum.set_tabs("чат", True)
+        last = sent[-1].to_dict()
+        check("вкладки включаются", last["tabs"] is True and last["enabled"] is True)
+        if new_layer:
+            check("переключение вкладок не гасит боковую панель", last["sidebar"] is True)
+            await forum.set_sidebar("чат", False)
+            check("боковая панель выключается сама по себе",
+                  sent[-1].to_dict()["sidebar"] is False)
+        else:
+            refused = ""
+            try:
+                await forum.set_sidebar("чат", True)
+            except tgx_forum.ForumError as exc:
+                refused = str(exc)
+            check("на старом слое боковая панель отказывает словами", "1.46" in refused)
+
+        # Вывод подарка: пароль считает SRP, его здесь подменяем — проверяется
+        # только то, какой запрос уходит на каком слое.
+        from telethon import password as srp
+        real, srp.compute_check = srp.compute_check, lambda state, secret: types.InputCheckPasswordEmpty()
+        try:
+            got = await tgx_pay.Pay(Client()).gift_to_blockchain(5, "пароль")
+        finally:
+            srp.compute_check = real
+        check("ссылка на вывод подарка получена", got["ссылка"] == "https://fragment.com/x")
+        asked_tmp = any(type(r).__name__ == "GetTmpPasswordRequest" for r in sent)
+        fields = inspect.signature(functions.payments.GetStarGiftWithdrawalUrlRequest.__init__).parameters
+        check("временный пароль спрашивается там, где метод его ждёт",
+              asked_tmp == ("tmp_password" in fields))
+
+        calls = (("ещё один адрес бота", lambda: tgx_bots.Shop(Client()).add_username("bot", "@new"),
+                  tgx_bots.BotError, lambda r: r == {"адрес": "new", "добавлен": True}),
+                 ("снятие адреса бота", lambda: tgx_bots.Shop(Client()).remove_username("bot", "new"),
+                  tgx_bots.BotError, lambda r: r["убран"] is True),
+                 ("ссылка бесплатной переписки", lambda: tgx_contacts.More(Client()).free_chat_token(),
+                  tgx_contacts.ContactError, lambda r: r["ссылка"] == "https://t.me/x?t=t"),
+                 ("языки расшифровки", lambda: tgx_transcribe.Transcriber(Client()).languages(),
+                  tgx_transcribe.TranscribeError, lambda r: r["языки"] == ["ru", "en"]),
+                 ("курсы валют", lambda: tgx_pay.Pay(Client()).currency_rates(),
+                  tgx_pay.PayError, lambda r: r == [{"валюта": "USD", "курс": 1.0}]))
+        for what, call, error, good in calls:
+            before = len(sent)
+            try:
+                result = await call()
+            except error as exc:
+                check(f"{what}: на старом слое отказ словами и без сети",
+                      not new_layer and "1.46" in str(exc) and len(sent) == before)
+            else:
+                check(f"{what}: работает на слое 233", new_layer and good(result))
+
+    await run()
+
+
 def button_layer_regression() -> None:
     """Кнопки читаются и собираются одинаково на слоях TL 227 и 229.
 
@@ -4517,6 +4628,7 @@ async def main() -> int:
     media_probe_regression()
     shadowed_method_regression()
     button_layer_regression()
+    await layer_233_regression()
     # drive the UI under the same task factory the real terminal driver installs
     asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
     home = fresh(OUT / "tui-home")

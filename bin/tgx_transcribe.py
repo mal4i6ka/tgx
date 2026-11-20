@@ -87,6 +87,22 @@ class Transcriber:
             "group_boost_level": limits.get("group_transcribe_level_min"),
         }
 
+    async def languages(self, peer: Any = None) -> dict[str, Any]:
+        """На каких языках Telegram расшифровывает — вообще или в этом чате (слой 233)."""
+        from telethon.tl import functions
+
+        try:
+            make = functions.messages.GetTranscriptionLangsRequest
+        except AttributeError:
+            raise TranscribeError("список языков появился в слое 233 — нужен Telethon 1.46: "
+                                  ".venv/bin/pip install -U -r requirements.txt") from None
+        entity = await self.client.get_input_entity(peer) if peer is not None else None
+        try:
+            langs = await self.client(make(peer=entity))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        return {"языков": len(langs or []), "языки": list(langs or [])}
+
     async def transcribe(self, peer: Any, msg_id: int, *, wait: float = WAIT_SECONDS,
                          check_kind: bool = True) -> dict[str, Any]:
         """Расшифровать голосовое или кружок и дождаться готового текста."""

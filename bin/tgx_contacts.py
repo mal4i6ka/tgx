@@ -17,6 +17,10 @@ from __future__ import annotations
 from typing import Any, Sequence
 
 
+NEEDS_233 = ("это появилось в слое 233 — нужен Telethon 1.46: "
+             ".venv/bin/pip install -U -r requirements.txt")
+
+
 class ContactError(RuntimeError):
     """Действие с контактами, которое не удалось выполнить."""
 
@@ -350,6 +354,36 @@ class More:
         # самому значит однажды собрать её неправильно
         return {"ссылка": getattr(result, "url", None),
                 "живёт до": getattr(result, "expires", None) and str(result.expires)}
+
+    async def free_chat_token(self, *, revoke: bool = False,
+                              temporary: bool = False) -> dict[str, Any]:
+        """Ссылка, по которой вам пишут без платы за сообщения (слой 233).
+
+        `revoke` гасит прежнюю и выдаёт новую, `temporary` — ссылка со сроком.
+        """
+        from telethon.tl import functions
+
+        try:
+            make = functions.contacts.ExportNoPaidMessagesTokenRequest
+        except AttributeError:
+            raise ContactError(NEEDS_233) from None
+        result = await self._call(make(revoke=revoke or None, temporary=temporary or None))
+        return {"ссылка": getattr(result, "url", None),
+                "живёт до": getattr(result, "expires", None) and str(result.expires),
+                "прежняя": "отозвана" if revoke else "действует"}
+
+    async def use_free_chat_token(self, who: Any, token: str) -> dict[str, Any]:
+        """Принять чужую ссылку бесплатной переписки: писать человеку без платы."""
+        from telethon.tl import functions
+
+        try:
+            make = functions.contacts.ImportNoPaidMessagesTokenRequest
+        except AttributeError:
+            raise ContactError(NEEDS_233) from None
+        clean = token.rstrip("/").split("/")[-1].split("=")[-1]
+        user = await self._call(make(
+            user_id=await self.client.get_input_entity(who), token=clean))
+        return person(user)
 
     async def nearby(self, lat: float, lon: float, *, minutes: int = 0) -> list[dict[str, Any]]:
         """Кто рядом. `minutes` — на сколько показать себя другим.

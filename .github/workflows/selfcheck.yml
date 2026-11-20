@@ -25,15 +25,18 @@ jobs:
     name: tgx_smoke · ${{ matrix.label }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Оба края того, что разрешает requirements.txt: самая старая Telethon и то,
+    # Всё, что разрешает requirements.txt: самая старая Telethon, средняя и то,
     # что получит свежая установка сегодня. Кнопки в слоях 227 и 229 устроены по-
-    # разному, и проверить переходник можно только на обоих.
+    # разному, а в 233 сменились вызовы форума и вывода подарка — переходники
+    # проверяются только на каждом слое отдельно.
     strategy:
       fail-fast: false
       matrix:
         include:
           - label: нижняя граница
             telethon: telethon==1.44.0
+          - label: слой 229
+            telethon: telethon==1.45.0
           - label: свежая установка
             telethon: ""
     steps:
