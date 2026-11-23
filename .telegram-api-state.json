@@ -1,9 +1,9 @@
 {
   "layer": 233,
   "telethon": "1.46.0",
-  "bot_api": "10.4",
-  "checked_at": "2026-11-20",
-  "bot_api_release_date": "2026-11-09",
+  "bot_api": "10.5",
+  "checked_at": "2026-11-23",
+  "bot_api_release_date": "2026-11-22",
   "changelog": "https://core.telegram.org/bots/api-changelog",
   "sdk": {
     "name": "Telethon",

@@ -296,6 +296,23 @@ async def bots_regression() -> None:
         missing = str(exc)
     check("an unknown bot lists what is available", "one_bot" in missing and "two_bot" in missing)
 
+    # Bot API 10.5, setMySettings: уходит только сказанное, остальное не трогается
+    body = tgx_bots.settings_payload({"inline": True, "all_messages": False, "groups": None},
+                                     placeholder="", feedback=10, callback_mode="auto")
+    check("настройки бота: уходит только то, что меняли",
+          body == {"supports_inline_queries": True, "can_read_all_group_messages": False,
+                   "inline_query_placeholder": "", "inline_feedback_share_denominator": 10,
+                   "callback_query_mode": "auto"})
+    check("настройки бота: без ключей запрос пуст — только чтение",
+          tgx_bots.settings_payload({flag: None for flag in tgx_bots.SETTINGS}) == {})
+    refused = []
+    for bad in ({"feedback": 5}, {"callback_mode": "always"}):
+        try:
+            tgx_bots.settings_payload({}, **bad)
+        except tgx_bots.BotError:
+            refused.append(bad)
+    check("настройки бота: неверная доля и режим отвергаются до сети", len(refused) == 2)
+
 
 def rich_message_regression() -> None:
     """Rich messages (Bot API 10.1) go out over HTTP with a bot token, so the payload
@@ -1127,6 +1144,13 @@ def rich_blocks_regression() -> None:
     check("раскрывающаяся цитата — отдельный тип",
           R.quote("x", expandable=True)["type"] == "expandable_blockquote")
     check("обычная цитата осталась прежней", R.quote("x")["type"] == "blockquote")
+    # Bot API 10.5: у раскрывающейся цитаты блоки вместо строки — со строкой
+    # сервер её больше не примет
+    folded = R.quote("x", expandable=True)
+    check("раскрывающаяся цитата держит блоки, а не строку",
+          "text" not in folded and folded["blocks"] == [R.paragraph("x")])
+    check("в раскрывающуюся цитату можно положить любые блоки",
+          R.quote([R.divider()], expandable=True)["blocks"] == [R.divider()])
     check("плотная таблица помечается", R.table([["a"]], compact=True)["is_compact"] is True)
     check("у обычной таблицы флага нет", "is_compact" not in R.table([["a"]]))
     check("список раскладывается по пунктам",
