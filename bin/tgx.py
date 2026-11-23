@@ -4069,6 +4069,18 @@ async def cmd_bot(args: argparse.Namespace) -> None:
             s.client).set_user_status(args.user, args.emoji_id, until=args.until or 0)))
         return
 
+    if command == "settings":
+        # Bot API 10.5: настройки бота без BotFather — токеном, по HTTPS
+        bot = tgx_bots.Registry().get(args.username)
+        if not bot.token:
+            raise tgx_bots.BotError(f"у @{bot.username} нет токена — `tgx bot token @{bot.username}`")
+        flags = {flag: bool_from_arg(getattr(args, flag)) for flag in tgx_bots.SETTINGS}
+        payload = tgx_bots.settings_payload(flags, placeholder=args.placeholder,
+                                            feedback=args.inline_feedback,
+                                            callback_mode=args.callback_mode)
+        render.emit(await asyncio.to_thread(tgx_bots.apply_settings, bot.token, payload))
+        return
+
     if command == "access":
         # доступ к боту настраивает сам бот: из аккаунта приходит USER_BOT_REQUIRED
         render.emit(await _with_bot(args.username, lambda s: tgx_bots.Shop(
@@ -5756,6 +5768,21 @@ def build_parser() -> argparse.ArgumentParser:
     b_ss.add_argument("user")
     b_ss.add_argument("emoji_id", type=int, help="0 — снять")
     b_ss.add_argument("--until", type=int, help="до какого времени, метка unix")
+
+    b_set = bot_sub.add_parser(
+        "settings", help="настройки бота без BotFather (Bot API 10.5); без ключей — показать",
+        epilog="примеры:\n  tgx bot settings мойбот\n"
+               "  tgx bot settings мойбот --inline on --placeholder \"Найти…\"\n"
+               "  tgx bot settings мойбот --all-messages off --topics on --topic-sidebar on\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    b_set.add_argument("username")
+    for flag, (_, label) in tgx_bots.SETTINGS.items():
+        b_set.add_argument("--" + flag.replace("_", "-"), dest=flag, metavar="on|off", help=label)
+    b_set.add_argument("--placeholder", help="подсказка в поле инлайна; пустая строка — обычная")
+    b_set.add_argument("--inline-feedback", type=int, metavar="N",
+                       help="присылать каждый N-й выбранный инлайн-результат: 1, 10, 100, 1000; 0 — нет")
+    b_set.add_argument("--callback-mode", choices=tgx_bots.CALLBACK_MODES,
+                       help="нажатия под недоступным сообщением: default, auto или inline")
 
     b_cw = bot_sub.add_parser("can-write", help="может ли бот писать вам первым")
     b_cw.add_argument("username")
