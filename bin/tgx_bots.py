@@ -59,6 +59,81 @@ class Bot:
         return data
 
 
+# ── настройки бота через Bot API 10.5 ─────────────────────────────────────────
+# Раньше всё это менялось только диалогом с BotFather — по одной настройке за
+# разговор. `setMySettings` меняет сразу несколько, а несказанное оставляет как
+# есть. Флаг CLI → поле Bot API и как его назвать человеку.
+SETTINGS: dict[str, tuple[str, str]] = {
+    "inline": ("supports_inline_queries", "инлайн-режим"),
+    "inline_location": ("needs_inline_query_location", "спрашивать место в инлайне"),
+    "groups": ("can_join_groups", "можно добавить в группу"),
+    "all_messages": ("can_read_all_group_messages", "видит все сообщения группы"),
+    "business": ("can_connect_to_business", "подключается к аккаунтам"),
+    "manage_bots": ("can_manage_bots", "заводит управляемых ботов"),
+    "guest": ("supports_guest_queries", "гостевые запросы"),
+    "join_requests": ("supports_join_request_queries", "разбирает заявки на вступление"),
+    "topics": ("has_topics_enabled", "темы в личке"),
+    "user_topics": ("allows_users_to_create_topics", "темы заводят собеседники"),
+    "topic_sidebar": ("has_topic_sidebar", "темы боковой панелью"),
+    "bots_talk": ("can_communicate_with_bots", "говорит с другими ботами"),
+}
+CALLBACK_MODES = ("default", "auto", "inline")
+FEEDBACK_SHARES = (0, 1, 10, 100, 1000)
+READ_BACK = {field: label for field, label in SETTINGS.values()} | {
+    "inline_query_placeholder": "подсказка в инлайне",
+    "active_usernames": "адреса",
+    "has_main_web_app": "главное мини-приложение",
+}
+
+
+def settings_payload(flags: dict[str, bool | None], *, placeholder: str | None = None,
+                     feedback: int | None = None, callback_mode: str | None = None) -> dict[str, Any]:
+    """Тело `setMySettings`: только то, что попросили поменять.
+
+    Проверяется до сети — Bot API на неверное значение отвечает скупо.
+    """
+    payload: dict[str, Any] = {}
+    for flag, value in flags.items():
+        if flag not in SETTINGS:
+            raise BotError(f"настройки «{flag}» нет; есть: {', '.join(sorted(SETTINGS))}")
+        if value is not None:
+            payload[SETTINGS[flag][0]] = bool(value)
+    if placeholder is not None:
+        payload["inline_query_placeholder"] = placeholder      # пустая строка — вернуть обычную
+    if feedback is not None:
+        if feedback not in FEEDBACK_SHARES:
+            raise BotError("доля выбранных инлайн-результатов — 1, 10, 100 или 1000; 0 — не присылать")
+        payload["inline_feedback_share_denominator"] = feedback
+    if callback_mode is not None:
+        if callback_mode not in CALLBACK_MODES:
+            raise BotError(f"режим нажатий — один из: {', '.join(CALLBACK_MODES)}")
+        payload["callback_query_mode"] = callback_mode
+    return payload
+
+
+def apply_settings(token: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Поменять настройки (если есть что) и прочитать, что получилось."""
+    import tgx_net
+
+    base = f"https://api.telegram.org/bot{token}"
+    try:
+        if payload:
+            answer = tgx_net.post_json(f"{base}/setMySettings", payload, "Bot API")
+            if not answer.get("ok"):
+                raise BotError(f"Bot API отказал: {answer.get('description', 'без объяснений')}")
+        me = tgx_net.post_json(f"{base}/getMe", {}, "Bot API")
+    except tgx_net.NetError as exc:
+        raise BotError(str(exc)) from exc
+    if not me.get("ok"):
+        raise BotError(f"Bot API отказал: {me.get('description', 'без объяснений')}")
+    info = me.get("result") or {}
+    shown = {"бот": info.get("username")}
+    shown.update({label: info[field] for field, label in READ_BACK.items() if field in info})
+    if payload:
+        shown["изменено"] = len(payload)
+    return shown
+
+
 class Registry:
     """`data/bots.json`, kept readable only by the owner."""
 

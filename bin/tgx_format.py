@@ -459,7 +459,7 @@ def render(
             spans.append((start, end, Style(color=accent, underline=True, link=link)))
         elif name in {"MessageEntityMention", "MessageEntityMentionName", "MessageEntityHashtag",
                       "MessageEntityCashtag", "MessageEntityBotCommand", "MessageEntityEmail",
-                      "MessageEntityPhone"}:
+                      "MessageEntityPhone", "MessageEntityTonAddress"}:
             spans.append((start, end, Style(color=accent)))
         elif name == "MessageEntityBlockquote":
             spans.append((start, end, Style(color=muted, italic=True)))

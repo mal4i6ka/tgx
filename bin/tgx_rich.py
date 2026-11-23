@@ -616,9 +616,17 @@ def divider() -> dict[str, Any]:
 
 
 def quote(text: Any, *, credit: Any = None, expandable: bool = False) -> dict[str, Any]:
-    """Раскрывающаяся цитата появилась в 10.3 — для длинных врезок."""
-    block = {"type": "expandable_blockquote" if expandable else "blockquote",
-             "text": as_text(text)}
+    """Раскрывающаяся цитата появилась в 10.3 — для длинных врезок.
+
+    С 10.5 она держит не строку, а блоки (`blocks` вместо `text`): внутри может
+    быть список, таблица, код. Строка оборачивается в абзац, список блоков
+    передаётся как есть. Обычная цитата по-прежнему строчная.
+    """
+    if expandable:
+        inner = list(text) if isinstance(text, (list, tuple)) else [paragraph(text)]
+        block: dict[str, Any] = {"type": "expandable_blockquote", "blocks": inner}
+    else:
+        block = {"type": "blockquote", "text": as_text(text)}
     if credit:
         block["credit"] = as_text(credit)
     return block
