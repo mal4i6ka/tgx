@@ -12,6 +12,7 @@ import asyncio
 import csv
 import getpass
 import json
+import time
 import os
 import sqlite3
 import sys
@@ -53,6 +54,8 @@ import tgx_profile
 import tgx_qr
 import tgx_rich
 import tgx_transcribe
+import tgx_callbacks
+import tgx_wallet
 import tgx_render as render
 import tgx_safety
 import tgx_security
@@ -1727,6 +1730,31 @@ async def cmd_pay(args: argparse.Namespace) -> None:
                 await resolve_peer(client, args.chat), args.id), "подтвердил": v["by"]})
             return
 
+        if args.paycmd == "gift-withdraw":
+            v = await gated_or_die(client, args, "Вывести подарок в свой кошелёк TON?",
+                                   f"Подарок {args.id}",
+                                   "подарок станет NFT в блокчейне; вернуть — только депозитом")
+            secret = read_secret("пароль от аккаунта (не отображается): ", "TGX_PASSWORD")
+            render.emit({"ok": True, **await pay.gift_withdraw(args.id, secret, keep_on_profile=args.keep),
+                         "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "gift-delete":
+            v = await gated_or_die(client, args, "Удалить подарок насовсем?",
+                                   f"Подарок {args.id}", "ни звёзд, ни NFT взамен — удаление необратимо")
+            render.emit({"ok": True, **await pay.gift_delete(args.id), "подтвердил": v["by"]})
+            return
+
+        if args.paycmd == "gift-deposit":
+            render.emit({"ok": True, **await pay.gift_deposit(
+                await resolve_peer(client, args.to), args.slug, hide_sender=args.hide_sender)})
+            return
+
+        if args.paycmd == "gift-display":
+            where = await resolve_peer(client, args.chat) if args.chat else None
+            render.emit({"ok": True, **await pay.gift_display(args.slug, where)})
+            return
+
         if args.paycmd == "gift-to-blockchain":
             v = await gated_or_die(client, args, "Вывести подарок в блокчейн?",
                                    f"Подарок {args.id}", "подарок покинет Telegram")
@@ -2006,6 +2034,75 @@ async def cmd_rich(args: argparse.Namespace) -> None:
         await client.disconnect()
 
 
+async def cmd_wallet(args: argparse.Namespace) -> None:
+    """Встроенный кошелёк TON (слой 233): чтение, TonConnect, покупка через провайдера."""
+    command = args.walletcmd
+    if command in {"send", "export-phrase", "backup", "replace"}:
+        tgx_wallet.Wallet.needs_key()
+    client = await make_client()
+    try:
+        await ensure_login(client)
+        w = tgx_wallet.Wallet(client)
+        if command == "state":
+            render.emit(await w.state())
+        elif command in {"transactions", "tx"}:
+            got = (await w.lookup(args.id, by_hash=args.hash) if command == "tx" else
+                   await w.transactions(limit=args.limit, offset=args.offset or "",
+                                        inbound=args.inbound, outbound=args.outbound))
+            if args.json or not render.pretty():
+                render.emit(got)
+            else:
+                print_table(got["операции"], ["когда", "сумма", "с кем", "комментарий", "отметки"],
+                            title=f"кошелёк · баланс {got['баланс']}")
+                if got["дальше"]:
+                    print(f"дальше: --offset {got['дальше']}")
+        elif command == "nfts":
+            render.emit(await w.nfts(limit=args.limit, offset=args.offset or ""))
+        elif command == "addresses":
+            render.emit({"адреса": await w.addresses(args.user, force=args.force)})
+        elif command == "gasless":
+            render.emit(await w.gasless())
+        elif command == "legacy":
+            render.emit(await w.legacy_balance())
+        elif command == "toncenter":
+            query = dict(pair.split("=", 1) for pair in args.param or [] if "=" in pair)
+            render.emit(await w.toncenter(args.endpoint, query))
+        elif command == "sessions":
+            render.emit({"сессии": await w.sessions()})
+        elif command == "pending":
+            render.emit({"запросы": await w.pending(args.session)})
+        elif command == "disconnect":
+            render.emit({"ok": True, **await w.close_session(args.session)})
+        elif command == "decline":
+            render.emit({"ok": True, **await w.decline(args.session, args.msg_id, args.app_request_id)})
+        elif command == "onramp":
+            sub = args.onrampcmd
+            if sub == "providers":
+                render.emit({"провайдеры": await w.onramp_providers(args.crypto or "")})
+            elif sub == "currencies":
+                render.emit({"валюты оплаты": await w.onramp_currencies(args.provider, args.crypto)})
+            elif sub == "check":
+                render.emit(await w.onramp_check(args.provider, args.crypto, args.base or "",
+                                                 args.method or ""))
+            elif sub == "quote":
+                render.emit(await w.onramp_quote(args.provider, args.crypto, args.base,
+                                                 base_amount=args.amount or "",
+                                                 crypto_amount=args.crypto_amount or "",
+                                                 method=args.method or ""))
+            else:
+                address = args.address
+                if not address:
+                    address = (await w.state()).get("адрес") or ""
+                    if not address:
+                        raise tgx_wallet.WalletError("своего кошелька нет — укажите --address")
+                render.emit(await w.onramp_session(
+                    args.provider, args.crypto, address, base=args.base or "",
+                    base_amount=args.amount or "", crypto_amount=args.crypto_amount or "",
+                    method=args.method or ""))
+    finally:
+        await client.disconnect()
+
+
 async def cmd_transcribe(args: argparse.Namespace) -> None:
     """Расшифровка голосовых и кружков."""
     client = await make_client()
@@ -2020,6 +2117,17 @@ async def cmd_transcribe(args: argparse.Namespace) -> None:
         if args.trcmd == "langs":
             where = await resolve_peer(client, args.chat) if args.chat else None
             render.emit(await worker.languages(where))
+            return
+
+        if args.trcmd == "file":
+            result = await worker.transcribe_file(args.path, wait=args.wait)
+            if render.pretty():
+                body = result["text"] or "(пусто)"
+                if result["pending"]:
+                    body += "\n\n(ещё не готово — Telegram дописывает; повторите через минуту)"
+                render.console().print(body)
+            else:
+                render.emit(result)
             return
 
         peer = await resolve_peer(client, args.chat)
@@ -4069,6 +4177,53 @@ async def cmd_bot(args: argparse.Namespace) -> None:
             s.client).set_user_status(args.user, args.emoji_id, until=args.until or 0)))
         return
 
+    if command in {"updates", "answer", "edit", "serve"}:
+        bot = tgx_bots.Registry().get(args.username)
+        if not bot.token:
+            raise tgx_bots.BotError(f"у @{bot.username} нет токена — `tgx bot token @{bot.username}`")
+        token = bot.token
+        if command == "updates":
+            if args.drop_webhook:
+                render.emit(await asyncio.to_thread(tgx_callbacks.drop_webhook, token,
+                                                    drop_pending=args.drop_pending))
+                return
+            feed = tgx_callbacks.Updates(token)
+
+            def collect() -> list[dict[str, Any]]:
+                rows = []
+                until = time.monotonic() + args.wait
+                for update in feed.stream(until=until, limit=args.limit):
+                    press = tgx_callbacks.normalize(update)
+                    if press is not None:
+                        if args.jsonl:
+                            print(json.dumps(press, ensure_ascii=False), flush=True)
+                        rows.append(press)
+                if not args.peek:
+                    feed.commit()
+                return rows
+
+            rows = await asyncio.to_thread(collect)
+            if not args.jsonl:
+                render.emit({"нажатий": len(rows), "нажатия": rows})
+            return
+        if command == "answer":
+            render.emit(await asyncio.to_thread(tgx_callbacks.answer, token, args.id,
+                                                text=args.text or "", alert=args.alert,
+                                                url=args.url or "", cache=args.cache or 0))
+            return
+        if command == "edit":
+            where = tgx_callbacks.address(chat=args.chat, message_id=args.id,
+                                          inline_message_id=args.inline or "")
+            render.emit(await asyncio.to_thread(tgx_callbacks.edit, token, where, text=args.text,
+                                                buttons=args.buttons, parse_mode=args.parse_mode or ""))
+            return
+        emit = lambda row: print(json.dumps(row, ensure_ascii=False), flush=True)
+        handled = await asyncio.to_thread(tgx_callbacks.serve, token, args.handler,
+                                          data_prefix=args.prefix or "", limit=args.limit,
+                                          seconds=args.seconds, emit=emit)
+        render.emit({"обработано нажатий": handled})
+        return
+
     if command == "settings":
         # Bot API 10.5: настройки бота без BotFather — токеном, по HTTPS
         bot = tgx_bots.Registry().get(args.username)
@@ -5784,6 +5939,49 @@ def build_parser() -> argparse.ArgumentParser:
     b_set.add_argument("--callback-mode", choices=tgx_bots.CALLBACK_MODES,
                        help="нажатия под недоступным сообщением: default, auto или inline")
 
+    b_upd = bot_sub.add_parser(
+        "updates", help="нажатия на кнопки бота: кто, что, где сообщение",
+        epilog="адрес сообщения зависит от --callback-mode в tgx bot settings:\n"
+               "у нажатия либо чат и message_id, либо inline_message_id\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    b_upd.add_argument("username")
+    b_upd.add_argument("--wait", type=float, default=25.0, help="сколько секунд ждать нажатий")
+    b_upd.add_argument("--limit", type=int, default=0, help="выйти после стольких нажатий")
+    b_upd.add_argument("--peek", action="store_true", help="посмотреть, не забирая — придут снова")
+    b_upd.add_argument("--jsonl", action="store_true", help="по строке на нажатие, сразу")
+    b_upd.add_argument("--drop-webhook", action="store_true",
+                       help="снять вебхук, чтобы нажатия шли сюда")
+    b_upd.add_argument("--drop-pending", action="store_true", help="вместе с вебхуком выбросить старое")
+
+    b_ans = bot_sub.add_parser("answer", help="ответить на нажатие: строкой, окном или ссылкой")
+    b_ans.add_argument("username")
+    b_ans.add_argument("id", help="id нажатия из tgx bot updates")
+    b_ans.add_argument("--text", help=f"до {tgx_callbacks.MAX_ANSWER} знаков")
+    b_ans.add_argument("--alert", action="store_true", help="окном, а не всплывающей строкой")
+    b_ans.add_argument("--url", help="открыть ссылку (игра или t.me/бот?start=…)")
+    b_ans.add_argument("--cache", type=int, help="сколько секунд клиент помнит ответ")
+
+    b_ed = bot_sub.add_parser("edit", help="переписать сообщение бота — по чату и номеру или по inline_message_id")
+    b_ed.add_argument("username")
+    b_ed.add_argument("chat", nargs="?", help="чат (id или @адрес)")
+    b_ed.add_argument("id", nargs="?", type=int, help="номер сообщения")
+    b_ed.add_argument("--inline", help="inline_message_id из нажатия — вместо чата и номера")
+    b_ed.add_argument("--text", help="новый текст")
+    b_ed.add_argument("--buttons", help="новые кнопки: «Да=cb:yes, Нет=cb:no»; пустая строка — убрать")
+    b_ed.add_argument("--parse-mode", choices=["HTML", "MarkdownV2", "Markdown"])
+
+    b_srv = bot_sub.add_parser(
+        "serve", help="обрабатывать нажатия: на каждое — ваша программа",
+        epilog="программа получает нажатие JSON-ом в stdin и в TGX_CALLBACK_*;\n"
+               "ответ — строка или JSON {\"answer\", \"alert\", \"url\", \"edit\": {\"text\", \"buttons\"}}\n\n"
+               "пример:\n  tgx bot serve мойбот 'sh -c \"echo принято: $TGX_CALLBACK_DATA\"'\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    b_srv.add_argument("username")
+    b_srv.add_argument("handler", help="команда-обработчик; конвейер — через sh -c '…'")
+    b_srv.add_argument("--prefix", help="брать только callback_data с этим началом")
+    b_srv.add_argument("--limit", type=int, default=0, help="выйти после стольких нажатий")
+    b_srv.add_argument("--seconds", type=float, default=0, help="выйти через столько секунд")
+
     b_cw = bot_sub.add_parser("can-write", help="может ли бот писать вам первым")
     b_cw.add_argument("username")
     b_cw.add_argument("--allow-write", action="store_true", help="разрешить")
@@ -6987,6 +7185,22 @@ def build_parser() -> argparse.ArgumentParser:
     y_gb = gated_parser("gift-to-blockchain", "вывести подарок в блокчейн")
     y_gb.add_argument("id", type=int)
 
+    y_gw = gated_parser("gift-withdraw", "вывести подарок в свой кошелёк TON (слой 233)")
+    y_gw.add_argument("id", help="id сообщения с подарком или слаг улучшенного")
+    y_gw.add_argument("--keep", action="store_true", help="оставить на виду в профиле")
+
+    y_gdel = gated_parser("gift-delete", "удалить подарок насовсем (слой 233)")
+    y_gdel.add_argument("id", help="id сообщения с подарком или слаг улучшенного")
+
+    y_gdep = pay_sub.add_parser("gift-deposit", help="данные перевода, чтобы вернуть NFT-подарок в Telegram")
+    y_gdep.add_argument("slug", help="слаг или ссылка t.me/nft/…")
+    y_gdep.add_argument("to", help="кому зачислить: me, @человек или канал")
+    y_gdep.add_argument("--hide-sender", action="store_true", help="не показывать отправителя")
+
+    y_gdis = pay_sub.add_parser("gift-display", help="показать в профиле NFT-подарок из кошелька")
+    y_gdis.add_argument("slug")
+    y_gdis.add_argument("chat", nargs="?", help="канал, если не в своём профиле")
+
     y_pc = gated_parser("pay-card", "оплатить счёт сохранённой картой")
     y_pc.add_argument("link")
     y_pc.add_argument("--tip", type=int, help="чаевые")
@@ -7083,6 +7297,71 @@ def build_parser() -> argparse.ArgumentParser:
                       help="переписать своё сообщение с этим id, а не слать новое")
     rich.set_defaults(func=cmd_rich)
 
+    wl = sub.add_parser("wallet", help="встроенный кошелёк TON: баланс, операции, TonConnect, покупка",
+                        epilog="примеры:\n  tgx wallet state\n  tgx wallet transactions --limit 50\n"
+                               "  tgx wallet onramp quote ПРОВАЙДЕР TON USD --amount 50\n\n"
+                               "переводы, сид-фраза и резервная копия подписываются ключом —\n"
+                               "tgx их не делает, это остаётся приложению Telegram\n",
+                        formatter_class=argparse.RawDescriptionHelpFormatter)
+    wl_sub = wl.add_subparsers(dest="walletcmd", required=True)
+    wl.set_defaults(func=cmd_wallet)
+    wl_sub.add_parser("state", help="адрес, баланс, резервная копия")
+    w_tx = wl_sub.add_parser("transactions", help="история операций")
+    w_tx.add_argument("--limit", type=int, default=20)
+    w_tx.add_argument("--offset", help="продолжение — из строки «дальше»")
+    w_tx.add_argument("--inbound", action="store_true", help="только входящие")
+    w_tx.add_argument("--outbound", action="store_true", help="только исходящие")
+    w_tx.add_argument("--json", action="store_true")
+    w_one = wl_sub.add_parser("tx", help="операции по id или по хешу сообщения")
+    w_one.add_argument("id", nargs="+")
+    w_one.add_argument("--hash", action="store_true", help="это хеши сообщений, а не id")
+    w_one.add_argument("--json", action="store_true")
+    w_nft = wl_sub.add_parser("nfts", help="NFT в кошельке, включая подарки Telegram")
+    w_nft.add_argument("--limit", type=int, default=50)
+    w_nft.add_argument("--offset")
+    w_adr = wl_sub.add_parser("addresses", help="адреса кошельков людей")
+    w_adr.add_argument("user", nargs="+")
+    w_adr.add_argument("--force", action="store_true", help="не брать из кэша сервера")
+    wl_sub.add_parser("gasless", help="переводы с комиссией в самом токене: сколько осталось")
+    wl_sub.add_parser("legacy", help="остался ли баланс в старом @wallet")
+    w_tc = wl_sub.add_parser("toncenter", help="чтение из toncenter через Telegram (только GET)")
+    w_tc.add_argument("endpoint", help="например getAddressBalance")
+    w_tc.add_argument("param", nargs="*", help="ключ=значение")
+    wl_sub.add_parser("sessions", help="приложения, подключённые через TonConnect")
+    w_pend = wl_sub.add_parser("pending", help="чего ждут подключённые приложения")
+    w_pend.add_argument("--session", type=int)
+    w_dc = wl_sub.add_parser("disconnect", help="отключить приложение TonConnect")
+    w_dc.add_argument("session", type=int)
+    w_dec = wl_sub.add_parser("decline", help="отклонить запрос приложения")
+    w_dec.add_argument("session", type=int)
+    w_dec.add_argument("msg_id", type=int)
+    w_dec.add_argument("app_request_id")
+    for name, text in (("send", "перевод"), ("export-phrase", "выгрузить сид-фразу"),
+                       ("backup", "резервная копия"), ("replace", "заменить кошелёк")):
+        wl_sub.add_parser(name, help=f"{text} — требует ключа, делается в приложении Telegram")
+    w_on = wl_sub.add_parser("onramp", help="купить криптовалюту у провайдера — платите сами, на его странице")
+    on_sub = w_on.add_subparsers(dest="onrampcmd", required=True)
+    o_pr = on_sub.add_parser("providers", help="кто продаёт")
+    o_pr.add_argument("crypto", nargs="?")
+    o_cur = on_sub.add_parser("currencies", help="чем можно платить")
+    o_cur.add_argument("provider")
+    o_cur.add_argument("crypto")
+    o_ch = on_sub.add_parser("check", help="доступно ли в вашей стране и в каких пределах")
+    o_ch.add_argument("provider")
+    o_ch.add_argument("crypto")
+    o_ch.add_argument("base", nargs="?", help="валюта оплаты — тогда покажет пределы")
+    o_ch.add_argument("--method", help="способ оплаты")
+    for name, text in (("quote", "сколько выйдет"), ("buy", "открыть страницу оплаты")):
+        parser = on_sub.add_parser(name, help=text)
+        parser.add_argument("provider")
+        parser.add_argument("crypto")
+        parser.add_argument("base", nargs="?" if name == "buy" else None, help="валюта оплаты")
+        parser.add_argument("--amount", help="сумма в валюте оплаты")
+        parser.add_argument("--crypto-amount", help="или сумма в криптовалюте")
+        parser.add_argument("--method", help="способ оплаты")
+        if name == "buy":
+            parser.add_argument("--address", help="куда зачислить; без него — свой кошелёк")
+
     tr = sub.add_parser("transcribe", help="расшифровать голосовое или кружок в текст",
                         epilog="примеры:\n  tgx transcribe get @mychat 12345\n  tgx transcribe status\n",
                         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -7103,6 +7382,11 @@ def build_parser() -> argparse.ArgumentParser:
     t_rate.add_argument("verdict", choices=["good", "bad"])
 
     tr_sub.add_parser("status", help="доступна ли расшифровка и сколько бесплатных осталось")
+    t_file = tr_sub.add_parser("file", help="расшифровать свой аудиофайл, никуда не отправляя (слой 233)")
+    t_file.add_argument("path")
+    t_file.add_argument("--wait", type=float, default=tgx_transcribe.WAIT_SECONDS,
+                        help="сколько секунд ждать готовый текст")
+
     t_langs = tr_sub.add_parser("langs", help="на каких языках расшифровывает (слой 233)")
     t_langs.add_argument("chat", nargs="?", help="без чата — общий список")
 
@@ -7717,7 +8001,7 @@ SPOKEN_ERRORS = (PeerError, tgx_article.ArticleError, tgx_bots.BotError, tgx_bus
                  tgx_profile.ProfileError,
                  tgx_account.AccountError, tgx_msgextra.MsgError, tgx_ai.AIError, tgx_chatx.ChatXError, tgx_takeout.TakeoutError, tgx_triage.TriageError, tgx_notify.NotifyError, tgx_safety.SafetyError, tgx_groups.GroupError, tgx_chanadmin.ChanError, tgx_windows.WindowError, tgx_inline.InlineError, tgx_rich.RichError, tgx_security.SecurityError, tgx_stats.StatsError, tgx_stickers.StickerError,
                  tgx_stories.StoryError,
-                 tgx_transcribe.TranscribeError)
+                 tgx_transcribe.TranscribeError, tgx_wallet.WalletError, tgx_callbacks.CallbackError)
 
 
 def main() -> None:
