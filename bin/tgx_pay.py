@@ -989,6 +989,89 @@ class Pay:
             raise self._explain(exc) from exc
         return {"подарок": int(msg_id), "ссылка": getattr(result, "url", None)}
 
+    # ── подарки и блокчейн (слой 233) ────────────────────────────────────────
+    @staticmethod
+    def _gift_ref(ref: Any) -> Any:
+        """Подарок по id служебного сообщения или по слагу улучшенного подарка."""
+        from telethon.tl import types
+        text = str(ref).strip()
+        if text.lstrip("-").isdigit():
+            return types.InputSavedStarGiftUser(msg_id=int(text))
+        return types.InputSavedStarGiftSlug(slug=text.rstrip("/").split("/")[-1])
+
+    @staticmethod
+    def _layer233(lookup: Any) -> Any:
+        try:
+            return lookup()
+        except AttributeError:
+            raise PayError("это появилось в слое 233 — нужен Telethon 1.46: "
+                           ".venv/bin/pip install -U -r requirements.txt") from None
+
+    async def gift_withdraw(self, ref: Any, secret: str, *, keep_on_profile: bool = False) -> dict[str, Any]:
+        """Вывести подарок в свой кошелёк TON. Обратно — только депозитом."""
+        from telethon import password as srp
+        from telethon.tl import functions
+
+        request = self._layer233(lambda: functions.payments.WithdrawStarGiftRequest)
+        if not secret:
+            raise PayError("для вывода подарка нужен пароль от аккаунта")
+        state = await self.client(functions.account.GetPasswordRequest())
+        if not getattr(state, "has_password", False):
+            raise PayError("на аккаунте не включена двухэтапная проверка")
+        try:
+            temporary = await self.client(functions.account.GetTmpPasswordRequest(
+                password=srp.compute_check(state, secret), period=60))
+            await self.client(request(stargift=self._gift_ref(ref), tmp_password=temporary.tmp_password,
+                                      keep_on_profile=keep_on_profile or None))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        return {"подарок": str(ref), "выведен в кошелёк": True, "виден в профиле": keep_on_profile}
+
+    async def gift_deposit(self, peer: Any, slug: str, *, hide_sender: bool = False) -> dict[str, Any]:
+        """Данные перевода, которым NFT-подарок из кошелька возвращается в Telegram.
+
+        Сам перевод подписывает кошелёк владельца: tgx отдаёт адрес, сумму и
+        полезную нагрузку и ничего не отправляет.
+        """
+        from telethon.tl import functions
+
+        request = self._layer233(lambda: functions.payments.DepositStarGiftRequest)
+        entity = await self.client.get_input_entity(peer)
+        try:
+            got = await self.client(request(peer=entity, slug=slug.rstrip("/").split("/")[-1],
+                                            hide_sender=hide_sender or None))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        payload = getattr(got, "payload", b"")
+        import base64
+        return {"адрес NFT": getattr(got, "nft_address", ""),
+                "сумма в нанотонах": getattr(got, "amount", None),
+                "полезная нагрузка (base64)": base64.b64encode(payload).decode() if isinstance(payload, bytes) else payload,
+                "дальше": "отправьте этот перевод из кошелька, где лежит NFT — tgx его не подписывает"}
+
+    async def gift_display(self, slug: str, peer: Any = None) -> dict[str, Any]:
+        """Показать в профиле NFT-подарок, который лежит во внешнем кошельке."""
+        from telethon.tl import functions
+
+        request = self._layer233(lambda: functions.payments.DisplayStarGiftRequest)
+        entity = await self.client.get_input_entity(peer) if peer is not None else None
+        try:
+            await self.client(request(slug=slug.rstrip("/").split("/")[-1], peer=entity))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        return {"подарок": slug, "показан": True, "где": str(peer) if peer is not None else "в своём профиле"}
+
+    async def gift_delete(self, ref: Any) -> dict[str, Any]:
+        """Удалить подарок насовсем. Ни звёзд, ни NFT взамен — только пустое место."""
+        from telethon.tl import functions
+
+        request = self._layer233(lambda: functions.payments.DeleteStarGiftRequest)
+        try:
+            await self.client(request(stargift=self._gift_ref(ref)))
+        except Exception as exc:
+            raise self._explain(exc) from exc
+        return {"подарок": str(ref), "удалён": True}
+
     async def pay_card(self, slug_or_link: str, secret: str, *, tip: int = 0) -> dict[str, Any]:
         """Оплатить счёт **сохранённой** картой. Номер карты не вводится.
 

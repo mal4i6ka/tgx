@@ -103,6 +103,62 @@ class Transcriber:
             raise self._explain(exc) from exc
         return {"языков": len(langs or []), "языки": list(langs or [])}
 
+    async def transcribe_file(self, path: str, *, wait: float = WAIT_SECONDS) -> dict[str, Any]:
+        """Расшифровать свой аудиофайл, никому его не отправляя (слой 233).
+
+        Файл загружается на сервер, но в чат не попадает. Готовый текст, как и
+        у голосовых, может прийти позже — отдельным апдейтом по transcription_id.
+        """
+        from pathlib import Path
+
+        from telethon import events
+        from telethon.tl import functions
+
+        try:
+            make = functions.messages.TranscribeAudioFileRequest
+        except AttributeError:
+            raise TranscribeError("расшифровка файла появилась в слое 233 — нужен Telethon 1.46: "
+                                  ".venv/bin/pip install -U -r requirements.txt") from None
+        source = Path(path).expanduser()
+        if not source.is_file():
+            raise TranscribeError(f"файла {source} нет")
+
+        done: asyncio.Future = asyncio.get_running_loop().create_future()
+        wanted: dict[str, Any] = {}
+        early: dict[int, str] = {}
+
+        async def on_update(update: Any) -> None:
+            if type(update).__name__ != "UpdateTranscribedAudioFile" or getattr(update, "pending", False):
+                return
+            if "id" not in wanted:          # апдейт обогнал ответ — запомним до сверки
+                early[update.transcription_id] = update.text
+            elif update.transcription_id == wanted["id"] and not done.done():
+                done.set_result(update.text)
+
+        handler = self.client.add_event_handler(on_update, events.Raw)
+        try:
+            uploaded = await self.client.upload_file(str(source))
+            try:
+                result = await self.client(make(file=uploaded))
+            except Exception as exc:
+                raise self._explain(exc) from exc
+            wanted["id"] = result.transcription_id
+            text = result.text or ""
+            pending = bool(getattr(result, "pending", False))
+            if pending and wanted["id"] in early:
+                text, pending = early[wanted["id"]], False
+            elif pending:
+                try:
+                    text = await asyncio.wait_for(done, timeout=wait)
+                    pending = False
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            self.client.remove_event_handler(on_update, handler)
+        return {"file": str(source), "text": text, "pending": pending,
+                "transcription_id": result.transcription_id,
+                "free_left": getattr(result, "trial_remains_num", None)}
+
     async def transcribe(self, peer: Any, msg_id: int, *, wait: float = WAIT_SECONDS,
                          check_kind: bool = True) -> dict[str, Any]:
         """Расшифровать голосовое или кружок и дождаться готового текста."""

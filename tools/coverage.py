@@ -97,8 +97,24 @@ NA = {  # неприменимо к терминальному клиенту �
  ("messages","GetEmojiKeywordsLanguages"),("messages","GetEmojiKeywords"),
  ("messages","GetEmojiURL"),
 }
+NA |= {
+ # кошелёк TON самохранимый: эти методы принимают подписанное сообщение блокчейна
+ # или ключевой материал. Описаний нет, проверить можно только деньгами — tgx
+ # их не собирает и отказывает словами (`tgx wallet send` и др.)
+ ("wallet","SendTransfer"),("wallet","ExportSecretPhrase"),
+ ("wallet","FetchEncryptedSecretPhrasePart"),("wallet","GetBackupHolderDcs"),
+ ("wallet","EnableBackup"),("wallet","DisableBackup"),("wallet","ReplaceWallet"),
+ ("wallet","GetProofChallenge"),
+ # наклейки-NFT на карточке кошелька расставляются по координатам — без экрана никак
+ ("wallet","SetCardStickers"),
+ ("wallet","TonConnectCreateSession"),("wallet","TonConnectRegisterKey"),
+ ("wallet","TonConnectSubmitConnectResult"),("wallet","TonConnectSubmitResponse"),
+ ("wallet","TonConnectNextEventId"),
+ # поток событий блокчейна — для живого клиента, а не для команды
+ ("toncenter","GetStreamingUrl"),
+}
 DEFAULT = ["payments", "messages", "channels", "account", "phone", "stories",
-           "contacts", "bots", "chatlists", "stickers", "stats"]
+           "contacts", "bots", "chatlists", "stickers", "stats", "wallet", "toncenter"]
 WANT = sys.argv[1:] or DEFAULT
 ONE = len(sys.argv) > 1
 print(f"{'раздел':10} {'есть':>6} {'обёртки':>8} {'н/п':>5} {'пробел':>7}  {'по делу':>8}")
@@ -106,7 +122,9 @@ print("-"*52)
 gaps = {}
 T = [0,0,0,0]
 for ns in WANT:
-    mod = getattr(functions, ns)
+    mod = getattr(functions, ns, None)
+    if mod is None:            # раздела нет в этом слое (wallet — с 233)
+        continue
     all_m = [n[:-7] for n in dir(mod) if n.endswith("Request") and n != "TLRequest"]
     all_m = [m for m in all_m if m != "TL"]
     have = [m for m in all_m if (ns,m) in direct]
@@ -122,6 +140,6 @@ reach=T[0]+T[1]; useful=reach+T[3]
 print(f"{'итого':10} {T[0]:6} {T[1]:8} {T[2]:5} {T[3]:7}  {reach/useful*100:7.0f}%")
 print("\n(«по делу» = покрыто / (покрыто + пробелы), без неприменимого)\n")
 for ns in WANT:
-    if gaps[ns] and (ONE or len(WANT) <= 12):
+    if gaps.get(ns) and (ONE or len(WANT) <= 14):
         print(f"### {ns} — пробелы ({len(gaps[ns])})")
         print(", ".join(sorted(gaps[ns])), "\n")

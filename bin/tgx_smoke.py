@@ -4515,6 +4515,192 @@ async def layer_233_regression() -> None:
     await run()
 
 
+async def wallet_and_callbacks_regression() -> None:
+    """Кошелёк TON (слой 233) и нажатия на кнопки со стороны бота (Bot API 10.5).
+
+    Сети здесь нет: клиент Telegram и Bot API подменены. Проверяется то, что
+    можно испортить молча, — суммы в нанотонах, адрес сообщения в трёх режимах
+    callback_query_mode, разбор ответа обработчика и границы кошелька: всё, что
+    требует ключа, обязано отказывать словами, а не собираться вслепую."""
+    import sys
+    import types as pytypes
+
+    from telethon.tl import functions
+
+    import tgx_callbacks as C
+    import tgx_pay
+    import tgx_transcribe
+    import tgx_wallet as W
+
+    layer233 = hasattr(functions, "wallet")
+
+    # ── суммы и проверки до сети ──
+    check("нанотоны читаются как TON без потери знаков",
+          W.ton(1_500_000_000) == "1.5 TON" and W.ton(1) == "0.000000001 TON" and W.ton(0) == "0 TON"
+          and W.ton(-2 * W.NANO) == "-2 TON")
+    refused = []
+    for bad in ({"provider": "", "crypto": "TON", "address": "x"},
+                {"provider": "p", "crypto": "TON", "address": "x", "base_amount": "5", "crypto_amount": "1"},
+                {"provider": "p", "crypto": "TON", "address": "x", "base_amount": "-5"}):
+        try:
+            W.onramp_payload(**bad)
+        except W.WalletError:
+            refused.append(bad)
+    check("покупка криптовалюты: пустое, двойная сумма и минус — до сети", len(refused) == 3)
+    check("покупка криптовалюты: тело запроса собирается",
+          W.onramp_payload("prov", "ton", "UQabc", base="usd", base_amount="50")
+          == {"provider": "prov", "crypto_currency": "TON", "address": "UQabc",
+              "base_currency": "USD", "base_amount": "50"})
+    try:
+        W.Wallet.needs_key()
+        said = ""
+    except W.WalletError as exc:
+        said = str(exc)
+    check("перевод и сид-фраза отказывают словами, а не собираются вслепую",
+          "ключ" in said and "приложении Telegram" in said)
+
+    tx = pytypes.SimpleNamespace(id="t1", amount=2 * W.NANO, fee=5_000_000, date=None, incoming=False,
+                                 failed=True, gasless=False, key_change=False, comment="за кофе",
+                                 comment_encrypted=None, nft=None,
+                                 peer=type("WalletTransactionPeerAddress", (), {"address": "UQx", "domain": "shop.ton"})())
+    row = W.transaction(tx)
+    check("операция кошелька: знак, комиссия, получатель и отметка о сбое",
+          row["сумма"] == "−2 TON" and row["комиссия"] == "0.005 TON"
+          and row["с кем"] == "shop.ton" and "не прошла" in row["отметки"])
+
+    class FakeClient:
+        def __init__(self, reply: Any) -> None:
+            self.reply, self.sent = reply, []
+
+        async def __call__(self, request: Any) -> Any:
+            self.sent.append(request)
+            return self.reply
+
+    if layer233:
+        empty = type("WalletStateEmpty", (), {"creating": False})()
+        check("кошелька нет — так и сказано", await W.Wallet(FakeClient(empty)).state() == {"кошелёк": "не создан"})
+        full = type("WalletState", (), {"address": "UQme", "balance": 3 * W.NANO, "backup_enabled": True,
+                                        "can_export_phrase": False})()
+        check("кошелёк: адрес и баланс в TON", (await W.Wallet(FakeClient(full)).state())["баланс"] == "3 TON")
+        fake = FakeClient(True)
+        await W.Wallet(fake).decline(7, 9, "app-1")
+        check("запрос приложения отклоняется флагом declined, без подписи",
+              fake.sent[0].declined is True and fake.sent[0].challenge_answer is None)
+    else:
+        try:
+            await W.Wallet(FakeClient(None)).state()
+            gate = ""
+        except W.WalletError as exc:
+            gate = str(exc)
+        check("кошелёк на старом Telethon — отказ с версией", "1.46" in gate)
+
+    # ── подарки ──
+    check("подарок адресуется номером сообщения или слагом",
+          type(tgx_pay.Pay._gift_ref("42")).__name__ == "InputSavedStarGiftUser"
+          and tgx_pay.Pay._gift_ref("https://t.me/nft/Cap-7").slug == "Cap-7")
+
+    # ── расшифровка файла ──
+    try:
+        await tgx_transcribe.Transcriber(FakeClient(None)).transcribe_file(str(OUT / "нет-такого.ogg"))
+        said = ""
+    except tgx_transcribe.TranscribeError as exc:
+        said = str(exc)
+    check("расшифровка файла: нет файла или старый Telethon — словами",
+          ("нет" in said) if layer233 else ("1.46" in said))
+
+    # ── нажатия: три режима адресации ──
+    chat_msg = {"update_id": 1, "callback_query": {
+        "id": "q1", "from": {"id": 5, "username": "ann"}, "data": "vote:yes", "chat_instance": "ci",
+        "message": {"message_id": 77, "date": 1700000000, "chat": {"id": -100}, "text": "Голосуем?"}}}
+    gone_msg = {"update_id": 2, "callback_query": {
+        "id": "q2", "from": {"id": 5}, "data": "vote:no",
+        "message": {"message_id": 78, "date": 0, "chat": {"id": -100}}}}
+    inline_msg = {"update_id": 3, "callback_query": {
+        "id": "q3", "from": {"id": 6, "first_name": "Bo"}, "data": "vote:yes", "inline_message_id": "AbC"}}
+    check("нажатие в чате: адрес — чат и номер",
+          C.target(chat_msg["callback_query"]) == {"chat_id": -100, "message_id": 77}
+          and C.normalize(chat_msg)["сообщение"] == "доступно")
+    check("нажатие в режиме inline/auto: адрес — inline_message_id",
+          C.target(inline_msg["callback_query"]) == {"inline_message_id": "AbC"}
+          and C.normalize(inline_msg)["сообщение"] == "инлайн")
+    try:
+        C.target(gone_msg["callback_query"])
+        hint = ""
+    except C.CallbackError as exc:
+        hint = str(exc)
+    check("недоступное сообщение не правится и подсказывает --callback-mode auto",
+          "--callback-mode auto" in hint and C.normalize(gone_msg)["сообщение"] == "недоступно")
+    check("не нажатие — не запись", C.normalize({"update_id": 4, "message": {}}) is None)
+
+    method, body = C.edit_payload({"inline_message_id": "AbC"}, text="Принято", buttons="")
+    check("правка по inline_message_id: текст и снятые кнопки",
+          method == "editMessageText" and body["inline_message_id"] == "AbC"
+          and body["reply_markup"] == {"inline_keyboard": []} and "chat_id" not in body)
+    method, body = C.edit_payload({"chat_id": 1, "message_id": 2}, buttons="Ещё=cb:more")
+    check("только кнопки — свой метод",
+          method == "editMessageReplyMarkup" and body["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "more")
+    for bad in (lambda: C.answer_payload("q", text="x" * 201), lambda: C.answer_payload(""),
+                lambda: C.address(chat=1, message_id=2, inline_message_id="A"), lambda: C.address()):
+        try:
+            bad()
+            ok = False
+        except C.CallbackError:
+            ok = True
+        if not ok:
+            break
+    check("ответ и адрес правки проверяются до сети", ok)
+
+    # обработчик — настоящий подпроцесс
+    py = [sys.executable, "-c"]
+    reply = C.run_handler(py + ["import json,sys; d=json.load(sys.stdin); "
+                                "print(json.dumps({'answer': 'ok ' + d['data'], 'edit': {'text': 'готово'}}))"],
+                          C.normalize(inline_msg))
+    check("обработчик получает нажатие и отвечает JSON-ом",
+          reply == {"answer": "ok vote:yes", "edit": {"text": "готово"}})
+    check("строка из обработчика — всплывающий ответ",
+          C.run_handler(py + ["import os; print('ты нажал', os.environ['TGX_CALLBACK_DATA'])"],
+                        C.normalize(chat_msg)) == {"answer": "ты нажал vote:yes"})
+    check("упавший обработчик не оставляет часики крутиться",
+          C.run_handler(py + ["raise SystemExit(3)"], {"id": "q"})["answer"] == "")
+    check("зависший обработчик обрывается",
+          "не уложился" in C.run_handler(py + ["import time; time.sleep(5)"], {"id": "q"}, timeout=0.5)["ошибка"])
+
+    # serve целиком: подменённый Bot API, три нажатия, одно с чужим префиксом
+    calls: list[tuple[str, dict[str, Any]]] = []
+    real_call = C.call
+
+    def fake_call(token: str, method: str, payload: dict[str, Any] | None = None) -> Any:
+        calls.append((method, payload or {}))
+        return True
+
+    class FakeUpdates:
+        committed = False
+
+        def stream(self, until: Any = None, limit: int = 0) -> Any:
+            yield chat_msg
+            yield {"update_id": 9, "callback_query": {"id": "q9", "from": {"id": 1}, "data": "other:1",
+                                                      "message": {"message_id": 1, "date": 1, "chat": {"id": 1}}}}
+            yield inline_msg
+
+        def commit(self) -> None:
+            FakeUpdates.committed = True
+
+    C.call = fake_call
+    try:
+        out: list[dict[str, Any]] = []
+        handled = C.serve("T", "handler", data_prefix="vote:", emit=out.append, updates=FakeUpdates(),
+                          runner=lambda argv, press: {"answer": "есть", "edit": {"text": "учтено"}})
+    finally:
+        C.call = real_call
+    edits = [p for m, p in calls if m == "editMessageText"]
+    answers = [p["callback_query_id"] for m, p in calls if m == "answerCallbackQuery"]
+    check("обработчик: два своих нажатия, чужое — пустым ответом", handled == 2 and answers == ["q1", "q9", "q3"])
+    check("правка уходит по адресу из нажатия — и чатом, и inline",
+          edits == [{"chat_id": -100, "message_id": 77, "text": "учтено"},
+                    {"inline_message_id": "AbC", "text": "учтено"}])
+    check("полученное подтверждается, чтобы не прийти снова", FakeUpdates.committed)
+
+
 def button_layer_regression() -> None:
     """Кнопки читаются и собираются одинаково на слоях TL 227 и 229.
 
@@ -4652,6 +4838,7 @@ async def main() -> int:
     media_probe_regression()
     shadowed_method_regression()
     button_layer_regression()
+    await wallet_and_callbacks_regression()
     await layer_233_regression()
     # drive the UI under the same task factory the real terminal driver installs
     asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
